@@ -4675,8 +4675,18 @@ app.get('/api/leads/:id', authenticateToken, async (req, res) => {
       angebote.push({ ...ang, items: enrichedAngItems, extras: angExtras.rows });
     }
 
+    // MODÜL B: include the linked source Aufmaß id so the frontend can fetch
+    // its photos (aufmass_bilder) when regenerating the Angebot PDF outside
+    // the LeadFormModal save path (e.g. lead-list PDF preview / e-mail send).
+    const aufmassFormRes = await pool.query(
+      'SELECT id FROM aufmass_forms WHERE lead_id = $1 ORDER BY id ASC LIMIT 1',
+      [id]
+    );
+    const aufmass_form_id = aufmassFormRes.rows[0]?.id || null;
+
     res.json({
       ...lead,
+      aufmass_form_id,
       items: enrichedLeadItems,
       extras: extrasResult.rows,
       angebote

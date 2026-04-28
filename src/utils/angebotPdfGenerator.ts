@@ -1,5 +1,11 @@
 import { jsPDF } from 'jspdf';
 import { getCompanyInfoForPdf } from './companyInfoCache';
+import {
+  fetchServerImageAsBase64,
+  fixImageOrientationAuto,
+  getImageDimensions,
+  type ServerImage,
+} from './pdfGenerator';
 
 export interface BranchCompanyInfoForPdf {
   company_name: string;
@@ -73,6 +79,10 @@ export interface AngebotPdfData {
   // Meta
   created_at?: string;
   angebotNummer?: string;
+
+  // MODÜL B — Photos pulled from a source Aufmaß. Same handling as the
+  // Aufmaß PDF generator (server fetch → EXIF orientation fix → embed).
+  bilder?: ServerImage[];
 }
 
 const formatPrice = (price: number) => {
@@ -501,6 +511,76 @@ export const generateAngebotPDF = async (
   pdf.setTextColor(80, 80, 80);
   pdf.text('Datum, Unterschrift Kunde/Auftraggeber', totalBoxX, yPos);
   pdf.setTextColor(0, 0, 0);
+
+  // ============ MODÜL B — BILDER (from source Aufmaß) ============
+  // Mirrors the photo-embed pass in pdfGenerator.ts. Image-typed entries only;
+  // PDF attachments on the Aufmaß are intentionally skipped here so the
+  // Angebot PDF stays focused on visual context for the customer.
+  const aufmassImages = (data.bilder || []).filter(b =>
+    (b.file_type || '').startsWith('image/')
+  );
+  if (aufmassImages.length > 0) {
+    pdf.addPage();
+    let imgYPos = 20;
+
+    pdf.setFontSize(14);
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFillColor(127, 169, 61);
+    pdf.rect(margin, imgYPos - 5, pageWidth - 2 * margin, 8, 'F');
+    pdf.setTextColor(255, 255, 255);
+    pdf.text('BILDER VOM AUFMASS', margin + 2, imgYPos);
+    imgYPos += 15;
+
+    pdf.setTextColor(0, 0, 0);
+    pdf.setFontSize(10);
+
+    for (let i = 0; i < aufmassImages.length; i++) {
+      const item = aufmassImages[i];
+      try {
+        let base64 = await fetchServerImageAsBase64(item.id);
+        try {
+          base64 = await fixImageOrientationAuto(base64);
+        } catch {
+          // Use original if orientation fix fails — non-critical
+        }
+
+        const dimensions = await getImageDimensions(base64);
+        const maxWidth = pageWidth - 2 * margin;
+        const maxHeight = 80;
+
+        let imgWidth = dimensions.width;
+        let imgHeight = dimensions.height;
+        if (imgWidth > maxWidth) {
+          const ratio = maxWidth / imgWidth;
+          imgWidth = maxWidth;
+          imgHeight = imgHeight * ratio;
+        }
+        if (imgHeight > maxHeight) {
+          const ratio = maxHeight / imgHeight;
+          imgHeight = maxHeight;
+          imgWidth = imgWidth * ratio;
+        }
+
+        if (imgYPos + imgHeight + 15 > pageHeight - 20) {
+          pdf.addPage();
+          imgYPos = 20;
+        }
+
+        pdf.setFont('helvetica', 'bold');
+        pdf.text(`Bild ${i + 1}: ${item.file_name}`, margin, imgYPos);
+        imgYPos += 5;
+
+        const xPos = margin + (maxWidth - imgWidth) / 2;
+        pdf.addImage(base64, 'JPEG', xPos, imgYPos, imgWidth, imgHeight);
+        imgYPos += imgHeight + 15;
+      } catch (err) {
+        console.error('Failed to embed Aufmaß image in Angebot PDF:', err);
+        pdf.setFont('helvetica', 'italic');
+        pdf.text(`Bild ${i + 1}: ${item.file_name} - Konnte nicht geladen werden`, margin, imgYPos);
+        imgYPos += 10;
+      }
+    }
+  }
 
   // ============ FOOTER ============
   const pageCount = (pdf as unknown as { internal: { getNumberOfPages: () => number } }).internal.getNumberOfPages();

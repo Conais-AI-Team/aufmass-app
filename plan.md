@@ -104,12 +104,12 @@
 - [x] **5.6** "Aus Aufmaß #N" header banner — kategori/ürün/model + ort özetiyle
 
 ### ADIM 6 — Angebot PDF generator'a foto embed
-**Dosya:** `src/utils/angebotPdfGenerator.ts`
+**Dosya:** `src/utils/pdfGenerator.ts`, `src/utils/angebotPdfGenerator.ts`, `src/components/LeadFormModal.tsx`
 
-- [ ] **6.1** `pdfGenerator.ts:1680-1795` foto embed pattern'ini port et
-- [ ] **6.2** `AngebotPdfData` interface'ine `bilder?: ServerImage[]` ekle
-- [ ] **6.3** LeadFormModal kayıttan sonra PDF üretirken `fromAufmass` mode'da Aufmaß'tan çekilen bilder'ları PDF'e geçirir
-- [ ] **6.4** Mevcut Schnellangebot için `bilder` boş → mevcut davranış değişmez
+- [x] **6.1** `pdfGenerator.ts`'in foto helper'ları export edildi (`fetchServerImageAsBase64`, `fixImageOrientationAuto`, `getImageDimensions`, `ServerImage` type) — kod duplikasyonu yok
+- [x] **6.2** `AngebotPdfData` interface'ine `bilder?: ServerImage[]` field'ı eklendi
+- [x] **6.3** Yeni "BILDER VOM AUFMASS" PDF section — fetch + EXIF fix + scaled embed; her foto yeni sayfaya sığmıyorsa otomatik page break
+- [x] **6.4** LeadFormModal normal-mode PDF üretimine `bilder: isFromAufmassMode ? aufmassImages : undefined` eklendi — Schnellangebot için boş, davranış aynı kaldı
 
 ### ADIM 7 — Dashboard'a "Angebot erstellen" butonu (Aufmaß listesi)
 **Dosya:** `src/pages/Dashboard.tsx`
@@ -160,8 +160,8 @@
 | 1 | `feat(modul-b): add backend cross-sync infrastructure for Aufmaß↔Lead status` | ADIM 1 + ADIM 2 | ✅ Atıldı (`fecc63b`) — testler geçti |
 | 2 | `feat(modul-b): add tab structure to Angebote page (Schnellangebot + Aus Aufmaß)` | ADIM 3 | ✅ Atıldı (`b9a6596`) — testler geçti |
 | 3 | `feat(modul-b): add "Aus Aufmaß" tab listing and "Angebot erstellen" button on Dashboard` | ADIM 4 + ADIM 7 | ✅ Atıldı (`5643678`) — testler geçti |
-| 4 | `feat(modul-b): seed LeadFormModal from Aufmaß and wire send-by-email auto-sync` | ADIM 5 + ADIM 8 | ⏳ Onay bekliyor |
-| 5 | `feat(modul-b): embed Aufmaß photos in Angebot PDF` | ADIM 6 | 📋 Yapılacak |
+| 4 | `feat(modul-b): seed LeadFormModal from Aufmaß and wire send-by-email auto-sync` | ADIM 5 + ADIM 8 | ✅ Atıldı (`b6114b4`) — testler geçti |
+| 5 | `feat(modul-b): embed Aufmaß photos in Angebot PDF` | ADIM 6 | ⏳ Onay bekliyor |
 | 6 | `feat(modul-b): admin-only manual mark-sent button + Versendet badge` | ADIM 9 + ADIM 10 | 📋 Yapılacak |
 | 7 | `fix(modul-b): <test sonucu>` veya `refactor(modul-b): <iyileştirme>` | ADIM 11 + 12 test sonucu varsa | 📋 Yapılacak |
 

@@ -717,7 +717,10 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
             item_discounts: itemDiscountsTotal,
             total_discount: totalDiscount || 0,
             total_discount_percent: getTotalDiscountPercent(),
-            total_price: calculateTotal()
+            total_price: calculateTotal(),
+            // MODÜL B: forward Aufmaß photos so the generator can embed them.
+            // Empty for non-fromAufmass modes — keeps prior behavior intact.
+            bilder: isFromAufmassMode ? aufmassImages : undefined
           }, { returnBlob: true });
 
           if (pdfResult?.blob) {

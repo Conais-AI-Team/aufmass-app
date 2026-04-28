@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf, getForms, markLeadAngebotAsSent } from '../services/api';
+import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf, getForms, getForm, markLeadAngebotAsSent } from '../services/api';
 import type { FormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
 import LeadFormModal from '../components/LeadFormModal';
@@ -79,6 +79,9 @@ interface LeadDetail extends Lead {
   items: LeadItem[];
   extras: LeadExtra[];
   angebote?: Angebot[];
+  // MODÜL B: id of the source Aufmaß (when this lead was created from one).
+  // Used to pull aufmass_bilder during PDF regenerate so photos stay embedded.
+  aufmass_form_id?: number | null;
 }
 
 const LEAD_STATUS_OPTIONS = [
@@ -370,6 +373,20 @@ export default function Angebote() {
     })[0];
   };
 
+  // MODÜL B: pull source-Aufmaß photos so the regenerated Angebot PDF still
+  // embeds them. Returns undefined when the lead has no linked Aufmaß or the
+  // fetch fails — generator skips the image section in that case.
+  const fetchAufmassBilder = async (lead: LeadDetail): Promise<{ id: number; file_name: string; file_type: string }[] | undefined> => {
+    if (!lead.aufmass_form_id) return undefined;
+    try {
+      const form = await getForm(lead.aufmass_form_id);
+      return form.bilder;
+    } catch (err) {
+      console.error('Failed to fetch Aufmaß bilder for PDF:', err);
+      return undefined;
+    }
+  };
+
   const buildPdfPayload = (lead: LeadDetail, angebot?: Angebot | null) => {
     const items = angebot?.items || lead.items || [];
     const extras = angebot?.extras || lead.extras || [];
@@ -438,7 +455,8 @@ export default function Angebote() {
       // Prefer angebot-level PDF when available — lead-level cache can be stale after edits
       if (latestAngebot) {
         // Always regenerate from current lead/angebot data to guarantee fresh content (Beschreibung etc.)
-        const pdfResult = await generateAngebotPDF(buildPdfPayload(leadDetail, latestAngebot), { returnBlob: true });
+        const bilder = await fetchAufmassBilder(leadDetail);
+        const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail, latestAngebot), bilder }, { returnBlob: true });
         if (!pdfResult?.blob) {
           throw new Error('PDF blob could not be generated');
         }
@@ -455,7 +473,8 @@ export default function Angebote() {
         return;
       }
 
-      const pdfResult = await generateAngebotPDF(buildPdfPayload(leadDetail), { returnBlob: true });
+      const bilder = await fetchAufmassBilder(leadDetail);
+      const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail), bilder }, { returnBlob: true });
       if (!pdfResult?.blob) {
         throw new Error('PDF blob could not be generated');
       }
@@ -481,7 +500,8 @@ export default function Angebote() {
         throw new Error(`Angebot ${angebotId} not found`);
       }
 
-      const pdfResult = await generateAngebotPDF(buildPdfPayload(leadDetail, angebot), { returnBlob: true });
+      const bilder = await fetchAufmassBilder(leadDetail);
+      const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail, angebot), bilder }, { returnBlob: true });
       if (!pdfResult?.blob) {
         throw new Error('PDF blob could not be generated');
       }
@@ -514,11 +534,14 @@ export default function Angebote() {
       const angeboteList = leadDetail.angebote || [];
       const angeboteAttachments: import('../components/EmailComposer').AngebotAttachment[] = [];
 
+      // MODÜL B: fetch source-Aufmaß bilder once and reuse for every PDF below
+      const bilder = await fetchAufmassBilder(leadDetail);
+
       // Generate and save PDF for each angebot
       for (const ang of angeboteList) {
         try {
           const pdfResult = await generateAngebotPDF(
-            buildPdfPayload(leadDetail, ang),
+            { ...buildPdfPayload(leadDetail, ang), bilder },
             { returnBlob: true }
           );
           if (pdfResult?.blob) {
@@ -535,7 +558,7 @@ export default function Angebote() {
       // If no angebote, generate lead-level PDF
       if (angeboteList.length === 0) {
         const pdfResult = await generateAngebotPDF(
-          buildPdfPayload(leadDetail, undefined),
+          { ...buildPdfPayload(leadDetail, undefined), bilder },
           { returnBlob: true }
         );
         if (pdfResult?.blob) {
@@ -572,8 +595,9 @@ export default function Angebote() {
       const angebot = leadDetail.angebote?.find(a => a.id === angebotId);
       if (!angebot) throw new Error(`Angebot ${angebotId} not found`);
 
+      const bilder = await fetchAufmassBilder(leadDetail);
       const pdfResult = await generateAngebotPDF(
-        buildPdfPayload(leadDetail, angebot),
+        { ...buildPdfPayload(leadDetail, angebot), bilder },
         { returnBlob: true }
       );
       if (!pdfResult?.blob) throw new Error('PDF blob could not be generated');
