@@ -1021,6 +1021,29 @@ export async function updateLeadStatus(leadId: number, status: string): Promise<
   return response.json();
 }
 
+// MODÜL B — Aufmaß ↔ Angebote sync
+// Auto-trigger: called after a successful Angebot e-mail send. Backend flips
+// angebot_sent_at on the lead and pushes every linked Aufmaß forward to
+// 'angebot_versendet'. Idempotent.
+export async function markLeadAngebotAsSent(leadId: number): Promise<{ message: string }> {
+  const response = await authFetch(`${API_BASE_URL}/leads/${leadId}/mark-angebot-sent`, {
+    method: 'POST'
+  });
+  if (!response.ok) throw new Error('Failed to mark Angebot as sent');
+  return response.json();
+}
+
+// MODÜL B — Admin-only manual override for the postal-mail case (no e-mail
+// flow ever fires). Backend rejects non-admin callers; UI hides the button
+// for office/user roles.
+export async function markLeadAngebotAsSentManual(leadId: number): Promise<{ message: string }> {
+  const response = await authFetch(`${API_BASE_URL}/leads/${leadId}/mark-angebot-sent-manual`, {
+    method: 'POST'
+  });
+  if (!response.ok) throw new Error('Failed to mark Angebot as sent (manual)');
+  return response.json();
+}
+
 // ============ LEAD PDF ============
 
 // Save generated PDF for a lead
