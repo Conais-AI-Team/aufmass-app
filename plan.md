@@ -86,12 +86,12 @@
 - [x] **3.5** "Neues Angebot" butonu sadece Tab 1'de görünür
 
 ### ADIM 4 — "Aus Aufmaß" tab listesi
-**Dosya:** `src/pages/Angebote.tsx` (tab içeriği)
+**Dosya:** `src/pages/Angebote.tsx`, `src/components/AusAufmassTab.tsx` (yeni), `src/components/AusAufmassTab.css` (yeni)
 
-- [ ] **4.1** `GET /api/forms` çağrısı → frontend filter: kunde DOLU (`kunde_vorname || kunde_nachname`) + ürün DOLU (`category && productType`). Status filtresi YOK.
-- [ ] **4.2** Kart listesi: kunde adı, ürün özet (kategori/productType/model), tarih, "Angebot erstellen" butonu
-- [ ] **4.3** Tıklayınca: state olarak `fromAufmassFormId` set + LeadFormModal aç (auto-fill mode)
-- [ ] **4.4** Search box (Tab 1'le aynı UX)
+- [x] **4.1** `GET /api/forms` çağrısı → frontend filter: kunde DOLU (`kunde_vorname || kunde_nachname`) + ürün DOLU (`category && productType`). Status filtresi YOK.
+- [x] **4.2** Kart listesi: kunde adı, ürün özet (kategori/productType/model), tarih, "Angebot erstellen" butonu
+- [x] **4.3** Tıklayınca: parent `onPickAufmass` callback ile toast (auto-fill ADIM 5'te aktif olacak)
+- [x] **4.4** Search box (kunde / ort / ürün)
 
 ### ADIM 5 — LeadFormModal'a `fromAufmass` mode + foto görüntüleme
 **Dosya:** `src/components/LeadFormModal.tsx`
@@ -120,9 +120,9 @@
 ### ADIM 7 — Dashboard'a "Angebot erstellen" butonu (Aufmaß listesi)
 **Dosya:** `src/pages/Dashboard.tsx`
 
-- [ ] **7.1** Aufmaß kartlarına buton: kunde DOLU + ürün DOLU şartı
-- [ ] **7.2** Tıklayınca `navigate('/angebote?tab=aus_aufmass&from_aufmass=<formId>')`
-- [ ] **7.3** Angebote sayfası bu query'yi yakalayıp LeadFormModal'ı `fromAufmassFormId` ile direkt açar (ADIM 3+4'le entegre)
+- [x] **7.1** Aufmaß kartlarına buton: kunde DOLU + ürün DOLU şartı
+- [x] **7.2** Tıklayınca `navigate('/angebote?tab=aus_aufmass&from_aufmass=<formId>')`
+- [x] **7.3** Angebote sayfası bu query'yi yakalayıp toast ile bilgilendirir (LeadFormModal entegrasyonu ADIM 5'te tamamlanacak)
 
 ### ADIM 8 — EmailComposer entegrasyonu (Soru-3-a + b)
 **Dosya:** `src/components/EmailComposer.tsx`
@@ -164,8 +164,8 @@
 | # | Commit Mesajı (Conventional) | Kapsam | Durum |
 |---|------------------------------|--------|-------|
 | 1 | `feat(modul-b): add backend cross-sync infrastructure for Aufmaß↔Lead status` | ADIM 1 + ADIM 2 | ✅ Atıldı (`fecc63b`) — testler geçti |
-| 2 | `feat(modul-b): add tab structure to Angebote page (Schnellangebot + Aus Aufmaß)` | ADIM 3 | ⏳ Onay bekliyor |
-| 3 | `feat(modul-b): add "Aus Aufmaß" tab listing and "Angebot erstellen" button on Dashboard` | ADIM 4 + ADIM 7 | 📋 Yapılacak |
+| 2 | `feat(modul-b): add tab structure to Angebote page (Schnellangebot + Aus Aufmaß)` | ADIM 3 | ✅ Atıldı (`b9a6596`) — testler geçti |
+| 3 | `feat(modul-b): add "Aus Aufmaß" tab listing and "Angebot erstellen" button on Dashboard` | ADIM 4 + ADIM 7 | ⏳ Onay bekliyor |
 | 4 | `feat(modul-b): add fromAufmass mode and photo display in LeadFormModal` | ADIM 5 | 📋 Yapılacak |
 | 5 | `feat(modul-b): embed Aufmaß photos in Angebot PDF` | ADIM 6 | 📋 Yapılacak |
 | 6 | `feat(modul-b): wire two-way sync triggers (auto + admin manual mark-sent)` | ADIM 8 + ADIM 9 + ADIM 10 | 📋 Yapılacak |

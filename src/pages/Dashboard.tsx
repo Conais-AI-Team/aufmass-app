@@ -1696,6 +1696,20 @@ Aylux Team`;
                         <span>Anhang</span>
                       </button>
                     )}
+                    {/* MODÜL B — "Angebot erstellen" button: kunde + ürün dolu olan
+                        Aufmaß'larda görünür. Tıklayınca Angebote sayfasını "Aus Aufmaß"
+                        tab'ında açar ve ?from_aufmass=<id> ile auto-fill akışını tetikler. */}
+                    {Boolean(((form.kundeVorname || '').trim() || (form.kundeNachname || '').trim()) &&
+                             ((form.category || '').trim() && (form.productType || '').trim())) && (
+                      <button
+                        className="action-btn"
+                        title="Angebot aus diesem Aufmaß erstellen"
+                        onClick={() => navigate(`/angebote?tab=aus_aufmass&from_aufmass=${form.id}`)}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14,2 14,8 20,8" /><path d="M12 18v-6" /><path d="M9 15h6" /></svg>
+                        <span>Angebot</span>
+                      </button>
+                    )}
                     {/* Restore button - only for forms in Papierkorb */}
                     {getFormStatus(form) === 'papierkorb' && (
                       <button className="action-btn restore" onClick={() => handleRestore(form.id!)} title="Wiederherstellen">

@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf } from '../services/api';
+import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf, getForms } from '../services/api';
+import type { FormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
 import LeadFormModal from '../components/LeadFormModal';
 import EmailComposer from '../components/EmailComposer';
+import AusAufmassTab from '../components/AusAufmassTab';
 import { useToast } from '../components/Toast';
 import './Angebote.css';
 
@@ -135,6 +137,11 @@ export default function Angebote() {
     setSearchParams(next, { replace: true });
   };
 
+  // MODÜL B — Aus Aufmaß tab state
+  const [aufmassForms, setAufmassForms] = useState<FormData[]>([]);
+  const [aufmassLoading, setAufmassLoading] = useState(false);
+  const [aufmassSearchQuery, setAufmassSearchQuery] = useState('');
+
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [leadModalOpen, setLeadModalOpen] = useState(false);
@@ -155,6 +162,45 @@ export default function Angebote() {
   useEffect(() => {
     loadLeads();
   }, []);
+
+  // MODÜL B — load Aufmaß forms when the Aus Aufmaß tab becomes active
+  useEffect(() => {
+    if (activeTab !== 'aus_aufmass') return;
+    if (aufmassForms.length > 0 || aufmassLoading) return;
+    setAufmassLoading(true);
+    getForms()
+      .then(setAufmassForms)
+      .catch(err => {
+        console.error('Failed to load Aufmaß forms:', err);
+        toast.error('Fehler', 'Aufmaß-Liste konnte nicht geladen werden.');
+      })
+      .finally(() => setAufmassLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // MODÜL B — handle deep-link from Dashboard "Angebot erstellen" button.
+  // Auto-fill into LeadFormModal arrives in ADIM 5; for now we surface a toast
+  // so the user knows which Aufmaß they picked and what's coming next.
+  // Why the ref: React StrictMode mounts effects twice in dev, which would
+  // fire the toast twice for the same Aufmaß ID. The ref gates per-ID so we
+  // only fire once even across the dev double-mount.
+  const fromAufmassParam = searchParams.get('from_aufmass');
+  const handledFromAufmass = useRef<string | null>(null);
+  useEffect(() => {
+    if (!fromAufmassParam) return;
+    if (activeTab !== 'aus_aufmass') return;
+    if (handledFromAufmass.current === fromAufmassParam) return;
+    handledFromAufmass.current = fromAufmassParam;
+    toast.info(
+      'Aufmaß ausgewählt',
+      `Auto-fill für Aufmaß #${fromAufmassParam} wird im nächsten Schritt aktiviert.`
+    );
+    // Clear the param so a refresh doesn't re-fire the toast
+    const next = new URLSearchParams(searchParams);
+    next.delete('from_aufmass');
+    setSearchParams(next, { replace: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromAufmassParam, activeTab]);
 
   // Close status dropdown on outside click
   useEffect(() => {
@@ -638,9 +684,20 @@ export default function Angebote() {
       </div>
 
       {activeTab === 'aus_aufmass' ? (
-        <div className="aus-aufmass-placeholder">
-          <p>Aufmaß-Liste folgt im nächsten Schritt.</p>
-        </div>
+        <AusAufmassTab
+          forms={aufmassForms}
+          loading={aufmassLoading}
+          searchQuery={aufmassSearchQuery}
+          onSearchChange={setAufmassSearchQuery}
+          onPickAufmass={(formId) => {
+            // ADIM 5 wires this into LeadFormModal with auto-fill; for now we
+            // surface a toast so the user knows the click was registered.
+            toast.info(
+              'Aufmaß ausgewählt',
+              `Auto-fill für Aufmaß #${formId} wird im nächsten Schritt aktiviert.`
+            );
+          }}
+        />
       ) : (
         <>
 
