@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf, getForms } from '../services/api';
+import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf, getForms, markLeadAngebotAsSent } from '../services/api';
 import type { FormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
 import LeadFormModal from '../components/LeadFormModal';
@@ -141,6 +141,9 @@ export default function Angebote() {
   const [aufmassForms, setAufmassForms] = useState<FormData[]>([]);
   const [aufmassLoading, setAufmassLoading] = useState(false);
   const [aufmassSearchQuery, setAufmassSearchQuery] = useState('');
+  // When set, LeadFormModal opens in "fromAufmass" mode and pulls customer +
+  // product + measurements + photos from the chosen Aufmaß form.
+  const [fromAufmassFormId, setFromAufmassFormId] = useState<number | null>(null);
 
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
@@ -179,11 +182,9 @@ export default function Angebote() {
   }, [activeTab]);
 
   // MODÜL B — handle deep-link from Dashboard "Angebot erstellen" button.
-  // Auto-fill into LeadFormModal arrives in ADIM 5; for now we surface a toast
-  // so the user knows which Aufmaß they picked and what's coming next.
   // Why the ref: React StrictMode mounts effects twice in dev, which would
-  // fire the toast twice for the same Aufmaß ID. The ref gates per-ID so we
-  // only fire once even across the dev double-mount.
+  // open the modal twice for the same Aufmaß ID. The ref gates per-ID so we
+  // only act once even across the dev double-mount.
   const fromAufmassParam = searchParams.get('from_aufmass');
   const handledFromAufmass = useRef<string | null>(null);
   useEffect(() => {
@@ -191,16 +192,26 @@ export default function Angebote() {
     if (activeTab !== 'aus_aufmass') return;
     if (handledFromAufmass.current === fromAufmassParam) return;
     handledFromAufmass.current = fromAufmassParam;
-    toast.info(
-      'Aufmaß ausgewählt',
-      `Auto-fill für Aufmaß #${fromAufmassParam} wird im nächsten Schritt aktiviert.`
-    );
-    // Clear the param so a refresh doesn't re-fire the toast
+    const id = Number(fromAufmassParam);
+    if (Number.isFinite(id) && id > 0) {
+      openFromAufmass(id);
+    }
+    // Clear the param so a refresh doesn't re-fire the modal
     const next = new URLSearchParams(searchParams);
     next.delete('from_aufmass');
     setSearchParams(next, { replace: true });
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [fromAufmassParam, activeTab]);
+
+  // Open LeadFormModal seeded with an Aufmaß. Used by both the deep-link
+  // (Dashboard → URL param) and the per-card button in the Aus Aufmaß tab.
+  const openFromAufmass = (formId: number) => {
+    setEditLeadData(null);
+    setEditAngebotId(null);
+    setNewAngebotLeadId(null);
+    setFromAufmassFormId(formId);
+    setLeadModalOpen(true);
+  };
 
   // Close status dropdown on outside click
   useEffect(() => {
@@ -689,14 +700,7 @@ export default function Angebote() {
           loading={aufmassLoading}
           searchQuery={aufmassSearchQuery}
           onSearchChange={setAufmassSearchQuery}
-          onPickAufmass={(formId) => {
-            // ADIM 5 wires this into LeadFormModal with auto-fill; for now we
-            // surface a toast so the user knows the click was registered.
-            toast.info(
-              'Aufmaß ausgewählt',
-              `Auto-fill für Aufmaß #${formId} wird im nächsten Schritt aktiviert.`
-            );
-          }}
+          onPickAufmass={openFromAufmass}
         />
       ) : (
         <>
@@ -1019,18 +1023,30 @@ export default function Angebote() {
       {/* Lead Form Modal */}
       <LeadFormModal
         isOpen={leadModalOpen}
-        onClose={() => { setLeadModalOpen(false); setEditLeadData(null); setEditAngebotId(null); setNewAngebotLeadId(null); }}
-        onSuccess={() => {
+        onClose={() => { setLeadModalOpen(false); setEditLeadData(null); setEditAngebotId(null); setNewAngebotLeadId(null); setFromAufmassFormId(null); }}
+        onSuccess={(savedLeadId, sendEmail) => {
           setLeadModalOpen(false);
           setEditLeadData(null);
           setEditAngebotId(null);
           setNewAngebotLeadId(null);
+          setFromAufmassFormId(null);
           loadLeads();
           if (expandedLeadId) loadAngebote(expandedLeadId);
+          // MODÜL B Soru-3 (a): if the user ticked the "send by e-mail" box,
+          // open the EmailComposer for the freshly saved lead. The composer
+          // then triggers markLeadAngebotAsSent on a successful send.
+          if (sendEmail && savedLeadId) {
+            api.get<LeadDetail>(`/leads/${savedLeadId}`).then(leadDetail => {
+              if (leadDetail.customer_email) {
+                handleSendLeadByEmail(leadDetail);
+              }
+            }).catch(err => console.error('Auto-send after save failed:', err));
+          }
         }}
         editData={editLeadData}
         editAngebotId={editAngebotId}
         newAngebotForLeadId={newAngebotLeadId}
+        fromAufmassFormId={fromAufmassFormId}
       />
 
       {/* Detail Modal */}
@@ -1244,6 +1260,18 @@ export default function Angebote() {
             emailType={emailComposer.emailType}
             attachmentName={emailComposer.attachmentName}
             onClose={() => setEmailComposer(null)}
+            onSent={() => {
+              // MODÜL B Soru-3 (a) + (b): once an Angebot e-mail is sent,
+              // mark the lead and push every linked Aufmaß forward to
+              // angebot_versendet. Idempotent — safe to retry.
+              const sentLeadId = emailComposer.leadId;
+              const isAngebot = emailComposer.emailType === 'angebot';
+              if (sentLeadId && isAngebot) {
+                markLeadAngebotAsSent(sentLeadId)
+                  .then(() => loadLeads())
+                  .catch(err => console.error('mark-angebot-sent failed:', err));
+              }
+            }}
           />
         )}
       </AnimatePresence>

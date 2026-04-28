@@ -94,20 +94,14 @@
 - [x] **4.4** Search box (kunde / ort / ürün)
 
 ### ADIM 5 — LeadFormModal'a `fromAufmass` mode + foto görüntüleme
-**Dosya:** `src/components/LeadFormModal.tsx`
+**Dosya:** `src/components/LeadFormModal.tsx`, `src/components/LeadFormModal.css`, `src/pages/Angebote.tsx`
 
-- [ ] **5.1** Yeni prop: `fromAufmassFormId?: number`
-- [ ] **5.2** `useEffect` içinde:
-  - `getForm(fromAufmassFormId)` ile Aufmaß'ı çek (bilder dahil)
-  - **Kunde alanları** auto-fill (düzenlenebilir)
-  - **productRows** Aufmaß'ın `category + productType + model + specifications.breite/tiefe + weitereProdukte` ile doldurulur. Fiyat boş.
-  - **Notes** Aufmaß'ın `bemerkungen`'i kopyalanır (düzenlenebilir)
-- [ ] **5.3** **Bilder:** Yeni "Fotos vom Aufmaß" section — Aufmaß'taki resimleri `getImageUrl(id)` ile thumbnail grid'de göster (read-only, silme/ekleme YOK). Banner: "Diese Fotos werden im Angebot-PDF eingebettet."
-- [ ] **5.4** **"E-Mail senden" checkbox** (Soru-3-a):
-  - Form altına: "Angebot direkt per E-Mail senden"
-  - ✅ İşaretli + form kaydedildi → kayıt sonrası EmailComposer otomatik açılır, mail gönderilince `markLeadAngebotAsSent(leadId)` tetiklenir
-  - ❌ İşaretsiz → kaydet, kullanıcı sonra dashboard'dan gönderir
-- [ ] **5.5** Submit'te `aufmass_form_id` backend'e gönderilir → bağ kurulur
+- [x] **5.1** Yeni prop: `fromAufmassFormId?: number` + `isFromAufmassMode` türevi
+- [x] **5.2** `loadFromAufmass(id)`: kunde alanları, ölçüler (breite/tiefe), notes auto-fill, fiyat boş, weitereProdukte için multi-row başlangıç
+- [x] **5.3** "Fotos vom Aufmaß" section, read-only thumbnail grid, `getImageUrl(id)` ile servis ediliyor, info banner'lı
+- [x] **5.4** "Angebot direkt per E-Mail senden" checkbox; ✅ + kayıt → parent EmailComposer açar → mail başarısı → `markLeadAngebotAsSent(leadId)`. einzelangebote mode'da gizli (multi-lead durumunda anlamsız).
+- [x] **5.5** Submit payload'a `aufmass_form_id` eklenir (backend cross-sync için bağ kurulur)
+- [x] **5.6** "Aus Aufmaß #N" header banner — kategori/ürün/model + ort özetiyle
 
 ### ADIM 6 — Angebot PDF generator'a foto embed
 **Dosya:** `src/utils/angebotPdfGenerator.ts`
@@ -125,10 +119,10 @@
 - [x] **7.3** Angebote sayfası bu query'yi yakalayıp toast ile bilgilendirir (LeadFormModal entegrasyonu ADIM 5'te tamamlanacak)
 
 ### ADIM 8 — EmailComposer entegrasyonu (Soru-3-a + b)
-**Dosya:** `src/components/EmailComposer.tsx`
+**Dosya:** `src/pages/Angebote.tsx` (EmailComposer'ın `onSent` callback'i)
 
-- [ ] **8.1** Mevcut Angebot mail gönderme akışı (`emailType: 'angebot'`) — mail başarıyla gönderildikten sonra `leadId` varsa `markLeadAngebotAsSent(leadId)` çağrılır
-- [ ] **8.2** Tek nokta: hem ADIM 5.4 (form içi checkbox akışı), hem mevcut Dashboard kart "E-Mail senden" akışı (Soru-3-b)
+- [x] **8.1** Mail başarıyla gönderildiğinde `emailType === 'angebot'` ise `markLeadAngebotAsSent(leadId)` çağrılır + `loadLeads` ile rozet güncellenir
+- [x] **8.2** Tek nokta: hem ADIM 5.4 form içi checkbox akışı, hem mevcut Dashboard kart "E-Mail senden" akışı (Soru-3-b) buradan geçer (her ikisi de aynı `setEmailComposer` → aynı `onSent`)
 
 ### ADIM 9 — Manuel "Gönderildi olarak işaretle" butonu (Soru-3-c, ADMIN-only)
 **Dosya:** `src/pages/Angebote.tsx`
@@ -165,10 +159,10 @@
 |---|------------------------------|--------|-------|
 | 1 | `feat(modul-b): add backend cross-sync infrastructure for Aufmaß↔Lead status` | ADIM 1 + ADIM 2 | ✅ Atıldı (`fecc63b`) — testler geçti |
 | 2 | `feat(modul-b): add tab structure to Angebote page (Schnellangebot + Aus Aufmaß)` | ADIM 3 | ✅ Atıldı (`b9a6596`) — testler geçti |
-| 3 | `feat(modul-b): add "Aus Aufmaß" tab listing and "Angebot erstellen" button on Dashboard` | ADIM 4 + ADIM 7 | ⏳ Onay bekliyor |
-| 4 | `feat(modul-b): add fromAufmass mode and photo display in LeadFormModal` | ADIM 5 | 📋 Yapılacak |
+| 3 | `feat(modul-b): add "Aus Aufmaß" tab listing and "Angebot erstellen" button on Dashboard` | ADIM 4 + ADIM 7 | ✅ Atıldı (`5643678`) — testler geçti |
+| 4 | `feat(modul-b): seed LeadFormModal from Aufmaß and wire send-by-email auto-sync` | ADIM 5 + ADIM 8 | ⏳ Onay bekliyor |
 | 5 | `feat(modul-b): embed Aufmaß photos in Angebot PDF` | ADIM 6 | 📋 Yapılacak |
-| 6 | `feat(modul-b): wire two-way sync triggers (auto + admin manual mark-sent)` | ADIM 8 + ADIM 9 + ADIM 10 | 📋 Yapılacak |
+| 6 | `feat(modul-b): admin-only manual mark-sent button + Versendet badge` | ADIM 9 + ADIM 10 | 📋 Yapılacak |
 | 7 | `fix(modul-b): <test sonucu>` veya `refactor(modul-b): <iyileştirme>` | ADIM 11 + 12 test sonucu varsa | 📋 Yapılacak |
 
 **Push politikası:** Local commit atılır, `git push` için ayrıca onay alınır. Kullanıcı "push at" demedikçe local'de kalır.

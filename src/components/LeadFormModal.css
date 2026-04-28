@@ -1226,3 +1226,71 @@
   background: #ffffff;
   color: #1f2937;
 }
+
+/* MODÜL B — Aus Aufmaß banner + photos + send-email checkbox */
+.from-aufmass-banner {
+  background: rgba(127, 169, 61, 0.12);
+  border: 1px solid rgba(127, 169, 61, 0.4);
+  border-radius: 8px;
+  padding: 0.85rem 1rem;
+  margin-bottom: 1.25rem;
+  color: var(--text-primary);
+  font-size: 0.9rem;
+}
+
+.from-aufmass-banner-hint {
+  margin-top: 0.4rem;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+}
+
+.aufmass-photos-hint {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  margin: 0 0 0.6rem 0;
+}
+
+.aufmass-photos-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 0.6rem;
+}
+
+.aufmass-photo-thumb {
+  display: block;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  overflow: hidden;
+  aspect-ratio: 4 / 3;
+  background: var(--bg-secondary);
+  transition: transform 0.15s, border-color 0.15s;
+}
+
+.aufmass-photo-thumb:hover {
+  transform: scale(1.02);
+  border-color: var(--accent-green, #7fa93d);
+}
+
+.aufmass-photo-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.send-email-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-right: auto;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.send-email-toggle input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  cursor: pointer;
+}
