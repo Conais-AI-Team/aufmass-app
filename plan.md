@@ -77,13 +77,13 @@
 - [x] **2.2** `markLeadAngebotAsSentManual(leadId)` → `POST /api/leads/:id/mark-angebot-sent-manual` (admin)
 
 ### ADIM 3 — Angebote.tsx'e tab yapısı
-**Dosya:** `src/pages/Angebote.tsx`
+**Dosya:** `src/pages/Angebote.tsx`, `src/pages/Angebote.css`
 
-- [ ] **3.1** 2 tab: "Schnellangebot" / "Aus Aufmaß"
-- [ ] **3.2** `activeTab` state, URL param ile saklanır (`?tab=schnell|aus_aufmass`) — test #6
-- [ ] **3.3** Tab 1: mevcut lead listesi (DOKUNULMAZ)
-- [ ] **3.4** Tab 2: ADIM 4'te dolacak placeholder
-- [ ] **3.5** "Neues Angebot" butonu sadece Tab 1'de görünür
+- [x] **3.1** 2 tab: "Schnellangebot" / "Aus Aufmaß"
+- [x] **3.2** `activeTab` state, URL param ile saklanır (`?tab=schnell|aus_aufmass`) — test #6
+- [x] **3.3** Tab 1: mevcut lead listesi (DOKUNULMAZ)
+- [x] **3.4** Tab 2: ADIM 4'te dolacak placeholder
+- [x] **3.5** "Neues Angebot" butonu sadece Tab 1'de görünür
 
 ### ADIM 4 — "Aus Aufmaß" tab listesi
 **Dosya:** `src/pages/Angebote.tsx` (tab içeriği)
@@ -163,8 +163,8 @@
 
 | # | Commit Mesajı (Conventional) | Kapsam | Durum |
 |---|------------------------------|--------|-------|
-| 1 | `feat(modul-b): add backend cross-sync infrastructure for Aufmaß↔Lead status` | ADIM 1 + ADIM 2 | ⏳ Onay bekliyor |
-| 2 | `feat(modul-b): add tab structure to Angebote page (Schnellangebot + Aus Aufmaß)` | ADIM 3 | 📋 Yapılacak |
+| 1 | `feat(modul-b): add backend cross-sync infrastructure for Aufmaß↔Lead status` | ADIM 1 + ADIM 2 | ✅ Atıldı (`fecc63b`) — testler geçti |
+| 2 | `feat(modul-b): add tab structure to Angebote page (Schnellangebot + Aus Aufmaß)` | ADIM 3 | ⏳ Onay bekliyor |
 | 3 | `feat(modul-b): add "Aus Aufmaß" tab listing and "Angebot erstellen" button on Dashboard` | ADIM 4 + ADIM 7 | 📋 Yapılacak |
 | 4 | `feat(modul-b): add fromAufmass mode and photo display in LeadFormModal` | ADIM 5 | 📋 Yapılacak |
 | 5 | `feat(modul-b): embed Aufmaß photos in Angebot PDF` | ADIM 6 | 📋 Yapılacak |

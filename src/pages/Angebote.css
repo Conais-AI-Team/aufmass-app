@@ -10,6 +10,44 @@
   margin-bottom: 2rem;
 }
 
+/* MODÜL B — Top-level tabs (Schnellangebot vs Aus Aufmaß) */
+.angebote-tabs {
+  display: flex;
+  gap: 0.25rem;
+  border-bottom: 1px solid var(--border-primary);
+  margin-bottom: 1.5rem;
+}
+
+.angebote-tab {
+  background: none;
+  border: none;
+  padding: 0.85rem 1.5rem;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.angebote-tab:hover {
+  color: var(--text-primary);
+}
+
+.angebote-tab.active {
+  color: var(--accent-green, #7fa93d);
+  border-bottom-color: var(--accent-green, #7fa93d);
+}
+
+.aus-aufmass-placeholder {
+  padding: 4rem 2rem;
+  text-align: center;
+  color: var(--text-secondary);
+  border: 1px dashed var(--border-primary);
+  border-radius: 8px;
+}
+
 .page-header h1 {
   margin: 0;
   font-size: 1.75rem;

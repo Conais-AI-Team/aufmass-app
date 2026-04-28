@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
 import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
@@ -117,9 +117,24 @@ const isLeadStatusBackward = (current: string, next: string): boolean => {
   return LEAD_STATUS_ORDER.indexOf(next) < LEAD_STATUS_ORDER.indexOf(current);
 };
 
+type AngeboteTab = 'schnell' | 'aus_aufmass';
+
 export default function Angebote() {
   const navigate = useNavigate();
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // MODÜL B: Tab persistence via URL param. Defaults to 'schnell' so the
+  // existing Angebote URL keeps showing the Schnellangebot list as before.
+  const tabParam = searchParams.get('tab');
+  const activeTab: AngeboteTab = tabParam === 'aus_aufmass' ? 'aus_aufmass' : 'schnell';
+  const setActiveTab = (tab: AngeboteTab) => {
+    const next = new URLSearchParams(searchParams);
+    if (tab === 'schnell') next.delete('tab');
+    else next.set('tab', tab);
+    setSearchParams(next, { replace: true });
+  };
+
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [leadModalOpen, setLeadModalOpen] = useState(false);
@@ -586,19 +601,48 @@ export default function Angebote() {
           <h1>Angebote</h1>
         </div>
         <div className="header-right">
-          <motion.button
-            className="btn-primary"
-            onClick={() => { setEditLeadData(null); setEditAngebotId(null); setNewAngebotLeadId(null); setLeadModalOpen(true); }}
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            Neues Angebot
-          </motion.button>
+          {activeTab === 'schnell' && (
+            <motion.button
+              className="btn-primary"
+              onClick={() => { setEditLeadData(null); setEditAngebotId(null); setNewAngebotLeadId(null); setLeadModalOpen(true); }}
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              Neues Angebot
+            </motion.button>
+          )}
         </div>
       </header>
+
+      {/* MODÜL B — Top-level tabs: Schnellangebot vs Aus Aufmaß */}
+      <div className="angebote-tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected={activeTab === 'schnell'}
+          className={`angebote-tab ${activeTab === 'schnell' ? 'active' : ''}`}
+          onClick={() => setActiveTab('schnell')}
+        >
+          Schnellangebot
+        </button>
+        <button
+          role="tab"
+          aria-selected={activeTab === 'aus_aufmass'}
+          className={`angebote-tab ${activeTab === 'aus_aufmass' ? 'active' : ''}`}
+          onClick={() => setActiveTab('aus_aufmass')}
+        >
+          Aus Aufmaß
+        </button>
+      </div>
+
+      {activeTab === 'aus_aufmass' ? (
+        <div className="aus-aufmass-placeholder">
+          <p>Aufmaß-Liste folgt im nächsten Schritt.</p>
+        </div>
+      ) : (
+        <>
 
       {/* Filter Tabs + Search */}
       <div className="lead-filters">
@@ -911,6 +955,8 @@ export default function Angebote() {
             </motion.div>
           ))}
         </div>
+      )}
+        </>
       )}
 
       {/* Lead Form Modal */}
