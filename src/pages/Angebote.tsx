@@ -44,6 +44,13 @@ interface Lead {
   // MODÜL B: timestamp set when an Angebot was sent (auto via e-mail flow
   // or admin-only manual override). NULL means nothing has been sent yet.
   angebot_sent_at?: string | null;
+  // MODÜL B: id of the source Aufmaß when this lead was created from one.
+  aufmass_form_id?: number | null;
+  // MODÜL B: status of that source Aufmaß. Schnellangebot only hides leads
+  // whose source is still 'neu' (Aufmaß Genommen) — those still appear in
+  // the Aus Aufmaß tab. Once the Aufmaß moves past Aufmaß Genommen the
+  // source disappears from Aus Aufmaß and the lead must show up here.
+  aufmass_form_status?: string | null;
 }
 
 interface ProductCustomField {
@@ -217,12 +224,25 @@ export default function Angebote() {
 
   // Open LeadFormModal seeded with an Aufmaß. Used by both the deep-link
   // (Dashboard → URL param) and the per-card button in the Aus Aufmaß tab.
-  const openFromAufmass = (formId: number) => {
-    setEditLeadData(null);
-    setEditAngebotId(null);
-    setNewAngebotLeadId(null);
-    setFromAufmassFormId(formId);
-    setLeadModalOpen(true);
+  // If the Aufmaß is already linked to a lead, open in edit mode against
+  // that lead so successive saves UPDATE instead of inserting duplicates.
+  const openFromAufmass = async (formId: number) => {
+    try {
+      const fresh = await getForm(formId);
+      setFromAufmassFormId(formId);
+      setEditAngebotId(null);
+      setNewAngebotLeadId(null);
+      if (fresh.lead_id) {
+        const leadDetail = await api.get<LeadDetail>(`/leads/${fresh.lead_id}`);
+        setEditLeadData(leadDetail);
+      } else {
+        setEditLeadData(null);
+      }
+      setLeadModalOpen(true);
+    } catch (err) {
+      console.error('Failed to open Aufmaß modal:', err);
+      toast.error('Fehler', 'Angebot-Formular konnte nicht geöffnet werden.');
+    }
   };
 
   // Close status dropdown on outside click
@@ -687,7 +707,16 @@ export default function Angebote() {
     });
   };
 
-  const filteredLeads = leads.filter(lead => {
+  // MODÜL B: only hide a lead from Schnellangebot while its source Aufmaß
+  // is still surfaced by the Aus Aufmaß tab (status === 'neu'). Once the
+  // Aufmaß moves past "Aufmaß Genommen" (e.g. angebot_versendet, abnahme)
+  // it leaves Aus Aufmaß, so the lead must reappear in Schnellangebot —
+  // otherwise the lead would disappear from the UI entirely.
+  const independentLeads = leads.filter(
+    l => !(l.aufmass_form_id && l.aufmass_form_status === 'neu')
+  );
+
+  const filteredLeads = independentLeads.filter(lead => {
     const matchesStatus = filterStatus === 'alle' || lead.status === filterStatus;
     const q = searchQuery.toLowerCase();
     const matchesSearch = !q ||
@@ -768,8 +797,8 @@ export default function Angebote() {
               <span>{option.label}</span>
               <span className="lead-tab-count">
                 {option.value === 'alle'
-                  ? leads.length
-                  : leads.filter(l => l.status === option.value).length}
+                  ? independentLeads.length
+                  : independentLeads.filter(l => l.status === option.value).length}
               </span>
             </button>
           ))}

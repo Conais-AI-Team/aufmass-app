@@ -21,8 +21,12 @@ const formatDate = (iso?: string) => {
 };
 
 const isAufmassEligible = (f: FormData): boolean => {
-  // Spec: "Kunde bilgisi DOLU VE ürün seçimi DOLU" — model is optional for
-  // some categories (MARKISE), so we require category + productType only.
+  // Only Aufmaße that finished the measurement step ("Aufmaß Genommen",
+  // backend status='neu') belong here — earlier states (entwurf) aren't
+  // ready to quote yet, later ones already have a quote / order.
+  if (f.status !== 'neu') return false;
+  // Defence-in-depth: still require customer + product to be filled in,
+  // so a half-filled record never sneaks in.
   const hasKunde = Boolean((f.kundeVorname || '').trim() || (f.kundeNachname || '').trim());
   const hasProduct = Boolean((f.category || '').trim() && (f.productType || '').trim());
   return hasKunde && hasProduct;

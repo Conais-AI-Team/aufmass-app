@@ -500,18 +500,31 @@ const FORM_STATUS_ORDER = [
   'reklamation_abgelehnt',
 ];
 
-// When a form's status moves to 'angebot_versendet', flag the linked lead
-// (if any) so the Angebote list can show a "Versendet" badge.
+// Keep the linked lead's "Versendet" flag in sync with the form's status:
+// - status >= angebot_versendet  → angebot_sent_at = NOW() (idempotent)
+// - status <  angebot_versendet  → angebot_sent_at = NULL  (badge clears)
+// Unknown statuses are ignored. Forms with no linked lead are no-ops.
 async function syncLeadFromForm(formId, newStatus) {
-  if (newStatus !== 'angebot_versendet') return;
   const linkRes = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [formId]);
   const leadId = linkRes.rows[0]?.lead_id;
   if (!leadId) return;
-  await pool.query(
-    `UPDATE aufmass_leads SET angebot_sent_at = NOW(), updated_at = NOW()
-     WHERE id = $1 AND angebot_sent_at IS NULL`,
-    [leadId]
-  );
+
+  const targetIdx = FORM_STATUS_ORDER.indexOf('angebot_versendet');
+  const newIdx = FORM_STATUS_ORDER.indexOf(newStatus);
+  if (newIdx === -1) return;
+
+  if (newIdx >= targetIdx) {
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = COALESCE(angebot_sent_at, NOW()), updated_at = NOW()
+       WHERE id = $1`,
+      [leadId]
+    );
+  } else {
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = NULL, updated_at = NOW() WHERE id = $1`,
+      [leadId]
+    );
+  }
 }
 
 // When an Angebot is marked as sent for a lead, push every linked form forward
@@ -4502,9 +4515,14 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
 app.get('/api/leads', authenticateToken, async (req, res) => {
   try {
     let query, params;
+    // MODÜL B: aufmass_form_id surfaced via subquery so the Schnellangebot
+    // tab can filter out leads that originated from an Aufmaß (those live
+    // in the Aus Aufmaß tab as their source form's "Lead #N" badge).
     if (req.branchId) {
       query = `SELECT l.*, u.name as created_by_name,
-               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count
+               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count,
+               (SELECT MIN(id) FROM aufmass_forms WHERE lead_id = l.id) as aufmass_form_id,
+               (SELECT status FROM aufmass_forms WHERE lead_id = l.id ORDER BY id ASC LIMIT 1) as aufmass_form_status
                FROM aufmass_leads l
                LEFT JOIN aufmass_users u ON l.created_by = u.id
                WHERE l.branch_id = $1
@@ -4512,7 +4530,9 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       params = [req.branchId];
     } else {
       query = `SELECT l.*, u.name as created_by_name,
-               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count
+               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count,
+               (SELECT MIN(id) FROM aufmass_forms WHERE lead_id = l.id) as aufmass_form_id,
+               (SELECT status FROM aufmass_forms WHERE lead_id = l.id ORDER BY id ASC LIMIT 1) as aufmass_form_status
                FROM aufmass_leads l
                LEFT JOIN aufmass_users u ON l.created_by = u.id
                ORDER BY l.created_at DESC`;
