@@ -162,7 +162,8 @@
 | 3 | `feat(modul-b): add "Aus Aufmaß" tab listing and "Angebot erstellen" button on Dashboard` | ADIM 4 + ADIM 7 | ✅ Atıldı (`5643678`) — testler geçti |
 | 4 | `feat(modul-b): seed LeadFormModal from Aufmaß and wire send-by-email auto-sync` | ADIM 5 + ADIM 8 | ✅ Atıldı (`b6114b4`) — testler geçti |
 | 5 | `feat(modul-b): embed Aufmaß photos in Angebot PDF` | ADIM 6 | ✅ Atıldı (`8e72294`) — testler geçti |
-| 6 | `feat(modul-b): admin-only manual mark-sent button + Versendet badge` | ADIM 9 + ADIM 10 | ⏳ Onay bekliyor |
+| 6 | `feat(modul-b): admin-only manual mark-sent button + Versendet badge` | ADIM 9 + ADIM 10 | ✅ Atıldı (`f7b6ba3`) — testler geçti |
+| 7 | `feat(modul-b): unify "Angebot Versendet" status flow into LeadFormModal across Dashboard and Bearbeiten` | Ek scope (Soru 1-A, 2-D, 3-F) | ⏳ Onay bekliyor |
 | 7 | `fix(modul-b): <test sonucu>` veya `refactor(modul-b): <iyileştirme>` | ADIM 11 + 12 test sonucu varsa | 📋 Yapılacak |
 
 **Push politikası:** Local commit atılır, `git push` için ayrıca onay alınır. Kullanıcı "push at" demedikçe local'de kalır.

@@ -1473,6 +1473,14 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
                       className={`breadcrumb-step-inner ${isActive ? 'active' : ''} ${isPast ? 'past' : ''}`}
                       style={{ '--step-color': step.color } as React.CSSProperties}
                       onClick={() => {
+                        // MODÜL B: skip the date dialog for "angebot_versendet"
+                        // — the parent intercepts onStatusChange and opens the
+                        // LeadFormModal instead. Backend cross-sync sets the
+                        // status_date automatically when the lead is saved.
+                        if (step.value === 'angebot_versendet' && onStatusChange) {
+                          onStatusChange(step.value);
+                          return;
+                        }
                         setPendingStatusValue(step.value);
                         setStatusDateValue(new Date().toISOString().split('T')[0]);
                         setStatusDateModalOpen(true);

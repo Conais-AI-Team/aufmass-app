@@ -155,13 +155,20 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
   const isEditMode = !!editData && !newAngebotForLeadId;
   const isNewAngebotMode = !!newAngebotForLeadId;
-  const isFromAufmassMode = !isEditMode && !isNewAngebotMode && !!fromAufmassFormId;
+  // MODÜL B: fromAufmass features (banner + photos) are available whenever
+  // a source Aufmaß id is provided, even in edit mode. The status-bar
+  // intercept always passes fromAufmassFormId so the user sees the Aufmaß
+  // context regardless of whether the lead already existed.
+  const isFromAufmassMode = !isNewAngebotMode && !!fromAufmassFormId;
+  // Auto-fill of customer/products/notes only happens when there is NO
+  // editData yet — edit mode keeps its own fields.
+  const isFromAufmassAutoFill = isFromAufmassMode && !isEditMode;
 
   // Initialize form
   useEffect(() => {
     if (isOpen) {
       loadProductNames();
-      if (isFromAufmassMode && fromAufmassFormId) {
+      if (isFromAufmassAutoFill && fromAufmassFormId) {
         // MODÜL B fromAufmass mode: pull customer + product hint + photos from
         // the source Aufmaß. Customer fields stay editable. Product picker is
         // left to the user (lead-products taxonomy ≠ Aufmaß category/model)
@@ -179,6 +186,14 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         setProductRows([createEmptyRow()]);
         setExtras([]);
       } else if (editData) {
+        // MODÜL B: edit mode opened from the status-bar intercept also gets
+        // the source Aufmaß loaded so the banner + photos still render.
+        // Doesn't touch firstname/lastname/products — that comes from editData.
+        if (fromAufmassFormId) {
+          getForm(fromAufmassFormId)
+            .then(setAufmassData)
+            .catch(err => console.error('Failed to load Aufmaß metadata for edit mode:', err));
+        }
         // Populate form with existing data
         setFirstname(editData.customer_firstname || '');
         setLastname(editData.customer_lastname || '');
