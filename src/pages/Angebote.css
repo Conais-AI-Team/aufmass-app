@@ -311,6 +311,18 @@
   border-radius: 4px;
 }
 
+/* MODÜL B — "Versendet" badge on lead cards once an Angebot was sent */
+.versendet-badge {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: #16a34a;
+  background: rgba(22, 163, 74, 0.12);
+  border: 1px solid rgba(22, 163, 74, 0.35);
+  padding: 0.125rem 0.5rem;
+  border-radius: 999px;
+  cursor: default;
+}
+
 .lead-email {
   font-size: 0.875rem;
   color: var(--text-secondary);

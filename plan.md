@@ -127,15 +127,15 @@
 ### ADIM 9 — Manuel "Gönderildi olarak işaretle" butonu (Soru-3-c, ADMIN-only)
 **Dosya:** `src/pages/Angebote.tsx`
 
-- [ ] **9.1** Lead kartında: `angebot_sent_at` NULL ise + user admin ise → "Manuel gönderildi" butonu görünür
-- [ ] **9.2** Tıklayınca confirm dialog ("Angebot wurde per Post versendet?") → `markLeadAngebotAsSentManual(leadId)`
-- [ ] **9.3** Office user için buton görünmez (frontend filter + backend zaten reddeder)
+- [x] **9.1** Lead kartında: `angebot_sent_at` NULL ise + `isAdmin()` ise → paper-airplane ikonlu buton görünür
+- [x] **9.2** Tıklayınca confirm dialog ("Angebot wurde per Post versendet?") → `markLeadAngebotAsSentManual(leadId)` → toast + `loadLeads`
+- [x] **9.3** Office user için buton görünmez (frontend filter + backend `requireAdmin` middleware reddeder)
 
 ### ADIM 10 — Angebote listesinde "versendet" rozeti
-**Dosya:** `src/pages/Angebote.tsx`
+**Dosya:** `src/pages/Angebote.tsx`, `src/pages/Angebote.css`
 
-- [ ] **10.1** `Lead` interface'ine `angebot_sent_at?: string` ekle
-- [ ] **10.2** Lead kartında `kunden_nummer` rozeti yanına: `{lead.angebot_sent_at && <span class="versendet-badge">✓ Versendet</span>}`
+- [x] **10.1** `Lead` interface'ine `angebot_sent_at?: string | null`
+- [x] **10.2** Lead kartında `angebot_nummer` rozetinin yanına `✓ Versendet` rozeti (date tooltip ile)
 
 ### ADIM 11 — Bearbeiten (FormPage) entegrasyonu doğrula
 - [ ] **11.1** ADIM 1.3 sayesinde Bearbeiten'den status değişimi (FormPage'in `PUT /api/forms/:id` çağrısı) otomatik `syncLeadFromForm` tetikler. Frontend ek iş YOK. Test ile doğrula.
@@ -161,8 +161,8 @@
 | 2 | `feat(modul-b): add tab structure to Angebote page (Schnellangebot + Aus Aufmaß)` | ADIM 3 | ✅ Atıldı (`b9a6596`) — testler geçti |
 | 3 | `feat(modul-b): add "Aus Aufmaß" tab listing and "Angebot erstellen" button on Dashboard` | ADIM 4 + ADIM 7 | ✅ Atıldı (`5643678`) — testler geçti |
 | 4 | `feat(modul-b): seed LeadFormModal from Aufmaß and wire send-by-email auto-sync` | ADIM 5 + ADIM 8 | ✅ Atıldı (`b6114b4`) — testler geçti |
-| 5 | `feat(modul-b): embed Aufmaß photos in Angebot PDF` | ADIM 6 | ⏳ Onay bekliyor |
-| 6 | `feat(modul-b): admin-only manual mark-sent button + Versendet badge` | ADIM 9 + ADIM 10 | 📋 Yapılacak |
+| 5 | `feat(modul-b): embed Aufmaß photos in Angebot PDF` | ADIM 6 | ✅ Atıldı (`8e72294`) — testler geçti |
+| 6 | `feat(modul-b): admin-only manual mark-sent button + Versendet badge` | ADIM 9 + ADIM 10 | ⏳ Onay bekliyor |
 | 7 | `fix(modul-b): <test sonucu>` veya `refactor(modul-b): <iyileştirme>` | ADIM 11 + 12 test sonucu varsa | 📋 Yapılacak |
 
 **Push politikası:** Local commit atılır, `git push` için ayrıca onay alınır. Kullanıcı "push at" demedikçe local'de kalır.

@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf, getForms, getForm, markLeadAngebotAsSent } from '../services/api';
+import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf, getForms, getForm, markLeadAngebotAsSent, markLeadAngebotAsSentManual } from '../services/api';
 import type { FormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
 import LeadFormModal from '../components/LeadFormModal';
@@ -41,6 +41,9 @@ interface Lead {
   angebot_nummer?: string;
   kunden_nummer?: string;
   angebot_count?: number;
+  // MODÜL B: timestamp set when an Angebot was sent (auto via e-mail flow
+  // or admin-only manual override). NULL means nothing has been sent yet.
+  angebot_sent_at?: string | null;
 }
 
 interface ProductCustomField {
@@ -118,6 +121,10 @@ const isAdminOrOffice = () => {
   return user?.role === 'admin' || user?.role === 'office';
 };
 
+// MODÜL B Soru-3 (c): manual "mark sent" override is admin-only by spec
+// (postal-mail case). Office is intentionally excluded.
+const isAdmin = () => getStoredUser()?.role === 'admin';
+
 const isLeadStatusBackward = (current: string, next: string): boolean => {
   return LEAD_STATUS_ORDER.indexOf(next) < LEAD_STATUS_ORDER.indexOf(current);
 };
@@ -160,6 +167,8 @@ export default function Angebote() {
   const [selectedLead, setSelectedLead] = useState<LeadDetail | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [deleteAngebotConfirm, setDeleteAngebotConfirm] = useState<{ leadId: number; angebotId: number } | null>(null);
+  // MODÜL B: id of the lead awaiting confirm for the manual "Versendet" override
+  const [manualSentConfirmId, setManualSentConfirmId] = useState<number | null>(null);
   const [expandedLeadId, setExpandedLeadId] = useState<number | null>(null);
   const [expandedAngebote, setExpandedAngebote] = useState<Record<number, Angebot[]>>({});
   const [filterStatus, setFilterStatus] = useState('alle');
@@ -324,6 +333,22 @@ export default function Angebote() {
       setDeleteConfirmId(null);
     } catch (err) {
       console.error('Failed to delete lead:', err);
+    }
+  };
+
+  // MODÜL B Soru-3 (c): admin-only manual override for postal mail. Backend
+  // also enforces the role check, so a non-admin caller would be rejected
+  // even if the button were rendered.
+  const handleMarkAngebotSentManual = async (leadId: number) => {
+    try {
+      await markLeadAngebotAsSentManual(leadId);
+      setManualSentConfirmId(null);
+      await loadLeads();
+      toast.success('Versendet markiert', `Angebot für Lead #${leadId} wurde als versendet markiert.`);
+    } catch (err) {
+      console.error('Manual mark-sent failed:', err);
+      toast.error('Fehler', 'Konnte nicht als versendet markiert werden.');
+      setManualSentConfirmId(null);
     }
   };
 
@@ -813,6 +838,16 @@ export default function Angebote() {
                     {lead.angebot_nummer && getAngebotCount(lead) <= 1 && (
                       <span className="angebot-nummer">Ang: {lead.angebot_nummer}</span>
                     )}
+                    {/* MODÜL B — Versendet badge: shown when angebot_sent_at is filled.
+                        Set by the e-mail send flow (auto) or admin manual override. */}
+                    {lead.angebot_sent_at && (
+                      <span
+                        className="versendet-badge"
+                        title={`Angebot versendet: ${formatDate(lead.angebot_sent_at)}`}
+                      >
+                        ✓ Versendet
+                      </span>
+                    )}
                     <span className="lead-email">{lead.customer_email}</span>
                   </div>
                 </div>
@@ -945,6 +980,21 @@ export default function Angebote() {
                       <circle cx="12" cy="12" r="3" />
                     </svg>
                   </button>
+                  {/* MODÜL B Soru-3 (c) — admin-only manual override for postal mail.
+                      Hidden once angebot_sent_at is filled (already marked as sent
+                      via the e-mail flow or a previous manual click). */}
+                  {!lead.angebot_sent_at && isAdmin() && (
+                    <button
+                      className="btn-icon"
+                      title="Manuell als versendet markieren (Post)"
+                      onClick={() => setManualSentConfirmId(lead.id)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M22 2L11 13" />
+                        <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+                      </svg>
+                    </button>
+                  )}
                   <button
                     className="btn-icon delete"
                     title="Löschen"
@@ -1034,6 +1084,17 @@ export default function Angebote() {
                   <div className="confirm-actions">
                     <button className="btn-cancel" onClick={() => setDeleteConfirmId(null)}>Abbrechen</button>
                     <button className="btn-delete" onClick={() => handleDelete(lead.id)}>Löschen</button>
+                  </div>
+                </div>
+              )}
+
+              {/* MODÜL B — Manual mark-sent confirmation (admin only) */}
+              {manualSentConfirmId === lead.id && (
+                <div className="delete-confirm">
+                  <p>Angebot wurde per Post versendet?</p>
+                  <div className="confirm-actions">
+                    <button className="btn-cancel" onClick={() => setManualSentConfirmId(null)}>Abbrechen</button>
+                    <button className="btn-save" onClick={() => handleMarkAngebotSentManual(lead.id)}>Als versendet markieren</button>
                   </div>
                 </div>
               )}
