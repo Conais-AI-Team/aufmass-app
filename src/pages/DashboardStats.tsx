@@ -130,13 +130,18 @@ export default function DashboardStats() {
         </div>
       </header>
 
-      {/* Quick Stats Cards */}
+      {/* Quick Stats Cards — clickable, navigate to filtered targets */}
       <div className="stats-grid">
         <motion.div
-          className="stat-card"
+          className="stat-card stat-card-clickable"
+          role="button"
+          tabIndex={0}
+          onClick={() => navigate('/aufmasse')}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigate('/aufmasse'); }}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.1 }}
+          whileHover={{ y: -2 }}
         >
           <div className="stat-icon aufmasse">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -153,10 +158,15 @@ export default function DashboardStats() {
         </motion.div>
 
         <motion.div
-          className="stat-card"
+          className="stat-card stat-card-clickable"
+          role="button"
+          tabIndex={0}
+          onClick={() => navigate('/angebote')}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigate('/angebote'); }}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.15 }}
+          whileHover={{ y: -2 }}
         >
           <div className="stat-icon angebote">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -174,10 +184,15 @@ export default function DashboardStats() {
         </motion.div>
 
         <motion.div
-          className="stat-card"
+          className="stat-card stat-card-clickable"
+          role="button"
+          tabIndex={0}
+          onClick={() => navigate('/aufmasse?status=montage_geplant')}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigate('/aufmasse?status=montage_geplant'); }}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.2 }}
+          whileHover={{ y: -2 }}
         >
           <div className="stat-icon montage">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -194,10 +209,15 @@ export default function DashboardStats() {
         </motion.div>
 
         <motion.div
-          className="stat-card"
+          className="stat-card stat-card-clickable"
+          role="button"
+          tabIndex={0}
+          onClick={() => navigate('/aufmasse?status=reklamation_eingegangen')}
+          onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') navigate('/aufmasse?status=reklamation_eingegangen'); }}
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ delay: 0.25 }}
+          whileHover={{ y: -2 }}
         >
           <div className="stat-icon reklamation">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
