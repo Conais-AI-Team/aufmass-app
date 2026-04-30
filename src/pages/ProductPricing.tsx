@@ -447,10 +447,13 @@ export default function ProductPricing() {
 
     try {
       await api.put(`/lead-products/${product.id}`, { price: newPrice });
-      await loadProducts();
+      // Optimistic update: only the changed row mutates — scroll position preserved.
+      // Avoids the full-page re-render that loadProducts() triggered (page jumped to top).
+      setProducts(prev => prev.map(p => p.id === product.id ? { ...p, price: newPrice } : p));
       cancelEdit();
     } catch (err) {
       console.error('Failed to update price:', err);
+      alert('Preis konnte nicht gespeichert werden. Bitte Seite neu laden.');
     }
   };
 
