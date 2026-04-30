@@ -2942,6 +2942,39 @@ app.post('/api/rechnungen/:id/pdf', authenticateToken, express.raw({ type: 'appl
     await pool.query(
       `UPDATE aufmass_rechnungen SET generated_pdf = $1, pdf_generated_at = NOW() WHERE id = $2`,
       [req.body, id]);
+
+    // MODÜL B v3: mirror to form_pdf_snapshots so the Aufmaß dropdown sees Rechnung-PDF
+    try {
+      const formRow = await pool.query('SELECT form_id FROM aufmass_rechnungen WHERE id = $1', [id]);
+      const formId = formRow.rows[0]?.form_id;
+      if (formId) {
+        const snapDir = path.join(PDF_DIR, 'snapshots');
+        if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+        const snapFilename = `form${formId}_rechnung_${Date.now()}.pdf`;
+        fs.writeFileSync(path.join(snapDir, snapFilename), req.body);
+
+        const old = await pool.query(
+          `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'rechnung'`,
+          [formId]
+        );
+        if (old.rows.length > 0) {
+          const oldPath = path.join(snapDir, old.rows[0].file_path);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          await pool.query(
+            `UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = 'rechnung'`,
+            [snapFilename, formId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, 'rechnung', $2)`,
+            [formId, snapFilename]
+          );
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Form snapshot mirror (rechnung) failed:', snapErr.message);
+    }
+
     res.json({ success: true, size: req.body.length });
   } catch (err) {
     console.error('Error saving Rechnung PDF:', err);

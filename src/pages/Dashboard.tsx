@@ -1201,7 +1201,13 @@ Aylux Team`;
   // Whether a given PDF type is meaningful for the form's current status.
   // Drives the enabled/disabled state of dropdown entries.
   const isPdfTypeAvailableForStatus = (status: string, docType: FormPdfDocType): boolean => {
-    if (docType === 'rechnung') return false; // placeholder — handled by Ezgi branch
+    if (docType === 'rechnung') {
+      // Rechnung snapshot exists once Ezgi's RechnungForm has saved a Rechnung PDF
+      // (saveRechnungPdf endpoint mirrors it to aufmass_form_pdf_snapshots).
+      return ['rechnung_erstellt', 'rechnung_gesendet', 'schluss_rechnung_erstellt', 'schluss_rechnung_gesendet',
+              'anzahlung', 'auftrag_erteilt', 'bauantrag', 'bestellt', 'montage_geplant',
+              'montage_gestartet', 'abnahme', 'reklamation_eingegangen'].includes(status);
+    }
     // Aufmaß is always available once the form has progressed past "draft"
     if (docType === 'aufmass') {
       return !['entwurf', 'auftrag_abgelehnt', 'papierkorb'].includes(status);
@@ -1220,11 +1226,16 @@ Aylux Team`;
 
   // Click handler for a PDF-type entry: open existing snapshot or generate one on-the-fly.
   const handlePdfTypeClick = async (formId: number, docType: FormPdfDocType) => {
+    const existing = (formSnapshots[formId] || []).find((s) => s.document_type === docType);
+    // Rechnung has no client-side generator; only open if a saved snapshot exists.
     if (docType === 'rechnung') {
-      toast.info('Demnächst', 'Rechnung-PDF wird durch ein separates Modul bereitgestellt.');
+      if (existing) {
+        window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
+      } else {
+        toast.warning('Keine Rechnung', 'Bitte zuerst eine Rechnung erstellen.');
+      }
       return;
     }
-    const existing = (formSnapshots[formId] || []).find((s) => s.document_type === docType);
     if (existing) {
       window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
       return;
@@ -1850,12 +1861,13 @@ Aylux Team`;
                               return types.map(({ type, label }) => {
                                 const snap = snapshots.find((s) => s.document_type === type);
                                 const availableByStatus = isPdfTypeAvailableForStatus(formStatus, type);
-                                const enabled = !!snap || availableByStatus;
-                                const isRechnungPlaceholder = type === 'rechnung';
+                                // Rechnung needs a real saved snapshot to be openable —
+                                // we don't auto-render it from form data (no generator yet).
+                                const enabled = type === 'rechnung' ? !!snap : (!!snap || availableByStatus);
 
                                 let titleText = '';
-                                if (isRechnungPlaceholder) titleText = 'Rechnung-PDF wird durch ein separates Modul bereitgestellt';
-                                else if (snap) titleText = `Erstellt am ${new Date(snap.created_at).toLocaleDateString('de-DE')}`;
+                                if (snap) titleText = `Erstellt am ${new Date(snap.created_at).toLocaleDateString('de-DE')}`;
+                                else if (type === 'rechnung') titleText = 'Bitte zuerst eine Rechnung erstellen';
                                 else if (availableByStatus) titleText = 'Wird beim Klick erstellt und gespeichert';
                                 else titleText = 'In diesem Status nicht verfügbar';
 
@@ -1877,7 +1889,6 @@ Aylux Team`;
                                     {snap && (
                                       <span className="upload-hint">{new Date(snap.created_at).toLocaleDateString('de-DE')}</span>
                                     )}
-                                    {!snap && isRechnungPlaceholder && <span className="upload-hint">demnächst</span>}
                                   </button>
                                 );
                               });
