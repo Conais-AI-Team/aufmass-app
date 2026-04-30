@@ -1,8 +1,8 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getPdfUrl, getPdfStatus, getForm, savePdf, getBranchFeatures, sendAesSignature, sendAbnahmeAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest } from '../services/api';
-import type { BranchFeatures, EsignatureStatus, EsignatureRequest, AngebotItem, SignatureNotification } from '../services/api';
+import { getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getPdfUrl, getPdfStatus, getForm, savePdf, getBranchFeatures, sendAesSignature, sendAbnahmeAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl } from '../services/api';
+import type { BranchFeatures, EsignatureStatus, EsignatureRequest, AngebotItem, SignatureNotification, FormPdfDocType, FormPdfSnapshot } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import type { AbnahmeImage } from '../services/api';
 import type { FormData, MontageteamStats, Montageteam, StatusHistoryEntry, AbnahmeData } from '../services/api';
@@ -90,6 +90,8 @@ const Dashboard = () => {
   const [statusDropdownOpen, setStatusDropdownOpen] = useState<number | null>(null);
   const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
   const [attachmentDropdownOpen, setAttachmentDropdownOpen] = useState<number | null>(null);
+  // Lazy-loaded list of available PDF snapshots per form
+  const [formSnapshots, setFormSnapshots] = useState<Record<number, FormPdfSnapshot[]>>({});
   // Status history modal
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [selectedFormHistory, setSelectedFormHistory] = useState<StatusHistoryEntry[]>([]);
@@ -495,6 +497,9 @@ const Dashboard = () => {
         ? { ...f, status: newStatus }
         : f
     ));
+    // Snapshot the Abnahme-PDF so historic versions stay accessible after further status changes
+    const snapType = statusToSnapshotType(newStatus);
+    if (snapType) void captureSnapshot(abnahmeFormId, snapType);
 
     return newStatus;
   };
@@ -854,6 +859,8 @@ Aylux Team`;
         // Just save and update status
         await updateForm(angebotFormId, { status: 'angebot_versendet', statusDate: angebotDate });
         setForms(forms.map(f => f.id === angebotFormId ? { ...f, status: 'angebot_versendet', statusDate: angebotDate } : f));
+        // Freeze the Angebot-PDF so it survives later status changes
+        void captureSnapshot(angebotFormId, 'angebot');
         setAngebotModalOpen(false);
         setAngebotFormId(null);
         refreshStats();
@@ -882,6 +889,8 @@ Aylux Team`;
       // Update status
       await updateForm(angebotFormId, { status: 'angebot_versendet', statusDate: angebotDate });
       setForms(forms.map(f => f.id === angebotFormId ? { ...f, status: 'angebot_versendet', statusDate: angebotDate } : f));
+      // Freeze the signed Angebot-PDF
+      void captureSnapshot(angebotFormId, 'angebot');
 
       // Load signature status
       loadEsignatureStatus(angebotFormId);
@@ -957,7 +966,13 @@ Aylux Team`;
   // Open stored PDF in new tab - regenerate if outdated
   const [, setPdfGenerating] = useState<number | null>(null);
 
-  const handleOpenPDF = async (formId: number) => {
+  const handleOpenPDF = async (formId: number, docType?: FormPdfDocType) => {
+    // If a specific snapshot is requested, open it directly (frozen historical PDF)
+    if (docType) {
+      window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
+      return;
+    }
+
     try {
       // Always fetch form data to check for signature
       const [formData, abnahmeData, abnahmeImages] = await Promise.all([
@@ -1019,6 +1034,116 @@ Aylux Team`;
       const pdfUrl = getPdfUrl(formId);
       const cacheBustUrl = `${pdfUrl}${pdfUrl.includes('?') ? '&' : '?'}t=${Date.now()}`;
       window.open(cacheBustUrl, '_blank');
+    }
+  };
+
+  // Map a status transition to the document type whose snapshot should be captured.
+  // Only transitions that *change* what the PDF would contain trigger a snapshot.
+  const statusToSnapshotType = (status: string): FormPdfDocType | null => {
+    if (status === 'neu') return 'aufmass';                     // "Aufmaß Genommen"
+    if (status === 'angebot_versendet') return 'angebot';
+    if (status === 'abnahme' || status === 'reklamation_eingegangen') return 'abnahme';
+    if (status === 'anzahlung') return 'rechnung';              // placeholder for now
+    return null;
+  };
+
+  // Whether a given PDF type is meaningful for the form's current status.
+  // Drives the enabled/disabled state of dropdown entries.
+  const isPdfTypeAvailableForStatus = (status: string, docType: FormPdfDocType): boolean => {
+    if (docType === 'rechnung') return false; // placeholder — handled by Ezgi branch
+    // Aufmaß is always available once the form has progressed past "draft"
+    if (docType === 'aufmass') {
+      return !['entwurf', 'auftrag_abgelehnt', 'papierkorb'].includes(status);
+    }
+    // Angebot exists from "angebot_versendet" onward
+    if (docType === 'angebot') {
+      return ['angebot_versendet', 'auftrag_erteilt', 'bauantrag', 'anzahlung',
+              'bestellt', 'montage_geplant', 'montage_gestartet',
+              'abnahme', 'reklamation_eingegangen'].includes(status);
+    }
+    if (docType === 'abnahme') {
+      return ['abnahme', 'reklamation_eingegangen'].includes(status);
+    }
+    return false;
+  };
+
+  // Click handler for a PDF-type entry: open existing snapshot or generate one on-the-fly.
+  const handlePdfTypeClick = async (formId: number, docType: FormPdfDocType) => {
+    if (docType === 'rechnung') {
+      toast.info('Demnächst', 'Rechnung-PDF wird durch ein separates Modul bereitgestellt.');
+      return;
+    }
+    const existing = (formSnapshots[formId] || []).find((s) => s.document_type === docType);
+    if (existing) {
+      window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
+      return;
+    }
+    // No snapshot yet — render once, store as snapshot, then open it
+    setPdfGenerating(formId);
+    try {
+      await captureSnapshot(formId, docType);
+      window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
+    } catch (e) {
+      console.error('Failed to render snapshot on demand:', e);
+      toast.error('Fehler', 'PDF konnte nicht erstellt werden');
+    } finally {
+      setPdfGenerating(null);
+    }
+  };
+
+  // Generate the current state's PDF and store it as an immutable snapshot.
+  // Best-effort — failures are logged, never block the status update.
+  const captureSnapshot = async (formId: number, docType: FormPdfDocType): Promise<void> => {
+    if (docType === 'rechnung') {
+      // Rechnung-PDF generator yet to be built (handled by separate branch).
+      // Status transition still completes; snapshot can be taken later.
+      return;
+    }
+    try {
+      const [formData, abnahmeData, abnahmeImages] = await Promise.all([
+        getForm(formId),
+        getAbnahme(formId).catch(() => null),
+        getAbnahmeImages(formId).catch(() => [])
+      ]);
+
+      const pdfFormData = {
+        ...formData,
+        id: String(formData.id),
+        productSelection: {
+          category: formData.category,
+          productType: formData.productType,
+          model: formData.model ? formData.model.split(',') : []
+        },
+        specifications: formData.specifications as Record<string, string | number | boolean | string[]>,
+        bilder: formData.bilder || [],
+        customerSignature: formData.customerSignature || null,
+        signatureName: formData.signatureName || null,
+        abnahme: abnahmeData ? { ...abnahmeData, maengelBilder: abnahmeImages || [] } : undefined
+      };
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const result = await generatePDF(pdfFormData as any, {
+        returnBlob: true,
+        abnahmeOnly: docType === 'abnahme'
+      });
+      if (result?.blob) {
+        await saveFormPdfSnapshot(formId, docType, result.blob);
+        // Refresh the cached list so the dropdown immediately reflects the new snapshot
+        setFormSnapshots((prev) => ({ ...prev, [formId]: [...(prev[formId] || []).filter(s => s.document_type !== docType), { document_type: docType, created_at: new Date().toISOString() }] }));
+      }
+    } catch (err) {
+      console.warn(`Snapshot capture failed (${docType}):`, err);
+    }
+  };
+
+  // Load list of available snapshots for a form (lazy, when dropdown opens)
+  const ensureSnapshotsLoaded = async (formId: number) => {
+    if (formSnapshots[formId]) return;
+    try {
+      const list = await getFormPdfSnapshots(formId);
+      setFormSnapshots((prev) => ({ ...prev, [formId]: list }));
+    } catch (e) {
+      console.warn('Failed to load snapshots:', e);
+      setFormSnapshots((prev) => ({ ...prev, [formId]: [] }));
     }
   };
 
@@ -1484,7 +1609,9 @@ Aylux Team`;
                         className={`action-btn attachment ${(form.pdf_count || 0) > 0 ? 'has-files' : ''}`}
                         onClick={(e) => {
                           e.stopPropagation();
-                          setAttachmentDropdownOpen(attachmentDropdownOpen === form.id ? null : form.id!);
+                          const willOpen = attachmentDropdownOpen !== form.id;
+                          setAttachmentDropdownOpen(willOpen ? form.id! : null);
+                          if (willOpen) ensureSnapshotsLoaded(form.id!);
                         }}
                         title="Dateien"
                       >
@@ -1500,16 +1627,52 @@ Aylux Team`;
                             exit={{ opacity: 0, y: -10 }}
                             onClick={(e) => e.stopPropagation()}
                           >
-                            <button
-                              className="attachment-option generate-pdf"
-                              onClick={() => {
-                                handleOpenPDF(form.id!);
-                                setAttachmentDropdownOpen(null);
-                              }}
-                            >
-                              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14,2 14,8 20,8" /><path d="M12 11v6M9 14h6" /></svg>
-                              <span>PDF Vorschau</span>
-                            </button>
+                            {/* PDF Vorschau list — frozen snapshots per document type */}
+                            <div className="attachment-divider">PDF Vorschau</div>
+                            {(() => {
+                              const snapshots = formSnapshots[form.id!] || [];
+                              const formStatus = getFormStatus(form);
+                              const types: { type: FormPdfDocType; label: string }[] = [
+                                { type: 'aufmass', label: 'Aufmaß-PDF' },
+                                { type: 'angebot', label: 'Angebot-PDF' },
+                                { type: 'abnahme', label: 'Abnahme-PDF' },
+                                { type: 'rechnung', label: 'Rechnung-PDF' }
+                              ];
+                              return types.map(({ type, label }) => {
+                                const snap = snapshots.find((s) => s.document_type === type);
+                                const availableByStatus = isPdfTypeAvailableForStatus(formStatus, type);
+                                const enabled = !!snap || availableByStatus;
+                                const isRechnungPlaceholder = type === 'rechnung';
+
+                                let titleText = '';
+                                if (isRechnungPlaceholder) titleText = 'Rechnung-PDF wird durch ein separates Modul bereitgestellt';
+                                else if (snap) titleText = `Erstellt am ${new Date(snap.created_at).toLocaleDateString('de-DE')}`;
+                                else if (availableByStatus) titleText = 'Wird beim Klick erstellt und gespeichert';
+                                else titleText = 'In diesem Status nicht verfügbar';
+
+                                return (
+                                  <button
+                                    key={type}
+                                    className="attachment-option generate-pdf"
+                                    style={enabled ? undefined : { opacity: 0.45, cursor: 'not-allowed' }}
+                                    disabled={!enabled}
+                                    onClick={() => {
+                                      if (!enabled) return;
+                                      handlePdfTypeClick(form.id!, type);
+                                      setAttachmentDropdownOpen(null);
+                                    }}
+                                    title={titleText}
+                                  >
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14,2 14,8 20,8" /><path d="M12 11v6M9 14h6" /></svg>
+                                    <span>{label}</span>
+                                    {snap && (
+                                      <span className="upload-hint">{new Date(snap.created_at).toLocaleDateString('de-DE')}</span>
+                                    )}
+                                    {!snap && isRechnungPlaceholder && <span className="upload-hint">demnächst</span>}
+                                  </button>
+                                );
+                              });
+                            })()}
                             <button
                               className="attachment-option upload-doc"
                               onClick={() => {
@@ -1848,6 +2011,9 @@ Aylux Team`;
                             }
                           : f
                       ));
+                      // Trigger snapshot if this status implies a new document type
+                      const snapType = statusToSnapshotType(pendingStatus);
+                      if (snapType) void captureSnapshot(statusDateFormId, snapType);
                       setStatusDateModalOpen(false);
                       setStatusDateFormId(null);
                       setStatusDateValue('');

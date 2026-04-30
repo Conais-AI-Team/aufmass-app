@@ -52,6 +52,7 @@ interface ProductCustomField {
 
 interface LeadItem {
   id: number;
+  product_id?: number;
   product_name: string;
   breite: number;
   tiefe: number;
@@ -124,7 +125,7 @@ export default function Angebote() {
   const [loading, setLoading] = useState(true);
   const [leadModalOpen, setLeadModalOpen] = useState(false);
   const [statusDropdownOpen, setStatusDropdownOpen] = useState<number | null>(null);
-  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; leadId?: number; emailType?: string; attachmentName?: string; angebote?: import('../components/EmailComposer').AngebotAttachment[] } | null>(null);
+  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; leadId?: number; emailType?: string; attachmentName?: string; angebote?: import('../components/EmailComposer').AngebotAttachment[]; angebotPdfData?: import('../utils/angebotPdfGenerator').AngebotPdfData } | null>(null);
   const [editLeadData, setEditLeadData] = useState<LeadDetail | null>(null);
   const [editAngebotId, setEditAngebotId] = useState<number | null>(null);
   const [newAngebotLeadId, setNewAngebotLeadId] = useState<number | null>(null);
@@ -318,6 +319,7 @@ export default function Angebote() {
       angebot_nummer: angebot?.angebot_nummer || lead.angebot_nummer || undefined,
       created_at: angebot?.created_at || lead.created_at,
       items: items.map(item => ({
+        product_id: item.product_id,
         product_name: item.product_name,
         breite: item.breite,
         tiefe: item.tiefe,
@@ -440,10 +442,9 @@ export default function Angebote() {
         : await api.get<LeadDetail>(`/leads/${lead.id}`);
 
       const angeboteList = leadDetail.angebote || [];
-      const angeboteAttachments: import('../components/EmailComposer').AngebotAttachment[] = [];
 
-      // Generate and save PDF for each angebot
-      for (const ang of angeboteList) {
+      // Generate and save PDFs for all Angebote in parallel (was sequential — much slower)
+      const tasks = angeboteList.map(async (ang) => {
         try {
           const pdfResult = await generateAngebotPDF(
             buildPdfPayload(leadDetail, ang),
@@ -451,14 +452,14 @@ export default function Angebote() {
           );
           if (pdfResult?.blob) {
             await saveAngebotPdf(leadDetail.id, ang.id, pdfResult.blob);
-            angeboteAttachments.push({ id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: true });
-          } else {
-            angeboteAttachments.push({ id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: false });
+            return { id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: true };
           }
         } catch {
-          angeboteAttachments.push({ id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: false });
+          // fall through to ready:false
         }
-      }
+        return { id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: false };
+      });
+      const angeboteAttachments: import('../components/EmailComposer').AngebotAttachment[] = await Promise.all(tasks);
 
       // If no angebote, generate lead-level PDF
       if (angeboteList.length === 0) {
@@ -475,6 +476,8 @@ export default function Angebote() {
       const greeting = customerName ? `Sehr geehrte/r ${customerName},` : 'Sehr geehrte Damen und Herren,';
       const angCount = angeboteAttachments.length;
 
+      // If exactly one Angebot exists, expose its payload so the user can split per product
+      const singleAng = angeboteList.length === 1 ? angeboteList[0] : null;
       setEmailComposer({
         to: leadDetail.customer_email,
         subject: `Ihr Angebot - AYLUX Sonnenschutzsysteme`,
@@ -482,6 +485,7 @@ export default function Angebote() {
         leadId: leadDetail.id,
         emailType: 'angebot',
         angebote: angeboteAttachments.length > 0 ? angeboteAttachments : undefined,
+        angebotPdfData: singleAng ? buildPdfPayload(leadDetail, singleAng) : (angeboteList.length === 0 ? buildPdfPayload(leadDetail, undefined) : undefined),
       });
     } catch (err) {
       console.error('Send lead by e-mail failed:', err);
@@ -519,6 +523,8 @@ export default function Angebote() {
         leadId: leadDetail.id,
         emailType: 'angebot',
         angebote: [{ id: angebotId, angebot_nummer: angebot.angebot_nummer || `#${angebotId}`, ready: true }],
+        // Pass payload so EmailComposer can offer "Pro Produkt einzelne PDF" for multi-item angebote
+        angebotPdfData: buildPdfPayload(leadDetail, angebot),
       });
     } catch (err) {
       console.error('Send angebot by e-mail failed:', err);
@@ -1140,6 +1146,7 @@ export default function Angebote() {
             angebote={emailComposer.angebote}
             emailType={emailComposer.emailType}
             attachmentName={emailComposer.attachmentName}
+            angebotPdfData={emailComposer.angebotPdfData}
             onClose={() => setEmailComposer(null)}
           />
         )}

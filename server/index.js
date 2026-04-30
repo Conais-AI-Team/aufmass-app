@@ -433,6 +433,83 @@ async function initializeTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS ix_email_log_form ON aufmass_email_log(form_id)`);
     console.log('Email log table ready');
 
+    // === MODÜL F: PDF Şablon Sistemi ===
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_product_images (
+        id SERIAL PRIMARY KEY,
+        branch_slug VARCHAR(50) NOT NULL,
+        product_id INT NOT NULL,
+        image_path VARCHAR(500) NOT NULL,
+        image_order INT DEFAULT 1,
+        show_on_cover BOOLEAN DEFAULT false,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_product_images_lookup ON aufmass_product_images(branch_slug, product_id)`);
+    console.log('Product images table ready');
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_branch_terms (
+        branch_slug VARCHAR(50) PRIMARY KEY,
+        content TEXT,
+        show_on_aufmass BOOLEAN DEFAULT false,
+        show_on_angebot BOOLEAN DEFAULT true,
+        show_on_abnahme BOOLEAN DEFAULT false,
+        show_on_rechnung BOOLEAN DEFAULT false,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`ALTER TABLE aufmass_branch_terms ADD COLUMN IF NOT EXISTS agb_pdf_path VARCHAR(500)`);
+    await pool.query(`ALTER TABLE aufmass_branch_terms ADD COLUMN IF NOT EXISTS agb_pdf_pages JSONB`);
+    await pool.query(`ALTER TABLE aufmass_branch_terms ADD COLUMN IF NOT EXISTS attach_separately BOOLEAN DEFAULT false`);
+    console.log('Branch terms (AGB) table ready');
+
+    // === MODÜL F2: PDF Cover/AGB Override System ===
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_product_cover_pdfs (
+        id SERIAL PRIMARY KEY,
+        branch_slug VARCHAR(50) NOT NULL,
+        product_id INT NOT NULL,
+        file_path VARCHAR(500) NOT NULL,
+        selected_pages JSONB,
+        page_count INT,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(branch_slug, product_id)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_product_cover_pdfs_lookup ON aufmass_product_cover_pdfs(branch_slug, product_id)`);
+    console.log('Product cover PDFs table ready');
+
+    // PDF cache table — for legal stability: once a PDF is generated for a lead, it's frozen
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_lead_pdf_cache (
+        id SERIAL PRIMARY KEY,
+        lead_id INT NOT NULL,
+        angebot_id INT,
+        document_type VARCHAR(20) NOT NULL,
+        file_path VARCHAR(500) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(lead_id, angebot_id, document_type)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_pdf_cache_lookup ON aufmass_lead_pdf_cache(lead_id, angebot_id, document_type)`);
+    console.log('Lead PDF cache table ready');
+
+    // Form-level PDF snapshots — frozen per (form_id, document_type) for legal traceability
+    // Status transitions auto-create snapshots so users can re-download a historic PDF after status changes
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_form_pdf_snapshots (
+        id SERIAL PRIMARY KEY,
+        form_id INT NOT NULL,
+        document_type VARCHAR(20) NOT NULL,
+        file_path VARCHAR(500) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(form_id, document_type)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_form_pdf_snapshots_lookup ON aufmass_form_pdf_snapshots(form_id, document_type)`);
+    console.log('Form PDF snapshots table ready');
+
     console.log('Database tables initialized');
   } catch (err) {
     console.error('Table initialization failed:', err.message);
@@ -1463,6 +1540,127 @@ app.get('/api/forms/:id/pdf', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Error getting PDF:', err);
     res.status(500).json({ error: 'Failed to get PDF' });
+  }
+});
+
+// === FORM PDF SNAPSHOTS — per-document-type frozen copies ===
+// Stores aufmass / angebot / abnahme / rechnung PDFs as immutable snapshots.
+// Triggered on status transitions so historic PDFs remain accessible.
+
+const SNAPSHOT_TYPES = ['aufmass', 'angebot', 'abnahme', 'rechnung'];
+
+app.post('/api/forms/:id/pdf-snapshot', authenticateToken, (req, res, next) => {
+  upload.single('pdf')(req, res, (err) => {
+    if (err) {
+      console.error(`Snapshot upload error for form ${req.params.id}:`, err.message);
+      return res.status(400).json({ error: `Upload fehlgeschlagen: ${err.message}` });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const formId = parseInt(req.params.id);
+    const docType = String(req.body.document_type || '').toLowerCase();
+
+    if (!SNAPSHOT_TYPES.includes(docType)) {
+      return res.status(400).json({ error: `Invalid document_type. Must be one of: ${SNAPSHOT_TYPES.join(', ')}` });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'No PDF file provided' });
+    }
+
+    if (!await verifyFormBranch(formId, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    const dir = path.join(PDF_DIR, 'snapshots');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const filename = `form${formId}_${docType}_${Date.now()}.pdf`;
+    const filePath = path.join(dir, filename);
+    fs.writeFileSync(filePath, req.file.buffer);
+
+    // Upsert; remove old file if present
+    const old = await pool.query(
+      'SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = $2',
+      [formId, docType]
+    );
+    if (old.rows.length > 0) {
+      const oldPath = path.join(dir, old.rows[0].file_path);
+      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      await pool.query(
+        'UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = $3',
+        [filename, formId, docType]
+      );
+    } else {
+      await pool.query(
+        'INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, $2, $3)',
+        [formId, docType, filename]
+      );
+    }
+
+    res.json({ success: true, document_type: docType, created_at: new Date().toISOString() });
+  } catch (err) {
+    console.error('Error saving form PDF snapshot:', err);
+    res.status(500).json({ error: 'Failed to save snapshot' });
+  }
+});
+
+// List available snapshots for a form
+app.get('/api/forms/:id/pdf-snapshots', authenticateToken, async (req, res) => {
+  try {
+    const formId = parseInt(req.params.id);
+    if (!await verifyFormBranch(formId, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const result = await pool.query(
+      `SELECT document_type, created_at FROM aufmass_form_pdf_snapshots
+       WHERE form_id = $1 ORDER BY created_at ASC`,
+      [formId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error listing snapshots:', err);
+    res.status(500).json({ error: 'Failed to list snapshots' });
+  }
+});
+
+// Stream a specific snapshot
+app.get('/api/forms/:id/pdf-snapshot/:docType', authenticateToken, async (req, res) => {
+  try {
+    const formId = parseInt(req.params.id);
+    const docType = String(req.params.docType).toLowerCase();
+    if (!SNAPSHOT_TYPES.includes(docType)) {
+      return res.status(400).json({ error: 'Invalid document_type' });
+    }
+    if (!await verifyFormBranch(formId, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const result = await pool.query(
+      'SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = $2',
+      [formId, docType]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Snapshot not found' });
+    }
+    const filePath = path.join(PDF_DIR, 'snapshots', result.rows[0].file_path);
+    if (!fs.existsSync(filePath)) {
+      // Orphan record — clean up
+      await pool.query(
+        'DELETE FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = $2',
+        [formId, docType]
+      );
+      return res.status(404).json({ error: 'Snapshot file missing' });
+    }
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="form_${formId}_${docType}.pdf"`,
+      'Cache-Control': 'private, max-age=86400'
+    });
+    fs.createReadStream(filePath).pipe(res);
+  } catch (err) {
+    console.error('Error streaming snapshot:', err);
+    res.status(500).json({ error: 'Failed to fetch snapshot' });
   }
 });
 
@@ -4519,6 +4717,24 @@ async function enrichItemsWithProductMeta(items, branchId) {
   const productParams = branchId ? [names, branchId] : [names];
   const productResult = await pool.query(productQuery, productParams);
 
+  // Modül F: canonical product_id for image lookups.
+  // Must match ProductPricing's grouping (ORDER BY product_name, breite, tiefe)
+  // so the id used for image upload equals the id used for image lookup in PDF.
+  const canonicalIdQuery = branchId
+    ? `SELECT DISTINCT ON (product_name) product_name, id
+       FROM aufmass_lead_products
+       WHERE product_name = ANY($1::text[]) AND branch_id = $2
+       ORDER BY product_name, breite ASC, tiefe ASC, id ASC`
+    : `SELECT DISTINCT ON (product_name) product_name, id
+       FROM aufmass_lead_products
+       WHERE product_name = ANY($1::text[])
+       ORDER BY product_name, breite ASC, tiefe ASC, id ASC`;
+  const canonicalResult = await pool.query(canonicalIdQuery, productParams);
+  const canonicalIdByName = {};
+  for (const row of canonicalResult.rows) {
+    canonicalIdByName[row.product_name] = row.id;
+  }
+
   const metaByName = {};
   for (const row of productResult.rows) {
     let customFields = null;
@@ -4538,6 +4754,7 @@ async function enrichItemsWithProductMeta(items, branchId) {
     const meta = metaByName[item.product_name];
     return {
       ...parseItemCustomFieldValues(item),
+      product_id: canonicalIdByName[item.product_name] ?? item.product_id ?? null,
       description: meta?.description ?? null,
       custom_fields: meta?.custom_fields ?? null
     };
@@ -5386,7 +5603,7 @@ app.post('/api/email/test', authenticateToken, requireAdmin, async (req, res) =>
 app.post('/api/email/send', authenticateToken, async (req, res) => {
   try {
     const branchSlug = req.branchId || 'koblenz';
-    const { to, subject, body, body_html, form_id, lead_id, angebot_ids, email_type, attachment_name } = req.body;
+    const { to, subject, body, body_html, form_id, lead_id, angebot_ids, email_type, attachment_name, attach_agb, extra_pdfs, suppress_main_pdf } = req.body;
 
     if (!to || !subject || !body) {
       return res.status(400).json({ error: 'Empfänger, Betreff und Nachricht sind erforderlich' });
@@ -5410,7 +5627,9 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
     };
 
     // Attach PDF if form_id or lead_id provided
-    if (form_id) {
+    // suppress_main_pdf is set when the client uploads per-product split PDFs via extra_pdfs;
+    // we must skip the consolidated PDF in that case to avoid duplicates.
+    if (form_id && !suppress_main_pdf) {
       // Try filesystem first, then DB
       const pdfPath = path.join(PDF_DIR, `${form_id}.pdf`);
       if (fs.existsSync(pdfPath)) {
@@ -5431,7 +5650,7 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
       }
     }
 
-    if (lead_id) {
+    if (lead_id && !suppress_main_pdf) {
       const leadPdfDir = path.join(PDF_DIR, 'leads');
 
       if (angebot_ids && Array.isArray(angebot_ids) && angebot_ids.length > 0) {
@@ -5484,6 +5703,80 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
             });
           }
         }
+      }
+    }
+
+    // Client-supplied extra PDFs (e.g. one PDF per product when split-per-item is selected).
+    // Format: [{ filename: "Angebot_Markise.pdf", base64: "<base64-encoded pdf bytes>" }]
+    if (Array.isArray(extra_pdfs) && extra_pdfs.length > 0) {
+      const TOTAL_LIMIT = 25 * 1024 * 1024; // 25 MB combined budget for client uploads
+      let totalBytes = 0;
+      for (const pdf of extra_pdfs) {
+        if (!pdf?.base64 || typeof pdf.base64 !== 'string') continue;
+        const safeName = String(pdf.filename || 'Anhang.pdf').replace(/[^\w\-. ()äöüÄÖÜß]/g, '_').slice(0, 120);
+        let buf;
+        try {
+          buf = Buffer.from(pdf.base64, 'base64');
+        } catch (e) {
+          console.warn('Skipping malformed extra_pdf:', safeName, e.message);
+          continue;
+        }
+        // Sanity-check it's actually a PDF
+        if (buf.length < 5 || buf.subarray(0, 5).toString('ascii') !== '%PDF-') {
+          console.warn('Skipping non-PDF extra attachment:', safeName);
+          continue;
+        }
+        totalBytes += buf.length;
+        if (totalBytes > TOTAL_LIMIT) {
+          return res.status(400).json({ error: 'Gesamtgröße der angehängten PDFs überschreitet 25 MB.' });
+        }
+        mailOptions.attachments.push({ filename: safeName, content: buf, contentType: 'application/pdf' });
+      }
+    }
+
+    // Optional: attach branch's AGB as a separate file (only when uploaded as a PDF).
+    // Selected pages are honored — we splice them out using pdf-lib so the attachment
+    // matches what the user picked in the AGB settings page.
+    if (attach_agb) {
+      try {
+        const termsResult = await pool.query(
+          'SELECT agb_pdf_path, agb_pdf_pages FROM aufmass_branch_terms WHERE branch_slug = $1',
+          [branchSlug]
+        );
+        const terms = termsResult.rows[0];
+        if (terms?.agb_pdf_path) {
+          const fullPath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, terms.agb_pdf_path);
+          if (fs.existsSync(fullPath)) {
+            let pdfBuffer = fs.readFileSync(fullPath);
+            const selectedPages = Array.isArray(terms.agb_pdf_pages) ? terms.agb_pdf_pages : null;
+            if (selectedPages && selectedPages.length > 0) {
+              try {
+                const { PDFDocument } = await import('pdf-lib');
+                const src = await PDFDocument.load(pdfBuffer);
+                const pageCount = src.getPageCount();
+                const validIdx0 = selectedPages
+                  .filter((p) => Number.isInteger(p) && p >= 1 && p <= pageCount)
+                  .map((p) => p - 1);
+                if (validIdx0.length > 0 && validIdx0.length < pageCount) {
+                  const out = await PDFDocument.create();
+                  const copied = await out.copyPages(src, validIdx0);
+                  copied.forEach((p) => out.addPage(p));
+                  const sliced = await out.save();
+                  pdfBuffer = Buffer.from(sliced);
+                }
+              } catch (sliceErr) {
+                console.warn('AGB page-slice failed, sending full PDF:', sliceErr.message);
+              }
+            }
+            mailOptions.attachments.push({
+              filename: 'AGB.pdf',
+              content: pdfBuffer,
+              contentType: 'application/pdf'
+            });
+          }
+        }
+      } catch (agbErr) {
+        console.warn('AGB attachment skipped:', agbErr.message);
       }
     }
 
@@ -5577,24 +5870,39 @@ app.put('/api/branch/company-info', authenticateToken, requireAdmin, async (req,
       return res.status(400).json({ error: 'Pflichtfelder fehlen (Firmenname, Adresse, Telefon, E-Mail, USt-IdNr)' });
     }
 
-    // Ensure branch_settings row exists
-    await pool.query(
-      `INSERT INTO aufmass_branch_settings (branch_slug) VALUES ($1) ON CONFLICT (branch_slug) DO NOTHING`,
+    // Manual upsert (branch_slug may not have a UNIQUE constraint)
+    const existing = await pool.query(
+      'SELECT branch_slug FROM aufmass_branch_settings WHERE branch_slug = $1',
       [branchSlug]
     );
 
-    await pool.query(
-      `UPDATE aufmass_branch_settings SET
-        company_name = $2, company_strasse = $3, company_plz = $4, company_ort = $5,
-        company_telefon = $6, company_email = $7, company_ust_id = $8, company_web = $9,
-        company_steuernr = $10, company_iban = $11, company_bic = $12, company_bank_name = $13,
-        company_geschaeftsfuehrer = $14, company_handelsregister = $15
-       WHERE branch_slug = $1`,
-      [branchSlug, company_name, company_strasse, company_plz, company_ort,
-       company_telefon, company_email, company_ust_id, company_web || '',
-       company_steuernr || '', company_iban || '', company_bic || '', company_bank_name || '',
-       company_geschaeftsfuehrer || '', company_handelsregister || '']
-    );
+    if (existing.rows.length === 0) {
+      await pool.query(
+        `INSERT INTO aufmass_branch_settings (
+          branch_slug, company_name, company_strasse, company_plz, company_ort,
+          company_telefon, company_email, company_ust_id, company_web,
+          company_steuernr, company_iban, company_bic, company_bank_name,
+          company_geschaeftsfuehrer, company_handelsregister
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+        [branchSlug, company_name, company_strasse, company_plz, company_ort,
+         company_telefon, company_email, company_ust_id, company_web || '',
+         company_steuernr || '', company_iban || '', company_bic || '', company_bank_name || '',
+         company_geschaeftsfuehrer || '', company_handelsregister || '']
+      );
+    } else {
+      await pool.query(
+        `UPDATE aufmass_branch_settings SET
+          company_name = $2, company_strasse = $3, company_plz = $4, company_ort = $5,
+          company_telefon = $6, company_email = $7, company_ust_id = $8, company_web = $9,
+          company_steuernr = $10, company_iban = $11, company_bic = $12, company_bank_name = $13,
+          company_geschaeftsfuehrer = $14, company_handelsregister = $15
+         WHERE branch_slug = $1`,
+        [branchSlug, company_name, company_strasse, company_plz, company_ort,
+         company_telefon, company_email, company_ust_id, company_web || '',
+         company_steuernr || '', company_iban || '', company_bic || '', company_bank_name || '',
+         company_geschaeftsfuehrer || '', company_handelsregister || '']
+      );
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -5628,6 +5936,618 @@ app.get('/api/branch/company-info-public', authenticateToken, async (req, res) =
     res.status(500).json({ error: 'Failed to fetch company info' });
   }
 });
+
+// ============ MODÜL F: PRODUCT IMAGES ============
+
+const productImageUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = path.join(process.cwd(), 'product-images');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname);
+      cb(null, `prod_${Date.now()}_${Math.random().toString(36).substring(7)}${ext}`);
+    }
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
+});
+
+// GET — list product images
+app.get('/api/products/:productId/images', authenticateToken, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const productId = parseInt(req.params.productId);
+    const result = await pool.query(
+      `SELECT id, image_path, image_order, show_on_cover, uploaded_at
+       FROM aufmass_product_images
+       WHERE branch_slug = $1 AND product_id = $2
+       ORDER BY image_order ASC`,
+      [branchSlug, productId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching product images:', err);
+    res.status(500).json({ error: 'Failed to fetch product images' });
+  }
+});
+
+// POST — upload product image (max 3 per product)
+app.post('/api/products/:productId/images', authenticateToken, requireAdmin, (req, res) => {
+  productImageUpload.single('image')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    try {
+      const branchSlug = req.branchId || 'koblenz';
+      const productId = parseInt(req.params.productId);
+
+      const countResult = await pool.query(
+        'SELECT COUNT(*) FROM aufmass_product_images WHERE branch_slug = $1 AND product_id = $2',
+        [branchSlug, productId]
+      );
+      if (parseInt(countResult.rows[0].count) >= 3) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ error: 'Maximum 3 Bilder pro Produkt' });
+      }
+
+      const orderResult = await pool.query(
+        'SELECT COALESCE(MAX(image_order), 0) + 1 AS next_order FROM aufmass_product_images WHERE branch_slug = $1 AND product_id = $2',
+        [branchSlug, productId]
+      );
+      const nextOrder = orderResult.rows[0].next_order;
+
+      const insertResult = await pool.query(
+        `INSERT INTO aufmass_product_images (branch_slug, product_id, image_path, image_order, show_on_cover)
+         VALUES ($1, $2, $3, $4, false)
+         RETURNING id, image_path, image_order, show_on_cover, uploaded_at`,
+        [branchSlug, productId, req.file.filename, nextOrder]
+      );
+
+      res.json(insertResult.rows[0]);
+    } catch (err) {
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      console.error('Error uploading product image:', err);
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  });
+});
+
+// DELETE — remove a product image
+app.delete('/api/products/:productId/images/:imageId', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const imageId = parseInt(req.params.imageId);
+
+    const result = await pool.query(
+      'SELECT image_path FROM aufmass_product_images WHERE id = $1 AND branch_slug = $2',
+      [imageId, branchSlug]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Bild nicht gefunden' });
+
+    const imagePath = path.join(process.cwd(), 'product-images', result.rows[0].image_path);
+    if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
+
+    await pool.query('DELETE FROM aufmass_product_images WHERE id = $1 AND branch_slug = $2', [imageId, branchSlug]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting product image:', err);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// PUT — toggle cover flag (max 2 cover images per product)
+app.put('/api/products/:productId/images/:imageId/cover-flag', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const imageId = parseInt(req.params.imageId);
+    const productId = parseInt(req.params.productId);
+    const { show_on_cover } = req.body;
+
+    if (show_on_cover === true) {
+      const countResult = await pool.query(
+        `SELECT COUNT(*) FROM aufmass_product_images
+         WHERE branch_slug = $1 AND product_id = $2 AND show_on_cover = true AND id != $3`,
+        [branchSlug, productId, imageId]
+      );
+      if (parseInt(countResult.rows[0].count) >= 2) {
+        return res.status(400).json({ error: 'Maximal 2 Bilder können auf dem Cover angezeigt werden' });
+      }
+    }
+
+    await pool.query(
+      'UPDATE aufmass_product_images SET show_on_cover = $1 WHERE id = $2 AND branch_slug = $3',
+      [!!show_on_cover, imageId, branchSlug]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error updating cover flag:', err);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+// GET — serve product image file (public; filenames are unguessable random strings)
+app.get('/api/product-image/:filename', (req, res) => {
+  const filename = req.params.filename;
+  if (!/^[\w\-.]+\.(jpg|jpeg|png|webp)$/i.test(filename)) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  const filePath = path.join(process.cwd(), 'product-images', filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(filePath);
+});
+
+// ============ MODÜL F: BRANCH TERMS (AGB) ============
+
+app.get('/api/branch/terms', authenticateToken, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const result = await pool.query(
+      `SELECT content, show_on_aufmass, show_on_angebot, show_on_abnahme, show_on_rechnung,
+              agb_pdf_path, agb_pdf_pages, attach_separately
+       FROM aufmass_branch_terms WHERE branch_slug = $1`,
+      [branchSlug]
+    );
+    if (result.rows.length === 0) {
+      return res.json({
+        content: '',
+        show_on_aufmass: false,
+        show_on_angebot: true,
+        show_on_abnahme: false,
+        show_on_rechnung: false,
+        agb_pdf_path: null,
+        agb_pdf_pages: null,
+        attach_separately: false
+      });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error fetching branch terms:', err);
+    res.status(500).json({ error: 'Failed to fetch terms' });
+  }
+});
+
+app.put('/api/branch/terms', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const { content, show_on_aufmass, show_on_angebot, show_on_abnahme, show_on_rechnung, attach_separately } = req.body;
+
+    const existing = await pool.query(
+      'SELECT branch_slug FROM aufmass_branch_terms WHERE branch_slug = $1',
+      [branchSlug]
+    );
+
+    if (existing.rows.length === 0) {
+      await pool.query(
+        `INSERT INTO aufmass_branch_terms
+         (branch_slug, content, show_on_aufmass, show_on_angebot, show_on_abnahme, show_on_rechnung, attach_separately, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+        [branchSlug, content || '', !!show_on_aufmass, !!show_on_angebot, !!show_on_abnahme, !!show_on_rechnung, !!attach_separately]
+      );
+    } else {
+      await pool.query(
+        `UPDATE aufmass_branch_terms SET
+           content = $2, show_on_aufmass = $3, show_on_angebot = $4,
+           show_on_abnahme = $5, show_on_rechnung = $6, attach_separately = $7, updated_at = NOW()
+         WHERE branch_slug = $1`,
+        [branchSlug, content || '', !!show_on_aufmass, !!show_on_angebot, !!show_on_abnahme, !!show_on_rechnung, !!attach_separately]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error saving branch terms:', err);
+    res.status(500).json({ error: 'Save failed' });
+  }
+});
+
+// ============ MODÜL F2: PDF Cover/AGB Override System ============
+
+const branchPdfUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const branchSlug = req.branchId || 'koblenz';
+      const dir = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      cb(null, `${Date.now()}_${Math.random().toString(36).substring(2, 10)}${ext}`);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype !== 'application/pdf') return cb(new Error('Nur PDF-Dateien erlaubt'));
+    cb(null, true);
+  },
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
+});
+
+// Helper: validate PDF magic bytes (defense-in-depth beyond MIME)
+function isPdfMagic(filePath) {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(5);
+    fs.readSync(fd, buf, 0, 5, 0);
+    fs.closeSync(fd);
+    return buf.toString('ascii') === '%PDF-';
+  } catch {
+    return false;
+  }
+}
+
+// Helper: count pages in a PDF using pdf-lib (server-side)
+async function getPdfPageCount(filePath) {
+  const { PDFDocument } = await import('pdf-lib');
+  const bytes = fs.readFileSync(filePath);
+  const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: false });
+  return pdfDoc.getPageCount();
+}
+
+// === COVER PDF (per-product) ===
+
+app.get('/api/products/:productId/cover-pdf', authenticateToken, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const productId = parseInt(req.params.productId);
+    const result = await pool.query(
+      `SELECT id, file_path, selected_pages, page_count, uploaded_at
+       FROM aufmass_product_cover_pdfs
+       WHERE branch_slug = $1 AND product_id = $2`,
+      [branchSlug, productId]
+    );
+    if (result.rows.length === 0) return res.json(null);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error fetching cover PDF:', err);
+    res.status(500).json({ error: 'Failed to fetch cover PDF' });
+  }
+});
+
+app.post('/api/products/:productId/cover-pdf', authenticateToken, requireAdmin, (req, res) => {
+  branchPdfUpload.single('pdf')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'Keine Datei hochgeladen' });
+
+    if (!isPdfMagic(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Ungültige PDF-Datei' });
+    }
+
+    let pageCount;
+    try {
+      pageCount = await getPdfPageCount(req.file.path);
+    } catch (e) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'PDF konnte nicht gelesen werden (möglicherweise verschlüsselt)' });
+    }
+    if (pageCount > 30) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Maximal 30 Seiten erlaubt' });
+    }
+
+    try {
+      const branchSlug = req.branchId || 'koblenz';
+      const productId = parseInt(req.params.productId);
+
+      // Delete old PDF if exists
+      const old = await pool.query(
+        'SELECT file_path FROM aufmass_product_cover_pdfs WHERE branch_slug = $1 AND product_id = $2',
+        [branchSlug, productId]
+      );
+      if (old.rows.length > 0) {
+        const oldPath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, old.rows[0].file_path);
+        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      }
+
+      // Default: first page selected
+      const defaultPages = [1];
+
+      const upsertResult = await pool.query(
+        `INSERT INTO aufmass_product_cover_pdfs (branch_slug, product_id, file_path, selected_pages, page_count, uploaded_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, NOW())
+         ON CONFLICT (branch_slug, product_id)
+         DO UPDATE SET file_path = EXCLUDED.file_path, selected_pages = EXCLUDED.selected_pages,
+                       page_count = EXCLUDED.page_count, uploaded_at = NOW()
+         RETURNING id, file_path, selected_pages, page_count, uploaded_at`,
+        [branchSlug, productId, req.file.filename, JSON.stringify(defaultPages), pageCount]
+      );
+      res.json(upsertResult.rows[0]);
+    } catch (err) {
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      console.error('Error saving cover PDF:', err);
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  });
+});
+
+app.put('/api/products/:productId/cover-pdf/pages', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const productId = parseInt(req.params.productId);
+    const { selected_pages } = req.body;
+
+    if (!Array.isArray(selected_pages) || selected_pages.some(p => typeof p !== 'number' || p < 1)) {
+      return res.status(400).json({ error: 'Ungültige Seitenauswahl' });
+    }
+
+    await pool.query(
+      `UPDATE aufmass_product_cover_pdfs SET selected_pages = $1::jsonb
+       WHERE branch_slug = $2 AND product_id = $3`,
+      [JSON.stringify(selected_pages), branchSlug, productId]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error updating cover PDF pages:', err);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+app.delete('/api/products/:productId/cover-pdf', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const productId = parseInt(req.params.productId);
+
+    const existing = await pool.query(
+      'SELECT file_path FROM aufmass_product_cover_pdfs WHERE branch_slug = $1 AND product_id = $2',
+      [branchSlug, productId]
+    );
+    if (existing.rows.length > 0) {
+      const filePath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, existing.rows[0].file_path);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    await pool.query(
+      'DELETE FROM aufmass_product_cover_pdfs WHERE branch_slug = $1 AND product_id = $2',
+      [branchSlug, productId]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting cover PDF:', err);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// === AGB PDF (branch-level) ===
+
+app.post('/api/branch/agb-pdf', authenticateToken, requireAdmin, (req, res) => {
+  branchPdfUpload.single('pdf')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'Keine Datei hochgeladen' });
+
+    if (!isPdfMagic(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Ungültige PDF-Datei' });
+    }
+
+    let pageCount;
+    try {
+      pageCount = await getPdfPageCount(req.file.path);
+    } catch (e) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'PDF konnte nicht gelesen werden' });
+    }
+    if (pageCount > 30) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Maximal 30 Seiten erlaubt' });
+    }
+
+    try {
+      const branchSlug = req.branchId || 'koblenz';
+
+      // Delete old AGB PDF if exists
+      const old = await pool.query(
+        'SELECT agb_pdf_path FROM aufmass_branch_terms WHERE branch_slug = $1',
+        [branchSlug]
+      );
+      if (old.rows.length > 0 && old.rows[0].agb_pdf_path) {
+        const oldPath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, old.rows[0].agb_pdf_path);
+        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      }
+
+      // Default: NO pages selected — client-side auto-detect or manual picker decides.
+      // Selecting all pages by default silently includes covers/marketing — worse than empty.
+      const defaultPages = [];
+
+      // Upsert (branch_terms row may not exist yet)
+      const exists = await pool.query('SELECT branch_slug FROM aufmass_branch_terms WHERE branch_slug = $1', [branchSlug]);
+      if (exists.rows.length === 0) {
+        await pool.query(
+          `INSERT INTO aufmass_branch_terms (branch_slug, content, agb_pdf_path, agb_pdf_pages, updated_at)
+           VALUES ($1, '', $2, $3::jsonb, NOW())`,
+          [branchSlug, req.file.filename, JSON.stringify(defaultPages)]
+        );
+      } else {
+        await pool.query(
+          `UPDATE aufmass_branch_terms SET agb_pdf_path = $1, agb_pdf_pages = $2::jsonb, updated_at = NOW()
+           WHERE branch_slug = $3`,
+          [req.file.filename, JSON.stringify(defaultPages), branchSlug]
+        );
+      }
+
+      res.json({ file_path: req.file.filename, page_count: pageCount, selected_pages: defaultPages });
+    } catch (err) {
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      console.error('Error saving AGB PDF:', err);
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  });
+});
+
+app.put('/api/branch/agb-pdf/pages', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const { selected_pages } = req.body;
+    if (!Array.isArray(selected_pages) || selected_pages.some(p => typeof p !== 'number' || p < 1)) {
+      return res.status(400).json({ error: 'Ungültige Seitenauswahl' });
+    }
+    await pool.query(
+      `UPDATE aufmass_branch_terms SET agb_pdf_pages = $1::jsonb, updated_at = NOW()
+       WHERE branch_slug = $2`,
+      [JSON.stringify(selected_pages), branchSlug]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error updating AGB PDF pages:', err);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+app.delete('/api/branch/agb-pdf', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const existing = await pool.query(
+      'SELECT agb_pdf_path FROM aufmass_branch_terms WHERE branch_slug = $1',
+      [branchSlug]
+    );
+    if (existing.rows.length > 0 && existing.rows[0].agb_pdf_path) {
+      const filePath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, existing.rows[0].agb_pdf_path);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    await pool.query(
+      `UPDATE aufmass_branch_terms SET agb_pdf_path = NULL, agb_pdf_pages = NULL, updated_at = NOW()
+       WHERE branch_slug = $1`,
+      [branchSlug]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting AGB PDF:', err);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// GET — serve branch-uploaded PDF (auth required, branch-isolated)
+app.get('/api/branch-pdf/:filename', authenticateToken, (req, res) => {
+  const filename = req.params.filename;
+  if (!/^[\w\-.]+\.pdf$/i.test(filename)) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  const branchSlug = req.branchId || 'koblenz';
+  const filePath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(filePath);
+});
+
+// === LEAD PDF CACHE (frozen-on-first-render for legal stability) ===
+
+const cachedPdfUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
+
+app.get('/api/lead-pdf-cache/:leadId', authenticateToken, async (req, res) => {
+  try {
+    const leadId = parseInt(req.params.leadId);
+    const angebotId = req.query.angebot_id ? parseInt(req.query.angebot_id) : null;
+    const documentType = req.query.document_type || 'angebot';
+
+    // Branch isolation: only return if lead belongs to this branch
+    const branchCheck = req.branchId
+      ? await pool.query('SELECT id FROM aufmass_leads WHERE id = $1 AND branch_id = $2', [leadId, req.branchId])
+      : await pool.query('SELECT id FROM aufmass_leads WHERE id = $1', [leadId]);
+    if (branchCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+
+    const result = await pool.query(
+      `SELECT file_path, created_at FROM aufmass_lead_pdf_cache
+       WHERE lead_id = $1 AND (angebot_id = $2 OR ($2 IS NULL AND angebot_id IS NULL))
+         AND document_type = $3`,
+      [leadId, angebotId, documentType]
+    );
+    if (result.rows.length === 0) return res.json(null);
+
+    const filePath = path.join(process.cwd(), 'aufmass-pdfs', 'cached', result.rows[0].file_path);
+    if (!fs.existsSync(filePath)) {
+      // Cache record exists but file missing — clean up the orphan
+      await pool.query(
+        `DELETE FROM aufmass_lead_pdf_cache WHERE lead_id = $1
+         AND (angebot_id = $2 OR ($2 IS NULL AND angebot_id IS NULL)) AND document_type = $3`,
+        [leadId, angebotId, documentType]
+      );
+      return res.json(null);
+    }
+    res.sendFile(filePath);
+  } catch (err) {
+    console.error('Error fetching cached PDF:', err);
+    res.status(500).json({ error: 'Failed to fetch cached PDF' });
+  }
+});
+
+app.post('/api/lead-pdf-cache/:leadId', authenticateToken, (req, res) => {
+  cachedPdfUpload.single('pdf')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    try {
+      const leadId = parseInt(req.params.leadId);
+      const angebotId = req.body.angebot_id ? parseInt(req.body.angebot_id) : null;
+      const documentType = req.body.document_type || 'angebot';
+
+      // Branch isolation
+      const branchCheck = req.branchId
+        ? await pool.query('SELECT id FROM aufmass_leads WHERE id = $1 AND branch_id = $2', [leadId, req.branchId])
+        : await pool.query('SELECT id FROM aufmass_leads WHERE id = $1', [leadId]);
+      if (branchCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+
+      const dir = path.join(process.cwd(), 'aufmass-pdfs', 'cached');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+      const filename = `lead${leadId}_ang${angebotId || 'main'}_${documentType}_${Date.now()}.pdf`;
+      const filePath = path.join(dir, filename);
+      fs.writeFileSync(filePath, req.file.buffer);
+
+      // Remove old cache file if exists, then upsert
+      const old = await pool.query(
+        `SELECT file_path FROM aufmass_lead_pdf_cache WHERE lead_id = $1
+         AND (angebot_id = $2 OR ($2 IS NULL AND angebot_id IS NULL)) AND document_type = $3`,
+        [leadId, angebotId, documentType]
+      );
+      if (old.rows.length > 0) {
+        const oldPath = path.join(dir, old.rows[0].file_path);
+        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        await pool.query(
+          `UPDATE aufmass_lead_pdf_cache SET file_path = $1, created_at = NOW()
+           WHERE lead_id = $2 AND (angebot_id = $3 OR ($3 IS NULL AND angebot_id IS NULL))
+             AND document_type = $4`,
+          [filename, leadId, angebotId, documentType]
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO aufmass_lead_pdf_cache (lead_id, angebot_id, document_type, file_path, created_at)
+           VALUES ($1, $2, $3, $4, NOW())`,
+          [leadId, angebotId, documentType, filename]
+        );
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Error caching PDF:', err);
+      res.status(500).json({ error: 'Cache failed' });
+    }
+  });
+});
+
+// Internal helper: invalidate cache for a lead (called after lead/angebot edits)
+async function invalidateLeadPdfCache(leadId, angebotId = null) {
+  try {
+    const dir = path.join(process.cwd(), 'aufmass-pdfs', 'cached');
+    let toDelete;
+    if (angebotId !== null) {
+      toDelete = await pool.query(
+        `SELECT file_path FROM aufmass_lead_pdf_cache WHERE lead_id = $1 AND angebot_id = $2`,
+        [leadId, angebotId]
+      );
+      await pool.query(`DELETE FROM aufmass_lead_pdf_cache WHERE lead_id = $1 AND angebot_id = $2`, [leadId, angebotId]);
+    } else {
+      toDelete = await pool.query(`SELECT file_path FROM aufmass_lead_pdf_cache WHERE lead_id = $1`, [leadId]);
+      await pool.query(`DELETE FROM aufmass_lead_pdf_cache WHERE lead_id = $1`, [leadId]);
+    }
+    for (const row of toDelete.rows) {
+      const p = path.join(dir, row.file_path);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  } catch (err) {
+    console.error('Error invalidating PDF cache:', err);
+  }
+}
 
 // ============ BRANCH USAGE DASHBOARD (super admin only) ============
 

@@ -1,9 +1,19 @@
 import { useState, useEffect, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api } from '../services/api';
+import {
+  api, getProductImages, uploadProductImage, deleteProductImage, setProductImageCoverFlag,
+  getProductCoverPdf, uploadProductCoverPdf, setCoverPdfPages, deleteProductCoverPdf,
+  fetchBranchPdfBytes
+} from '../services/api';
+import type { ProductImage, ProductCoverPdf } from '../services/api';
+import { invalidateProductImagesCache } from '../utils/productImagesCache';
+import { PdfThumbnailGrid } from '../components/PdfThumbnailGrid';
 import productConfigData from '../config/productConfig.json';
 import type { ProductConfig } from '../types/productConfig';
 import './ProductPricing.css';
+import '../components/PdfThumbnailGrid.css';
+
+const API_BASE_URL = import.meta.env.VITE_API_URL || '/api';
 
 const productConfig = productConfigData as ProductConfig;
 
@@ -91,6 +101,151 @@ export default function ProductPricing() {
   // Description editing for existing products
   const [editingDescription, setEditingDescription] = useState<string | null>(null);
   const [editDescriptionValue, setEditDescriptionValue] = useState('');
+
+  // Product images per product_id
+  const [productImages, setProductImages] = useState<Record<number, ProductImage[]>>({});
+  const [imageUploadingFor, setImageUploadingFor] = useState<number | null>(null);
+
+  // Cover-PDF override per product_id
+  const [coverPdfs, setCoverPdfs] = useState<Record<number, ProductCoverPdf | null>>({});
+  const [coverPdfUploadingFor, setCoverPdfUploadingFor] = useState<number | null>(null);
+  const [coverPdfPicker, setCoverPdfPicker] = useState<{ productId: number; bytes: Uint8Array; pages: number[] } | null>(null);
+  const [coverPdfPickerSaving, setCoverPdfPickerSaving] = useState(false);
+
+  // Lazy-load images and cover-PDF when a product accordion expands
+  const ensureImagesLoaded = async (productId: number) => {
+    if (productImages[productId]) return;
+    try {
+      const images = await getProductImages(productId);
+      setProductImages(prev => ({ ...prev, [productId]: images }));
+    } catch (e) {
+      console.error('Failed to load product images:', e);
+    }
+  };
+
+  const ensureCoverPdfLoaded = async (productId: number) => {
+    if (productId in coverPdfs) return;
+    try {
+      const cp = await getProductCoverPdf(productId);
+      setCoverPdfs(prev => ({ ...prev, [productId]: cp }));
+    } catch (e) {
+      console.error('Failed to load cover PDF:', e);
+    }
+  };
+
+  const handleCoverPdfUpload = async (productId: number, file: File) => {
+    if (file.type !== 'application/pdf') {
+      alert('Bitte eine PDF-Datei auswählen');
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      alert('Datei zu groß (max. 10 MB)');
+      return;
+    }
+    setCoverPdfUploadingFor(productId);
+    try {
+      const cp = await uploadProductCoverPdf(productId, file);
+      setCoverPdfs(prev => ({ ...prev, [productId]: cp }));
+      // Upload sonrası direkt page picker'ı aç
+      const bytes = await fetchBranchPdfBytes(cp.file_path);
+      if (bytes) {
+        setCoverPdfPicker({ productId, bytes, pages: cp.selected_pages || [] });
+      }
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setCoverPdfUploadingFor(null);
+    }
+  };
+
+  const handleCoverPdfDelete = async (productId: number) => {
+    if (!window.confirm('Cover-PDF wirklich entfernen?')) return;
+    try {
+      await deleteProductCoverPdf(productId);
+      setCoverPdfs(prev => ({ ...prev, [productId]: null }));
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Delete failed');
+    }
+  };
+
+  const openCoverPdfPicker = async (productId: number) => {
+    const cp = coverPdfs[productId];
+    if (!cp) return;
+    const bytes = await fetchBranchPdfBytes(cp.file_path);
+    if (!bytes) {
+      alert('PDF konnte nicht geladen werden');
+      return;
+    }
+    setCoverPdfPicker({ productId, bytes, pages: cp.selected_pages || [] });
+  };
+
+  const saveCoverPdfPickerSelection = async () => {
+    if (!coverPdfPicker) return;
+    if (coverPdfPicker.pages.length === 0) {
+      alert('Bitte mindestens eine Seite auswählen');
+      return;
+    }
+    setCoverPdfPickerSaving(true);
+    try {
+      await setCoverPdfPages(coverPdfPicker.productId, coverPdfPicker.pages);
+      setCoverPdfs(prev => ({
+        ...prev,
+        [coverPdfPicker.productId]: prev[coverPdfPicker.productId]
+          ? { ...prev[coverPdfPicker.productId]!, selected_pages: coverPdfPicker.pages }
+          : prev[coverPdfPicker.productId]
+      }));
+      setCoverPdfPicker(null);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Save failed');
+    } finally {
+      setCoverPdfPickerSaving(false);
+    }
+  };
+
+  const handleImageUpload = async (productId: number, file: File) => {
+    setImageUploadingFor(productId);
+    try {
+      const newImage = await uploadProductImage(productId, file);
+      setProductImages(prev => ({
+        ...prev,
+        [productId]: [...(prev[productId] || []), newImage]
+      }));
+      invalidateProductImagesCache(productId);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Upload failed');
+    } finally {
+      setImageUploadingFor(null);
+    }
+  };
+
+  const handleImageDelete = async (productId: number, imageId: number) => {
+    if (!window.confirm('Bild wirklich löschen?')) return;
+    try {
+      await deleteProductImage(productId, imageId);
+      setProductImages(prev => ({
+        ...prev,
+        [productId]: (prev[productId] || []).filter(img => img.id !== imageId)
+      }));
+      invalidateProductImagesCache(productId);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Delete failed');
+    }
+  };
+
+  const handleCoverToggle = async (productId: number, imageId: number, currentFlag: boolean) => {
+    try {
+      await setProductImageCoverFlag(productId, imageId, !currentFlag);
+      setProductImages(prev => ({
+        ...prev,
+        [productId]: (prev[productId] || []).map(img =>
+          img.id === imageId ? { ...img, show_on_cover: !currentFlag } : img
+        )
+      }));
+      invalidateProductImagesCache(productId);
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Update failed');
+    }
+  };
 
   // Custom fields editing for existing products
   const [editingCustomFields, setEditingCustomFields] = useState<string | null>(null);
@@ -1369,6 +1524,144 @@ export default function ProductPricing() {
                         )}
                       </div>
 
+                      {/* Product Images & Cover-PDF Section */}
+                      {data.products[0]?.id && (() => {
+                        const productId = data.products[0].id;
+                        if (!productImages[productId] && imageUploadingFor !== productId) {
+                          ensureImagesLoaded(productId);
+                        }
+                        if (!(productId in coverPdfs) && coverPdfUploadingFor !== productId) {
+                          ensureCoverPdfLoaded(productId);
+                        }
+                        const images = productImages[productId] || [];
+                        const coverPdf = coverPdfs[productId];
+                        const pdfActive = !!coverPdf;
+                        return (
+                          <>
+                          <div className={`product-images-section ${pdfActive ? 'is-disabled-by-pdf' : ''}`}>
+                            <div className="pi-header">
+                              <span className="pi-label">Produktbilder</span>
+                              <span className="pi-hint">{images.length}/3 · max 2 für Cover</span>
+                            </div>
+                            {pdfActive && (
+                              <div className="pi-pdf-overlay-msg">
+                                Cover-PDF ist aktiv. Bilder werden nicht für die PDF verwendet.
+                              </div>
+                            )}
+                            <div className="pi-grid">
+                              {images.map((img) => (
+                                <div key={img.id} className="pi-tile">
+                                  <img
+                                    src={`${API_BASE_URL}/product-image/${img.image_path}?t=${img.uploaded_at || ''}`}
+                                    alt=""
+                                    onError={(e) => { (e.target as HTMLImageElement).style.opacity = '0.3'; }}
+                                  />
+                                  <button
+                                    type="button"
+                                    className="pi-delete"
+                                    onClick={() => handleImageDelete(productId, img.id)}
+                                    title="Löschen"
+                                    disabled={pdfActive}
+                                  >×</button>
+                                  <label className={`pi-cover-toggle ${img.show_on_cover ? 'is-on' : ''}`}>
+                                    <input
+                                      type="checkbox"
+                                      checked={img.show_on_cover}
+                                      onChange={() => handleCoverToggle(productId, img.id, img.show_on_cover)}
+                                      disabled={pdfActive}
+                                    />
+                                    <span>{img.show_on_cover ? '★ Cover' : 'Cover'}</span>
+                                  </label>
+                                </div>
+                              ))}
+                              {images.length < 3 && !pdfActive && (
+                                <label className="pi-tile pi-upload">
+                                  {imageUploadingFor === productId ? (
+                                    <span>Lädt hoch...</span>
+                                  ) : (
+                                    <>
+                                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="22" height="22">
+                                        <path d="M12 5v14M5 12h14" />
+                                      </svg>
+                                      <span>Bild hinzufügen</span>
+                                    </>
+                                  )}
+                                  <input
+                                    type="file"
+                                    accept="image/jpeg,image/png,image/webp"
+                                    hidden
+                                    onChange={(e) => {
+                                      if (e.target.files?.[0]) handleImageUpload(productId, e.target.files[0]);
+                                      e.target.value = '';
+                                    }}
+                                  />
+                                </label>
+                              )}
+                            </div>
+                          </div>
+
+                          {/* Cover-PDF Section (override) */}
+                          <div className="cover-pdf-section">
+                            <div className="cpdf-header">
+                              <span className="cpdf-label">Cover-PDF (optional)</span>
+                              <span className="cpdf-hint">Eigenes PDF für die Titelseite – überschreibt obige Bilder</span>
+                            </div>
+                            {coverPdf ? (
+                              <div className="cpdf-active">
+                                <button
+                                  type="button"
+                                  className="cpdf-info cpdf-info-button"
+                                  onClick={() => openCoverPdfPicker(productId)}
+                                  title="Klicken zum Ändern der Seitenauswahl"
+                                >
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="20" height="20">
+                                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                                    <polyline points="14 2 14 8 20 8" />
+                                  </svg>
+                                  <span className="cpdf-pages-info">
+                                    {coverPdf.page_count} Seiten · {coverPdf.selected_pages?.length || 0} ausgewählt
+                                  </span>
+                                  <span className="cpdf-edit-hint">zum Ändern klicken</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  className="btn-cpdf-delete"
+                                  onClick={() => handleCoverPdfDelete(productId)}
+                                  title="Cover-PDF entfernen"
+                                >
+                                  Entfernen
+                                </button>
+                              </div>
+                            ) : (
+                              <label className="cpdf-upload">
+                                {coverPdfUploadingFor === productId ? (
+                                  <span>Lädt hoch...</span>
+                                ) : (
+                                  <>
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="20" height="20">
+                                      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                                      <polyline points="17 8 12 3 7 8" />
+                                      <line x1="12" y1="3" x2="12" y2="15" />
+                                    </svg>
+                                    <span>Cover-PDF hochladen</span>
+                                  </>
+                                )}
+                                <input
+                                  type="file"
+                                  accept="application/pdf"
+                                  hidden
+                                  onChange={(e) => {
+                                    if (e.target.files?.[0]) handleCoverPdfUpload(productId, e.target.files[0]);
+                                    e.target.value = '';
+                                  }}
+                                />
+                              </label>
+                            )}
+                          </div>
+                          </>
+                        );
+                      })()}
+
                       {/* Custom Fields (Form Builder) Section */}
                       <div className="custom-fields-section">
                         {editingCustomFields === productName ? (
@@ -1784,6 +2077,64 @@ export default function ProductPricing() {
                 >
                   Löschen
                 </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Cover-PDF Page Picker Modal */}
+      <AnimatePresence>
+        {coverPdfPicker && (
+          <motion.div
+            className="modal-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => !coverPdfPickerSaving && setCoverPdfPicker(null)}
+          >
+            <motion.div
+              className="modal-content cpdf-picker-modal"
+              initial={{ scale: 0.95, opacity: 0 }}
+              animate={{ scale: 1, opacity: 1 }}
+              exit={{ scale: 0.95, opacity: 0 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="modal-header">
+                <h2>Cover-Seiten auswählen</h2>
+                <button
+                  className="modal-close"
+                  onClick={() => !coverPdfPickerSaving && setCoverPdfPicker(null)}
+                  disabled={coverPdfPickerSaving}
+                >×</button>
+              </div>
+              <div className="modal-body">
+                <p className="cpdf-picker-hint">
+                  Klicken Sie auf die Seiten, die als Cover verwendet werden sollen. Mehrfachauswahl möglich.
+                </p>
+                <PdfThumbnailGrid
+                  pdfBytes={coverPdfPicker.bytes}
+                  selectedPages={coverPdfPicker.pages}
+                  onChange={(pages) => setCoverPdfPicker(prev => prev ? { ...prev, pages } : null)}
+                />
+                <div className="cpdf-picker-summary">
+                  {coverPdfPicker.pages.length === 0
+                    ? <span style={{ color: '#ef4444' }}>Keine Seite ausgewählt</span>
+                    : <span>{coverPdfPicker.pages.length} Seite(n) ausgewählt: {coverPdfPicker.pages.join(', ')}</span>
+                  }
+                </div>
+              </div>
+              <div className="modal-footer">
+                <button
+                  className="btn-cancel"
+                  onClick={() => setCoverPdfPicker(null)}
+                  disabled={coverPdfPickerSaving}
+                >Abbrechen</button>
+                <button
+                  className="btn-primary"
+                  onClick={saveCoverPdfPickerSelection}
+                  disabled={coverPdfPickerSaving || coverPdfPicker.pages.length === 0}
+                >{coverPdfPickerSaving ? 'Speichern...' : 'Übernehmen'}</button>
               </div>
             </motion.div>
           </motion.div>

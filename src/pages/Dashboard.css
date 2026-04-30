@@ -107,6 +107,12 @@
   flex: 1;
   padding: 1.5rem 1rem;
   overflow-y: auto;
+  /* Hide scrollbar visually but keep scroll functional */
+  scrollbar-width: none; /* Firefox */
+  -ms-overflow-style: none; /* IE/Edge */
+}
+.sidebar-nav::-webkit-scrollbar {
+  display: none; /* Chrome / Safari / Edge Chromium */
 }
 
 .nav-section {

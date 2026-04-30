@@ -18,6 +18,12 @@ const presets: Record<string, { host: string; port: number; secure: boolean }> =
   'Hetzner': { host: 'mail.your-server.de', port: 587, secure: false },
 };
 
+// Returns true when the user has typed a host that matches none of the known presets
+function isCustomHost(host: string): boolean {
+  if (!host) return false;
+  return !Object.values(presets).some((p) => p.host === host);
+}
+
 // Reusable SMTP form
 function SmtpForm({ values, onChange, onTest, onSave, testing, saving, testResult, passwordPlaceholder }: {
   values: { smtp_host: string; smtp_port: number; smtp_user: string; smtp_pass: string; smtp_from_name: string; smtp_from_email: string; smtp_secure: boolean };
@@ -53,7 +59,25 @@ function SmtpForm({ values, onChange, onTest, onSave, testing, saving, testResul
               {name}
             </button>
           ))}
+          <button
+            key="custom"
+            onClick={() => { onChange('smtp_host', ''); onChange('smtp_port', 587); onChange('smtp_secure', false); }}
+            title="Eigener SMTP-Server (z.B. mailbox.org, web.de oder eigenes Hosting)"
+            style={{
+              padding: '4px 10px', fontSize: '12px', borderRadius: '4px', cursor: 'pointer',
+              border: isCustomHost(values.smtp_host) ? '1px solid var(--accent-green)' : '1px solid var(--border-primary)',
+              background: isCustomHost(values.smtp_host) ? 'var(--accent-green)' : 'var(--bg-secondary)',
+              color: isCustomHost(values.smtp_host) ? '#fff' : 'var(--text-secondary)'
+            }}
+          >
+            Andere
+          </button>
         </div>
+        {isCustomHost(values.smtp_host) && (
+          <div style={{ marginTop: '8px', padding: '8px 10px', background: 'rgba(59, 130, 246, 0.08)', border: '1px solid rgba(59, 130, 246, 0.25)', borderRadius: '6px', fontSize: '12px', color: '#60a5fa' }}>
+            Eigener SMTP-Server: Host, Port und SSL/TLS bitte manuell konfigurieren.
+          </div>
+        )}
       </div>
 
       {/* Host + Port */}
@@ -125,7 +149,8 @@ function SmtpForm({ values, onChange, onTest, onSave, testing, saving, testResul
         <p style={{ margin: 0, fontSize: '12px', color: 'var(--text-secondary)', lineHeight: '1.5' }}>
           <strong>Gmail:</strong> App-Passwort unter myaccount.google.com/apppasswords erstellen.<br />
           <strong>Outlook 365:</strong> App-Passwort oder reguläres Passwort verwenden.<br />
-          <strong>IONOS/Strato:</strong> E-Mail-Passwort aus dem Hosting-Panel verwenden.
+          <strong>IONOS/Strato:</strong> E-Mail-Passwort aus dem Hosting-Panel verwenden.<br />
+          <strong>Andere:</strong> SMTP-Daten Ihres Anbieters manuell eintragen — Standard ist Port 587 (STARTTLS); für Port 465 SSL/TLS aktivieren.
         </p>
       </div>
 

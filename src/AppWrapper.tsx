@@ -11,7 +11,8 @@ import Register from './pages/Register';
 import AbnahmeSignPage from './pages/AbnahmeSignPage';
 import EsignatureAdmin from './components/EsignatureAdmin';
 import EmailSettings from './components/EmailSettings';
-import CompanyInfoSettings from './components/CompanyInfoSettings';
+import Firmenangaben from './pages/Firmenangaben';
+import Agb from './pages/Agb';
 import ProductPricing from './pages/ProductPricing';
 import BranchUebersicht from './pages/BranchUebersicht';
 import { isAdminBranch } from './hooks/useBranchMeta';
@@ -35,18 +36,16 @@ interface AdminPanelContextType {
   openAdminPanel: () => void;
   openEsignatureAdmin: () => void;
   openEmailSettings: () => void;
-  openCompanyInfo: () => void;
 }
 
-const AdminPanelContext = createContext<AdminPanelContextType>({ openAdminPanel: () => {}, openEsignatureAdmin: () => {}, openEmailSettings: () => {}, openCompanyInfo: () => {} });
+const AdminPanelContext = createContext<AdminPanelContextType>({ openAdminPanel: () => {}, openEsignatureAdmin: () => {}, openEmailSettings: () => {} });
 export const useAdminPanel = () => useContext(AdminPanelContext);
 
 function Layout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate();
   const location = useLocation();
   const { user, logout, isAdmin } = useAuth();
-  const { stats } = useStats();
-  const { openAdminPanel, openEmailSettings, openCompanyInfo } = useAdminPanel();
+  const { openAdminPanel, openEmailSettings } = useAdminPanel();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
   // Theme state
@@ -175,21 +174,23 @@ function Layout({ children }: { children: React.ReactNode }) {
           </div>
 
           <div className="nav-section">
-            <span className="nav-section-title">Statistiken</span>
-            <div className="sidebar-stats">
-              <div className="sidebar-stat">
-                <span className="stat-number">{stats.total}</span>
-                <span className="stat-text">Gesamt</span>
-              </div>
-              <div className="sidebar-stat">
-                <span className="stat-number completed">{stats.completed}</span>
-                <span className="stat-text">Fertig</span>
-              </div>
-              <div className="sidebar-stat">
-                <span className="stat-number draft">{stats.draft}</span>
-                <span className="stat-text">Entwurf</span>
-              </div>
-            </div>
+            <span className="nav-section-title">Firma</span>
+            <a href="#" className={`nav-item ${isActive('/firmenangaben') ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); handleNavClick('/firmenangaben'); }}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M3 21h18M5 21V7l8-4v18M19 21V11l-6-4" />
+                <path d="M9 9v.01M9 12v.01M9 15v.01M9 18v.01" />
+              </svg>
+              <span>Firmenangaben</span>
+            </a>
+            <a href="#" className={`nav-item ${isActive('/agb') ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); handleNavClick('/agb'); }}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                <polyline points="14 2 14 8 20 8" />
+                <line x1="16" y1="13" x2="8" y2="13" />
+                <line x1="16" y1="17" x2="8" y2="17" />
+              </svg>
+              <span>AGB</span>
+            </a>
           </div>
 
           <div className="nav-section">
@@ -221,15 +222,6 @@ function Layout({ children }: { children: React.ReactNode }) {
                 </svg>
                 <span>E-Mail Einstellungen</span>
               </a>
-              {user?.role === 'admin' && (
-                <a href="#" className="nav-item" onClick={(e) => { e.preventDefault(); openCompanyInfo(); setMobileMenuOpen(false); }}>
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <path d="M3 21h18M5 21V7l8-4v18M19 21V11l-6-4" />
-                    <path d="M9 9v.01M9 12v.01M9 15v.01M9 18v.01" />
-                  </svg>
-                  <span>Firmenangaben</span>
-                </a>
-              )}
               {isAdminBranch() && (
                 <a href="#" className={`nav-item ${isActive('/filialen') ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); handleNavClick('/filialen'); }}>
                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -325,7 +317,6 @@ function ProtectedContent() {
   const [showAdminPanel, setShowAdminPanel] = useState(false);
   const [showEsignatureAdmin, setShowEsignatureAdmin] = useState(false);
   const [showEmailSettings, setShowEmailSettings] = useState(false);
-  const [showCompanyInfo, setShowCompanyInfo] = useState(false);
   const [users, setUsers] = useState<User[]>([]);
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [inviteEmail, setInviteEmail] = useState('');
@@ -371,10 +362,6 @@ function ProtectedContent() {
     setShowEmailSettings(true);
   };
 
-  const openCompanyInfo = () => {
-    setShowCompanyInfo(true);
-  };
-
   const handleInviteUser = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!inviteEmail) return;
@@ -396,7 +383,7 @@ function ProtectedContent() {
 
   return (
     <StatsContext.Provider value={{ stats, refreshStats: loadStats }}>
-      <AdminPanelContext.Provider value={{ openAdminPanel, openEsignatureAdmin, openEmailSettings, openCompanyInfo }}>
+      <AdminPanelContext.Provider value={{ openAdminPanel, openEsignatureAdmin, openEmailSettings }}>
         <Routes>
           {/* Form sayfası sidebar olmadan */}
           <Route path="/form/:id" element={<FormPage />} />
@@ -411,6 +398,8 @@ function ProtectedContent() {
                 <Route path="/angebot/new" element={<Angebote />} />
                 <Route path="/montageteam" element={<Montageteam />} />
                 <Route path="/produkte" element={<ProductPricing />} />
+                <Route path="/firmenangaben" element={<Firmenangaben />} />
+                <Route path="/agb" element={<Agb />} />
                 <Route path="/filialen" element={isAdminBranch() ? <BranchUebersicht /> : <Navigate to="/" replace />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
@@ -546,13 +535,6 @@ function ProtectedContent() {
         <AnimatePresence>
           {showEmailSettings && (
             <EmailSettings onClose={() => setShowEmailSettings(false)} />
-          )}
-        </AnimatePresence>
-
-        {/* Company Info Modal */}
-        <AnimatePresence>
-          {showCompanyInfo && (
-            <CompanyInfoSettings onClose={() => setShowCompanyInfo(false)} />
           )}
         </AnimatePresence>
       </AdminPanelContext.Provider>

@@ -3,6 +3,11 @@ import { FormData } from '../types';
 import productConfigData from '../config/productConfig.json';
 import type { ProductConfig, FieldConfig } from '../types/productConfig';
 import { getImageUrl, getStoredToken, getAbnahmeImageUrl } from '../services/api';
+import { drawGeschaeftsbriefFooter } from './pdfFooter';
+import { drawAgbPages } from './pdf/pdfAgb';
+import { mergePdf } from './pdf/pdfMerger';
+import { getCachedBranchTerms } from './branchTermsCache';
+import { fetchBranchPdfBytes } from '../services/api';
 
 const productConfig = productConfigData as ProductConfig;
 
@@ -245,6 +250,14 @@ export interface BranchCompanyInfoForPdf {
   company_ort?: string;
   company_telefon?: string;
   company_email?: string;
+  company_ust_id?: string;
+  company_web?: string;
+  company_steuernr?: string;
+  company_iban?: string;
+  company_bic?: string;
+  company_bank_name?: string;
+  company_geschaeftsfuehrer?: string;
+  company_handelsregister?: string;
 }
 
 export const generatePDF = async (
@@ -262,9 +275,9 @@ export const generatePDF = async (
   const margin = 20;
   let yPos = 20;
 
-  // Helper function to check if new page is needed
+  // Helper function to check if new page is needed (footer reserves ~35mm at bottom for Geschäftsbrief footer)
   const checkNewPage = (requiredSpace: number = 15) => {
-    if (yPos + requiredSpace > pageHeight - 20) {
+    if (yPos + requiredSpace > pageHeight - 35) {
       pdf.addPage();
       yPos = 20;
       return true;
@@ -272,42 +285,90 @@ export const generatePDF = async (
     return false;
   };
 
-  // Header - AYLUX Logo (sabit, branch'a göre değişmez)
+  // ============ MODERN LETTERHEAD HEADER ============
+  // Logo (sabit) — sağ üst
   pdf.setFillColor(127, 169, 61);
-  pdf.rect(pageWidth - 70, 10, 50, 25, 'F');
+  pdf.rect(pageWidth - 60, 10, 40, 20, 'F');
   pdf.setTextColor(255, 255, 255);
-  pdf.setFontSize(18);
+  pdf.setFontSize(15);
   pdf.setFont('helvetica', 'bold');
-  pdf.text('AYLUX', pageWidth - 60, 22);
-  pdf.setFontSize(7);
-  pdf.text('SONNENSCHUTZSYSTEME', pageWidth - 65, 28);
+  pdf.text('AYLUX', pageWidth - 52, 21);
+  pdf.setFontSize(6);
+  pdf.text('SONNENSCHUTZSYSTEME', pageWidth - 56, 26);
 
-  // Absender line (branch firma bilgileri — küçük tek satır üstte)
+  // Big bold company name — top-left
   if (companyInfo && companyInfo.company_name) {
-    const absenderParts: string[] = [companyInfo.company_name];
-    if (companyInfo.company_strasse) absenderParts.push(companyInfo.company_strasse);
-    if (companyInfo.company_plz || companyInfo.company_ort) {
-      absenderParts.push(`${companyInfo.company_plz || ''} ${companyInfo.company_ort || ''}`.trim());
-    }
-    if (companyInfo.company_telefon) absenderParts.push(`Tel: ${companyInfo.company_telefon}`);
-    pdf.setTextColor(120, 120, 120);
-    pdf.setFontSize(7);
+    pdf.setTextColor(25, 25, 25);
+    pdf.setFontSize(22);
+    pdf.setFont('helvetica', 'bold');
+    pdf.text(companyInfo.company_name.toUpperCase(), margin, 22);
+
+    // Thick green underline — extends from company name
+    pdf.setDrawColor(127, 169, 61);
+    pdf.setLineWidth(1.2);
+    const underlineWidth = Math.min(pdf.getTextWidth(companyInfo.company_name.toUpperCase()) + 8, pageWidth - 75 - margin);
+    pdf.line(margin, 26, margin + underlineWidth, 26);
+
+    // 3-column info row below name: Address | Contact | (logo space)
+    const infoY = 33;
+    const colWidth = (pageWidth - 75 - margin) / 2;
+    const col1X = margin;
+    const col2X = margin + colWidth + 4;
+
     pdf.setFont('helvetica', 'normal');
-    const absenderText = absenderParts.join('  ·  ');
-    const maxAbsenderWidth = pageWidth - 70 - margin - 4;
-    const absenderLines = pdf.splitTextToSize(absenderText, maxAbsenderWidth);
-    pdf.text(absenderLines, margin, 14);
+    pdf.setFontSize(9);
+    pdf.setTextColor(70, 70, 70);
+
+    // Column 1: Address
+    let c1Y = infoY;
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(7);
+    pdf.setTextColor(127, 169, 61);
+    pdf.text('ADRESSE', col1X, c1Y);
+    c1Y += 4;
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(9);
+    pdf.setTextColor(50, 50, 50);
+    if (companyInfo.company_strasse) {
+      pdf.text(companyInfo.company_strasse, col1X, c1Y);
+      c1Y += 4;
+    }
+    if (companyInfo.company_plz || companyInfo.company_ort) {
+      pdf.text(`${companyInfo.company_plz || ''} ${companyInfo.company_ort || ''}`.trim(), col1X, c1Y);
+    }
+
+    // Column 2: Kontakt
+    let c2Y = infoY;
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(7);
+    pdf.setTextColor(127, 169, 61);
+    pdf.text('KONTAKT', col2X, c2Y);
+    c2Y += 4;
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(9);
+    pdf.setTextColor(50, 50, 50);
+    if (companyInfo.company_telefon) {
+      pdf.text(`Tel.: ${companyInfo.company_telefon}`, col2X, c2Y);
+      c2Y += 4;
+    }
+    if (companyInfo.company_email) {
+      pdf.text(companyInfo.company_email, col2X, c2Y);
+      c2Y += 4;
+    }
+    if (companyInfo.company_web) {
+      pdf.text(companyInfo.company_web, col2X, c2Y);
+    }
   }
 
-  // Title
+  // Title — positioned below the modern letterhead (~50mm)
   pdf.setTextColor(0, 0, 0);
   pdf.setFontSize(20);
   pdf.setFont('helvetica', 'bold');
-  pdf.text(abnahmeOnly ? 'ABNAHME-PROTOKOLL' : 'AUFMASS - DATENBLATT', margin, 25);
+  pdf.text(abnahmeOnly ? 'ABNAHME-PROTOKOLL' : 'AUFMASS - DATENBLATT', margin, 60);
 
   // Abnahme-only mode: add customer info header
   if (abnahmeOnly) {
-    yPos = 38;
+    yPos = 70;
     pdf.setFontSize(10);
     pdf.setFont('helvetica', 'normal');
     pdf.setCharSpace(0);
@@ -327,7 +388,7 @@ export const generatePDF = async (
     }
     yPos += 5;
   } else {
-    yPos = 45;
+    yPos = 70;
   }
 
   // ============ ABNAHME SECTION - If exists (skip for signature PDF) ============
@@ -1810,30 +1871,28 @@ export const generatePDF = async (
   }
   } // end of !abnahmeOnly block
 
-  // Footer - update page count after all pages are added
+  // ============ MODÜL F: AGB (eğer ilgili PDF tipinde işaretliyse) ============
+  const branchTerms = await getCachedBranchTerms();
+  const showAgb = abnahmeOnly ? branchTerms?.show_on_abnahme : branchTerms?.show_on_aufmass;
+  let agbPdfMergeData: { bytes: Uint8Array; selectedPages: number[] } | null = null;
+  if (showAgb) {
+    if (branchTerms?.agb_pdf_path && branchTerms.agb_pdf_pages && branchTerms.agb_pdf_pages.length > 0) {
+      try {
+        const bytes = await fetchBranchPdfBytes(branchTerms.agb_pdf_path);
+        if (bytes) agbPdfMergeData = { bytes, selectedPages: branchTerms.agb_pdf_pages };
+      } catch (e) {
+        console.warn('Could not load AGB PDF:', e);
+      }
+    } else if (branchTerms?.content?.trim()) {
+      drawAgbPages(pdf, branchTerms.content);
+    }
+  }
+
+  // Footer — Living-Deluxe-style pipe-separated horizontal Geschäftsbrief footer
   const pageCount = (pdf as unknown as { internal: { getNumberOfPages: () => number } }).internal.getNumberOfPages();
   for (let i = 1; i <= pageCount; i++) {
     pdf.setPage(i);
-    pdf.setFontSize(8);
-    pdf.setTextColor(128, 128, 128);
-    pdf.setFont('helvetica', 'normal');
-    pdf.text(
-      `Seite ${i} von ${pageCount}`,
-      pageWidth / 2,
-      pageHeight - 10,
-      { align: 'center' }
-    );
-    pdf.text(
-      `Erstellt am: ${new Date().toLocaleDateString('de-DE')}`,
-      margin,
-      pageHeight - 10
-    );
-    pdf.text(
-      companyName,
-      pageWidth - margin,
-      pageHeight - 10,
-      { align: 'right' }
-    );
+    drawGeschaeftsbriefFooter(pdf, pageWidth, pageHeight, margin, companyInfo, companyName, i, pageCount);
   }
 
   // Generate filename
@@ -1841,11 +1900,27 @@ export const generatePDF = async (
   const date = formData.datum || new Date().toISOString().split('T')[0];
   const fileName = abnahmeOnly ? `Abnahme_${customerName}_${date}.pdf` : `Aufmass_${customerName}_${date}.pdf`;
 
-  // Return blob for preview or save directly
-  if (options?.returnBlob) {
-    const blob = pdf.output('blob');
-    return { blob, fileName };
+  // ============ MERGE: append AGB PDF if any ============
+  let finalBlob: Blob = pdf.output('blob');
+  if (agbPdfMergeData) {
+    try {
+      finalBlob = await mergePdf({ basePdf: finalBlob, agbPdf: agbPdfMergeData, appendAgbAtEnd: true });
+    } catch (e) {
+      console.error('AGB PDF merge failed, falling back to base PDF:', e);
+    }
   }
 
-  pdf.save(fileName);
+  // Return blob for preview or save directly
+  if (options?.returnBlob) {
+    return { blob: finalBlob, fileName };
+  }
+
+  const url = URL.createObjectURL(finalBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 };

@@ -758,6 +758,49 @@ export async function getPdfStatus(formId: number): Promise<PdfStatus> {
   return response.json();
 }
 
+// ============ FORM PDF SNAPSHOTS — frozen historic copies per document type ============
+
+export type FormPdfDocType = 'aufmass' | 'angebot' | 'abnahme' | 'rechnung';
+
+export interface FormPdfSnapshot {
+  document_type: FormPdfDocType;
+  created_at: string;
+}
+
+export async function saveFormPdfSnapshot(
+  formId: number,
+  docType: FormPdfDocType,
+  pdfBlob: Blob
+): Promise<{ success: boolean; document_type: FormPdfDocType; created_at: string }> {
+  const formData = new window.FormData();
+  formData.append('pdf', pdfBlob, `form_${formId}_${docType}.pdf`);
+  formData.append('document_type', docType);
+
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/forms/${formId}/pdf-snapshot`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to save snapshot');
+  }
+  return response.json();
+}
+
+export async function getFormPdfSnapshots(formId: number): Promise<FormPdfSnapshot[]> {
+  const response = await authFetch(`${API_BASE_URL}/forms/${formId}/pdf-snapshots`);
+  if (!response.ok) return [];
+  return response.json();
+}
+
+// URL-with-token for opening a snapshot in a new tab
+export function getFormPdfSnapshotUrl(formId: number, docType: FormPdfDocType): string {
+  const token = getStoredToken();
+  return `${API_BASE_URL}/forms/${formId}/pdf-snapshot/${docType}${token ? `?token=${token}` : ''}`;
+}
+
 // ============ E-SIGNATURE API ============
 
 export interface BranchFeatures {
@@ -1181,6 +1224,13 @@ export const sendEmail = (data: {
   to: string; subject: string; body: string; body_html?: string;
   form_id?: number; lead_id?: number; angebot_ids?: number[];
   email_type?: string; attachment_name?: string;
+  /** When true, attaches the branch's uploaded AGB-PDF as a separate file */
+  attach_agb?: boolean;
+  /** Client-generated PDFs to attach (e.g. one per product). Each entry: { filename, base64 } */
+  extra_pdfs?: { filename: string; base64: string }[];
+  /** When true, server skips attaching the consolidated form/lead PDF
+   *  (used when the client uploads per-product split PDFs via extra_pdfs) */
+  suppress_main_pdf?: boolean;
 }): Promise<{ success: boolean; message: string }> => api.post('/email/send', data);
 
 export const getEmailLog = (): Promise<EmailLogEntry[]> => api.get('/email/log');
@@ -1212,6 +1262,211 @@ export const saveBranchCompanyInfo = (info: BranchCompanyInfo): Promise<{ succes
 // Public read for PDF generation (any authenticated user)
 export const getBranchCompanyInfoPublic = (): Promise<BranchCompanyInfo> =>
   api.get('/branch/company-info-public');
+
+// ============ MODÜL F: PRODUCT IMAGES ============
+export interface ProductImage {
+  id: number;
+  image_path: string;
+  image_order: number;
+  show_on_cover: boolean;
+  uploaded_at?: string;
+}
+
+export const getProductImages = (productId: number): Promise<ProductImage[]> =>
+  api.get(`/products/${productId}/images`);
+
+export const uploadProductImage = async (productId: number, file: File): Promise<ProductImage> => {
+  const formData = new FormData();
+  formData.append('image', file);
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/products/${productId}/images`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || 'Upload failed');
+  }
+  return response.json();
+};
+
+export const deleteProductImage = (productId: number, imageId: number): Promise<{ success: boolean }> =>
+  api.delete(`/products/${productId}/images/${imageId}`);
+
+export const setProductImageCoverFlag = (
+  productId: number,
+  imageId: number,
+  show_on_cover: boolean
+): Promise<{ success: boolean }> =>
+  api.put(`/products/${productId}/images/${imageId}/cover-flag`, { show_on_cover });
+
+// ============ MODÜL F: BRANCH TERMS (AGB) ============
+export interface BranchTerms {
+  content: string;
+  show_on_aufmass: boolean;
+  show_on_angebot: boolean;
+  show_on_abnahme: boolean;
+  show_on_rechnung: boolean;
+  agb_pdf_path?: string | null;
+  agb_pdf_pages?: number[] | null;
+  /** When true, AGB is sent as a separate email attachment (rather than embedded in the main PDF) */
+  attach_separately?: boolean;
+}
+
+export const getBranchTerms = (): Promise<BranchTerms> => api.get('/branch/terms');
+
+export const saveBranchTerms = (terms: BranchTerms): Promise<{ success: boolean }> =>
+  api.put('/branch/terms', terms);
+
+// ============ MODÜL F2: PDF Cover/AGB Override ============
+export interface ProductCoverPdf {
+  id: number;
+  file_path: string;
+  selected_pages: number[];
+  page_count: number;
+  uploaded_at: string;
+}
+
+export interface BranchAgbPdf {
+  file_path: string;
+  selected_pages: number[];
+  page_count: number;
+}
+
+export const getProductCoverPdf = (productId: number): Promise<ProductCoverPdf | null> =>
+  api.get(`/products/${productId}/cover-pdf`);
+
+export const uploadProductCoverPdf = async (productId: number, file: File): Promise<ProductCoverPdf> => {
+  const formData = new FormData();
+  formData.append('pdf', file);
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/products/${productId}/cover-pdf`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || 'Upload failed');
+  }
+  return response.json();
+};
+
+export const setCoverPdfPages = (productId: number, selected_pages: number[]): Promise<{ success: boolean }> =>
+  api.put(`/products/${productId}/cover-pdf/pages`, { selected_pages });
+
+export const deleteProductCoverPdf = (productId: number): Promise<{ success: boolean }> =>
+  api.delete(`/products/${productId}/cover-pdf`);
+
+export const uploadAgbPdf = async (file: File): Promise<BranchAgbPdf> => {
+  const formData = new FormData();
+  formData.append('pdf', file);
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/branch/agb-pdf`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || 'Upload failed');
+  }
+  return response.json();
+};
+
+export const setAgbPdfPages = (selected_pages: number[]): Promise<{ success: boolean }> =>
+  api.put('/branch/agb-pdf/pages', { selected_pages });
+
+export const deleteAgbPdf = (): Promise<{ success: boolean }> =>
+  api.delete('/branch/agb-pdf');
+
+// Returns absolute URL with auth token for fetching uploaded PDFs
+export const getBranchPdfUrl = (filename: string): string =>
+  `${API_BASE_URL}/branch-pdf/${filename}`;
+
+// Cache branch-uploaded PDF bytes per filename — same AGB/cover PDF is loaded once
+// for split-per-product flows that call fetchBranchPdfBytes once per item.
+// Returns a fresh Uint8Array slice each time so consumers (pdf-lib, pdfjs) can transfer
+// the buffer without invalidating the cache.
+const branchPdfBytesCache = new Map<string, Uint8Array>();
+const branchPdfInFlight = new Map<string, Promise<Uint8Array | null>>();
+
+export const fetchBranchPdfBytes = async (filename: string): Promise<Uint8Array | null> => {
+  const cached = branchPdfBytesCache.get(filename);
+  if (cached) return new Uint8Array(cached); // copy so callers can transfer
+
+  const pending = branchPdfInFlight.get(filename);
+  if (pending) return pending.then((b) => (b ? new Uint8Array(b) : null));
+
+  const token = getStoredToken();
+  const promise = (async (): Promise<Uint8Array | null> => {
+    try {
+      const response = await fetch(getBranchPdfUrl(filename), {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (!response.ok) return null;
+      const buf = await response.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      branchPdfBytesCache.set(filename, bytes);
+      return bytes;
+    } catch {
+      return null;
+    } finally {
+      branchPdfInFlight.delete(filename);
+    }
+  })();
+
+  branchPdfInFlight.set(filename, promise);
+  const result = await promise;
+  return result ? new Uint8Array(result) : null;
+};
+
+export const invalidateBranchPdfBytesCache = (filename?: string) => {
+  if (filename !== undefined) branchPdfBytesCache.delete(filename);
+  else branchPdfBytesCache.clear();
+};
+
+// ============ LEAD PDF CACHE ============
+export const fetchCachedLeadPdf = async (
+  leadId: number,
+  angebotId: number | null,
+  documentType: 'angebot' | 'aufmass' | 'abnahme' | 'rechnung'
+): Promise<Blob | null> => {
+  const token = getStoredToken();
+  const params = new URLSearchParams();
+  if (angebotId !== null) params.set('angebot_id', String(angebotId));
+  params.set('document_type', documentType);
+  try {
+    const response = await fetch(`${API_BASE_URL}/lead-pdf-cache/${leadId}?${params}`, {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+    });
+    if (!response.ok) return null;
+    const ct = response.headers.get('content-type') || '';
+    if (!ct.includes('pdf')) return null; // null JSON response means no cache
+    return await response.blob();
+  } catch {
+    return null;
+  }
+};
+
+export const storeCachedLeadPdf = async (
+  leadId: number,
+  angebotId: number | null,
+  documentType: 'angebot' | 'aufmass' | 'abnahme' | 'rechnung',
+  pdfBlob: Blob
+): Promise<void> => {
+  const formData = new FormData();
+  formData.append('pdf', pdfBlob, 'cached.pdf');
+  if (angebotId !== null) formData.append('angebot_id', String(angebotId));
+  formData.append('document_type', documentType);
+  const token = getStoredToken();
+  await fetch(`${API_BASE_URL}/lead-pdf-cache/${leadId}`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+};
 
 // ============ BRANCH USAGE DASHBOARD ============
 export interface BranchUserStat {
