@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getPdfUrl, getPdfStatus, getForm, savePdf, getBranchFeatures, sendAesSignature, sendAbnahmeAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl, markLeadAngebotAsSent } from '../services/api';
+import { api, getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getPdfUrl, getPdfStatus, getForm, savePdf, getBranchFeatures, sendAesSignature, sendAbnahmeAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl, markLeadAngebotAsSent, markFormPostSent } from '../services/api';
 import type { BranchFeatures, EsignatureStatus, EsignatureRequest, AngebotItem, SignatureNotification, FormPdfDocType, FormPdfSnapshot } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import type { AbnahmeImage } from '../services/api';
@@ -21,6 +21,9 @@ const isAdminOrOffice = () => {
   const user = getStoredUser();
   return user?.role === 'admin' || user?.role === 'office';
 };
+
+// Used by the "mark sent by post" flow — only admins can flip the flag.
+const isAdmin = () => getStoredUser()?.role === 'admin';
 
 // Status options for forms - ordered workflow
 const STATUS_OPTIONS = [
@@ -104,6 +107,8 @@ const Dashboard = () => {
   const [leadModalOpen, setLeadModalOpen] = useState(false);
   const [leadModalEditData, setLeadModalEditData] = useState<unknown>(null);
   const [leadModalFromAufmassId, setLeadModalFromAufmassId] = useState<number | null>(null);
+  // Confirm dialog id for the admin-only "mark sent by post" flow.
+  const [postSentConfirmId, setPostSentConfirmId] = useState<number | null>(null);
   // Rechnung / Anzahlung modal state (Modul C)
   const [rechnungModalOpen, setRechnungModalOpen] = useState(false);
   const [rechnungFormId, setRechnungFormId] = useState<number | null>(null);
@@ -367,6 +372,22 @@ const Dashboard = () => {
   const getStatusColor = (status: string): string => {
     const option = STATUS_OPTIONS.find(o => o.value === status);
     return option?.color || '#7fa93d';
+  };
+
+  // Confirm + execute the admin-only postal mail mark. Refreshes the form
+  // list so the badge + button overlay update without a manual reload.
+  const handleConfirmMarkPostSent = async (formId: number) => {
+    try {
+      await markFormPostSent(formId);
+      setPostSentConfirmId(null);
+      const fresh = await getForms();
+      setForms(fresh);
+      toast.success('Per Post markiert', `Aufmaß #${formId} wurde als per Post versendet markiert.`);
+    } catch (err) {
+      console.error('Mark post-sent failed:', err);
+      toast.error('Fehler', 'Konnte nicht als per Post versendet markiert werden.');
+      setPostSentConfirmId(null);
+    }
   };
 
   const handleStatusChange = async (formId: number, newStatus: string) => {
@@ -1533,6 +1554,23 @@ Aylux Team`;
                             📧 E-Mail ausstehend
                           </span>
                         )}
+                        {/* Postal status — admin-only manual flag. Same UX
+                            as the e-mail badge but a separate channel. */}
+                        {form.post_sent_at ? (
+                          <span
+                            className="post-sent-badge"
+                            title={`Per Post versendet: ${new Date(form.post_sent_at).toLocaleString('de-DE')}`}
+                          >
+                            ✓ Per Post versendet
+                          </span>
+                        ) : (
+                          <span
+                            className="post-pending-badge"
+                            title="Es wurde noch keine Postsendung markiert"
+                          >
+                            📬 Post ausstehend
+                          </span>
+                        )}
                       </div>
                       {isAdminOrOffice() ? (
                         <div className="status-selector">
@@ -2059,6 +2097,39 @@ Aylux Team`;
                         {form.email_sent_at && (
                           <span className="email-sent-check" aria-hidden="true">✓</span>
                         )}
+                      </button>
+                    )}
+                    {/* Admin-only postal "mark sent" button. Hidden once the
+                        flag is set so the action surface stays clean (the
+                        badge + button overlay still reflect the state).
+                        Truck icon to clearly distinguish from the e-mail
+                        envelope right next to it. */}
+                    {isAdmin() && !form.post_sent_at && (
+                      <button
+                        className="action-btn post"
+                        title="Als per Post versendet markieren"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPostSentConfirmId(form.id!);
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M22 2L11 13" />
+                          <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+                        </svg>
+                      </button>
+                    )}
+                    {form.post_sent_at && (
+                      <button
+                        className="action-btn post sent"
+                        title={`Per Post versendet: ${new Date(form.post_sent_at).toLocaleString('de-DE')}`}
+                        disabled
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M22 2L11 13" />
+                          <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+                        </svg>
+                        <span className="email-sent-check" aria-hidden="true">✓</span>
                       </button>
                     )}
                     {/* E-Signature button - only show if feature is enabled */}
@@ -2935,6 +3006,39 @@ Aylux Team`;
             onClose={() => setEmailComposer(null)}
             onSent={() => loadData()}
           />
+        )}
+      </AnimatePresence>
+
+      {/* Mark-sent-by-post confirm dialog (admin only). Mirrors the lead
+          manual-versendet modal from Modül B for visual consistency. */}
+      <AnimatePresence>
+        {postSentConfirmId !== null && (
+          <motion.div
+            className="modal-overlay-modern"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setPostSentConfirmId(null)}
+          >
+            <motion.div
+              className="modal-modern"
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3>Aufmaß per Post versendet?</h3>
+              <p>Bestätigen Sie, dass dieses Aufmaß per Post an den Kunden versendet wurde. Diese Markierung kann nicht rückgängig gemacht werden.</p>
+              <div className="modal-actions-modern">
+                <button className="modal-btn secondary" onClick={() => setPostSentConfirmId(null)}>
+                  Abbrechen
+                </button>
+                <button className="modal-btn primary" onClick={() => handleConfirmMarkPostSent(postSentConfirmId)}>
+                  Als versendet markieren
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
 

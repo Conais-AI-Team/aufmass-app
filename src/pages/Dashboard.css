@@ -4999,8 +4999,9 @@
   border: 1px solid rgba(217, 119, 6, 0.35);
 }
 
-/* E-Mail sent check overlay on the action button (Dashboard + AusAufmassTab share these styles) */
+/* E-Mail / Post sent check overlay on the action button (Dashboard + AusAufmassTab share these styles) */
 .action-btn.email,
+.action-btn.post,
 .btn-icon {
   position: relative;
 }
@@ -5026,3 +5027,54 @@
 .action-btn.email.sent {
   border-color: rgba(22, 163, 74, 0.45);
 }
+
+/* Postal status badges — blue family to distinguish from e-mail (green/amber) */
+.post-sent-badge,
+.post-pending-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  margin-top: 0.35rem;
+  margin-left: 0.35rem;
+  cursor: default;
+  user-select: none;
+}
+
+/* Sent state mirrors the e-mail versendet badge — same green so the user
+   reads "Per Post versendet" with the same "all good" signal. */
+.post-sent-badge {
+  color: #16a34a;
+  background: rgba(22, 163, 74, 0.12);
+  border: 1px solid rgba(22, 163, 74, 0.35);
+}
+
+.post-pending-badge {
+  color: #475569;
+  background: rgba(71, 85, 105, 0.12);
+  border: 1px solid rgba(71, 85, 105, 0.35);
+}
+
+/* Postal action button (admin-only) — blue treatment */
+.action-btn.post {
+  color: #2563eb;
+  border-color: rgba(37, 99, 235, 0.4);
+}
+
+.action-btn.post:hover:not(:disabled) {
+  background: rgba(37, 99, 235, 0.12);
+  border-color: #2563eb;
+}
+
+.action-btn.post.sent {
+  color: #2563eb;
+  border-color: rgba(37, 99, 235, 0.4);
+  cursor: default;
+  opacity: 0.85;
+}
+
+/* The check overlay reuses .email-sent-check from above (same dot, green tick).
+   Postal "sent" buttons get the same green tick for instant recognition. */

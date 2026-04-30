@@ -205,6 +205,23 @@ export default function AusAufmassTab({
                           📧 E-Mail ausstehend
                         </span>
                       )}
+                      {/* Postal status — admin-only manual flag (set from
+                          Aufmaße list). Read-only here, just mirrors. */}
+                      {form.post_sent_at ? (
+                        <span
+                          className="post-sent-badge"
+                          title={`Per Post versendet: ${new Date(form.post_sent_at).toLocaleString('de-DE')}`}
+                        >
+                          ✓ Per Post versendet
+                        </span>
+                      ) : (
+                        <span
+                          className="post-pending-badge"
+                          title="Es wurde noch keine Postsendung markiert"
+                        >
+                          📬 Post ausstehend
+                        </span>
+                      )}
                       {form.kundeEmail && <span className="lead-email">{form.kundeEmail}</span>}
                     </div>
                   </div>

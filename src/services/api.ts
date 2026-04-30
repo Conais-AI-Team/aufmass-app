@@ -70,6 +70,10 @@ export interface FormData {
   // button after save, or Dashboard card's e-mail icon). NULL means
   // nothing has gone out yet — Dashboard renders an "ausstehend" badge.
   email_sent_at?: string | null;
+  // First time the Aufmaß was marked as sent by physical mail (admin-only
+  // manual action via the post button on the card). NULL means no postal
+  // copy has gone out yet.
+  post_sent_at?: string | null;
 }
 
 export interface ApiForm {
@@ -104,6 +108,7 @@ export interface ApiForm {
   signature_name?: string | null;
   abnahme_sign_pending?: boolean;
   email_sent_at?: string | null;
+  post_sent_at?: string | null;
 }
 
 export interface Stats {
@@ -342,7 +347,8 @@ function transformApiToFrontend(apiForm: ApiForm): FormData {
     customerSignature: apiForm.customer_signature || null,
     signatureName: apiForm.signature_name || null,
     abnahmeSignPending: Boolean(apiForm.abnahme_sign_pending),
-    email_sent_at: apiForm.email_sent_at ?? null
+    email_sent_at: apiForm.email_sent_at ?? null,
+    post_sent_at: apiForm.post_sent_at ?? null
   };
 }
 
@@ -1130,6 +1136,16 @@ export async function markLeadAngebotAsSentManual(leadId: number): Promise<{ mes
     method: 'POST'
   });
   if (!response.ok) throw new Error('Failed to mark Angebot as sent (manual)');
+  return response.json();
+}
+
+// Admin-only: mark an Aufmaß as physically posted to the customer.
+// Idempotent on the backend (first stamp wins via COALESCE).
+export async function markFormPostSent(formId: number): Promise<{ message: string; post_sent_at: string }> {
+  const response = await authFetch(`${API_BASE_URL}/forms/${formId}/mark-post-sent`, {
+    method: 'POST'
+  });
+  if (!response.ok) throw new Error('Failed to mark form as sent by post');
   return response.json();
 }
 
