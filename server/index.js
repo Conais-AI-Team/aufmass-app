@@ -586,10 +586,125 @@ async function initializeTables() {
     `);
     console.log('aufmass_rechnung_counters table ready');
 
+    // ============ MODÜL B v3: Lead-products eager seed ============
+    // Adds size_values JSONB + size_profile so non-2D shapes (Markise, Keil) can be priced.
+    // Makes price NULLABLE so empty placeholder rows can exist.
+    // Existing Köln test data is preserved; we only ADD missing rows from productConfig.json.
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_values JSONB`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_profile VARCHAR(10)`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ALTER COLUMN price DROP NOT NULL`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_products_size_values ON aufmass_lead_products USING GIN (size_values)`);
+    console.log('Modul B v3 columns ready (size_values, size_profile)');
+
+    // Eager seed runs in the background so server startup is not blocked
+    // (~13k idempotent INSERTs across all branches). Errors logged but don't crash startup.
+    seedLeadProductsFromConfig()
+      .then(() => console.log('Lead-products eager seed: done (background)'))
+      .catch((seedErr) => console.error('Lead-products eager seed failed:', seedErr.message));
+
     console.log('Database tables initialized');
   } catch (err) {
     console.error('Table initialization failed:', err.message);
   }
+}
+
+// ============ MODÜL B v3: Eager Seed Helper ============
+// Reads productConfig.json, infers each model's size profile, and inserts placeholder rows
+// (price=NULL) for every active branch. Idempotent: existing rows are never overwritten.
+//
+// Unit handling: productConfig.json fields are mm. The legacy aufmass_lead_products.breite/tiefe
+// columns store cm (Çağlayan's data). To stay backwards compatible we WRITE cm into legacy
+// columns AND mm into size_values JSONB. Lookup queries can use either.
+
+const SIZE_PROFILE_DEFAULTS = {
+  // mm grids — divided by 10 when written to legacy breite/tiefe (cm)
+  P1: { axes: ['breite', 'tiefe'],                                 grid: { breite: [3000,4000,5000,6000,7000], tiefe: [2500,3000,3500,4000,5000] } },
+  P2: { axes: ['markisenbreite', 'markisenlaenge'],                grid: { markisenbreite: [3000,4000,5000,6000], markisenlaenge: [2000,2500,3000,3500] } },
+  P3: { axes: ['markisenbreite', 'markisenlaenge', 'markisenhoehe'], grid: { markisenbreite: [3000,4000,5000], markisenlaenge: [2000,2500,3000], markisenhoehe: [2500,3000] } },
+  P4: { axes: ['markisenbreite', 'markisenhoehe'],                 grid: { markisenbreite: [1500,2000,2500,3000], markisenhoehe: [2000,2500,3000] } },
+  P5: { axes: ['markisenbreite'],                                  grid: { markisenbreite: [3000,4000,5000,6000,7000] } },
+  P6: { axes: ['breite', 'hoehe'],                                 grid: { breite: [1000,1500,2000,2500,3000], hoehe: [2000,2200,2500,2800] } },
+  P7: { axes: ['breite', 'vorneHoehe', 'hintenHoehe'],             grid: { breite: [1000,1500,2000], vorneHoehe: [2000,2200,2500], hintenHoehe: [2500,2800,3000] } },
+  P8: { axes: ['laenge', 'vorneHoehe', 'hintenHoehe'],             grid: { laenge: [500,1000,1500,2000], vorneHoehe: [2000,2500], hintenHoehe: [2500,3000] } }
+};
+
+function inferSizeProfile(fields) {
+  const names = (fields || []).map(f => f.name);
+  if (names.includes('markisenbreite') && names.includes('markisenlaenge') && names.includes('markisenhoehe')) return 'P3';
+  if (names.includes('markisenbreite') && names.includes('markisenlaenge')) return 'P2';
+  if (names.includes('markisenbreite') && names.includes('markisenhoehe')) return 'P4';
+  if (names.includes('markisenbreite')) return 'P5';
+  if (names.includes('breite') && names.includes('vorneHoehe') && names.includes('hintenHoehe')) return 'P7';
+  if (names.includes('laenge') && names.includes('vorneHoehe') && names.includes('hintenHoehe')) return 'P8';
+  if (names.includes('breite') && names.includes('hoehe')) return 'P6';
+  if (names.includes('breite') && names.includes('tiefe')) return 'P1';
+  return null;
+}
+
+function cartesianProduct(arrays) {
+  return arrays.reduce((acc, arr) => acc.flatMap(a => arr.map(b => [...a, b])), [[]]);
+}
+
+async function seedLeadProductsFromConfig() {
+  const fs = await import('fs');
+  const path = await import('path');
+  const configPath = path.join(process.cwd(), '..', 'src', 'config', 'productConfig.json');
+  if (!fs.existsSync(configPath)) {
+    console.warn('productConfig.json not found at', configPath, '- skipping seed');
+    return;
+  }
+  const productConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+  // Active branches: every distinct branch_id ever seen in any data table, plus a default.
+  // We don't have a branches table here so we union from existing user/lead data.
+  const branchesResult = await pool.query(`
+    SELECT DISTINCT branch_id AS slug FROM aufmass_users WHERE branch_id IS NOT NULL
+    UNION SELECT DISTINCT branch_id FROM aufmass_lead_products WHERE branch_id IS NOT NULL
+  `);
+  const branches = branchesResult.rows.map(r => r.slug).filter(Boolean);
+  if (branches.length === 0) branches.push('koblenz');  // safety default
+
+  let totalInserted = 0;
+  for (const [category, types] of Object.entries(productConfig)) {
+    for (const [productType, typeData] of Object.entries(types)) {
+      const profileKey = inferSizeProfile(typeData.fields || []);
+      if (!profileKey) continue;
+      const profile = SIZE_PROFILE_DEFAULTS[profileKey];
+      const grid = profile.grid;
+      const combos = cartesianProduct(profile.axes.map(ax => grid[ax]));
+
+      for (const modelName of (typeData.models || [])) {
+        for (const combo of combos) {
+          const sizeValuesMm = Object.fromEntries(profile.axes.map((ax, i) => [ax, combo[i]]));
+          // MODÜL B v3: DB now stores mm directly (no cm conversion).
+          const breiteMm = sizeValuesMm[profile.axes[0]] || 0;
+          const tiefeMm  = sizeValuesMm[profile.axes[1]] || 0;  // 1D profiles: 0
+
+          for (const branchSlug of branches) {
+            // No UNIQUE constraint exists — use NOT EXISTS to keep seed idempotent.
+            const result = await pool.query(`
+              INSERT INTO aufmass_lead_products
+                (branch_id, category, product_type, product_name,
+                 breite, tiefe, price, pricing_type,
+                 size_values, size_profile, is_active)
+              SELECT $1::varchar, $2::varchar, $3::varchar, $4::varchar,
+                     $5::int, $6::int, NULL, 'dimension', $7::jsonb, $8::varchar, true
+              WHERE NOT EXISTS (
+                SELECT 1 FROM aufmass_lead_products
+                WHERE branch_id = $1::varchar AND product_name = $4::varchar
+                  AND breite = $5::int AND tiefe = $6::int
+              )
+              RETURNING id
+            `, [branchSlug, category, productType, modelName, breiteMm, tiefeMm,
+                JSON.stringify(sizeValuesMm), profileKey]);
+            if (result.rows.length > 0) totalInserted++;
+          }
+        }
+      }
+    }
+  }
+  if (totalInserted > 0) console.log(`Eager seed: ${totalInserted} placeholder rows inserted across ${branches.length} branches`);
+  else console.log(`Eager seed: no new rows (catalog up-to-date)`);
 }
 
 // ============ AUTH MIDDLEWARE ============
@@ -2393,18 +2508,95 @@ app.get('/api/forms/:id/angebot', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Form not found' });
     }
 
-    // Get angebot summary
-    const summaryResult = await pool.query('SELECT * FROM aufmass_angebot WHERE form_id = $1', [id]);
-
-    // Get angebot items
-    const itemsResult = await pool.query(
+    // (1) Legacy form-bazli Angebot (eski Caglayan oncesi akis)
+    const legacySummary = await pool.query('SELECT * FROM aufmass_angebot WHERE form_id = $1', [id]);
+    const legacyItems = await pool.query(
       'SELECT * FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id',
       [id]
     );
+    if (legacySummary.rows.length > 0 && legacyItems.rows.length > 0) {
+      return res.json({ summary: legacySummary.rows[0], items: legacyItems.rows });
+    }
+
+    // (2) MODÜL B v3: form'un lead_id'si varsa lead-bazli items'i Angebot formatina cevir.
+    // Bu sayede RechnungForm (Modül C) Caglayan'in LeadFormModal akisinda olusan
+    // verileri de gorebilir.
+    const formRow = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [id]);
+    const leadId = formRow.rows[0]?.lead_id;
+    if (!leadId) {
+      return res.json({ summary: null, items: [] });
+    }
+
+    const leadRes = await pool.query('SELECT * FROM aufmass_leads WHERE id = $1', [leadId]);
+    if (leadRes.rows.length === 0) {
+      return res.json({ summary: null, items: [] });
+    }
+    const lead = leadRes.rows[0];
+
+    const itemsRes = await pool.query(
+      'SELECT * FROM aufmass_lead_items WHERE lead_id = $1 ORDER BY id',
+      [leadId]
+    );
+    const extrasRes = await pool.query(
+      'SELECT * FROM aufmass_lead_extras WHERE lead_id = $1 ORDER BY id',
+      [leadId]
+    );
+
+    // Map lead_items → Angebot.items shape (bezeichnung, menge, einzelpreis, gesamtpreis)
+    let sortIdx = 0;
+    const mappedItems = itemsRes.rows.map(it => {
+      const dimsLabel = (it.breite && it.tiefe)
+        ? ` (${it.breite}×${it.tiefe} mm)`
+        : (it.unit_label ? ` (${it.unit_label})` : '');
+      const lineTotal = (Number(it.unit_price) * Number(it.quantity)) - Number(it.discount || 0);
+      return {
+        id: it.id,
+        form_id: parseInt(id),
+        bezeichnung: `${it.product_name}${dimsLabel}`,
+        menge: Number(it.quantity),
+        einzelpreis: Number(it.unit_price),
+        gesamtpreis: lineTotal,
+        sort_order: sortIdx++,
+      };
+    });
+
+    // Append extras as additional invoice lines
+    for (const ex of extrasRes.rows) {
+      mappedItems.push({
+        id: -ex.id,           // negative ids to avoid collision
+        form_id: parseInt(id),
+        bezeichnung: ex.description,
+        menge: 1,
+        einzelpreis: Number(ex.price),
+        gesamtpreis: Number(ex.price),
+        sort_order: sortIdx++,
+      });
+    }
+
+    // Compute totals matching Angebot summary contract (netto/mwst/brutto)
+    const subtotal = Number(lead.subtotal || 0);
+    const totalDiscount = Number(lead.total_discount || 0);
+    const totalPrice = Number(lead.total_price || 0);
+    const netto = totalPrice / 1.19;
+    const mwstSatz = 19;
+    const mwstBetrag = totalPrice - netto;
 
     res.json({
-      summary: summaryResult.rows[0] || null,
-      items: itemsResult.rows
+      summary: {
+        id: lead.id,
+        form_id: parseInt(id),
+        netto_summe: netto.toFixed(2),
+        mwst_satz: mwstSatz,
+        mwst_betrag: mwstBetrag.toFixed(2),
+        brutto_summe: totalPrice.toFixed(2),
+        angebot_datum: lead.created_at,
+        bemerkungen: lead.notes,
+        // For UI: indicate which path the data came from
+        source: 'lead',
+        original_subtotal: subtotal,
+        original_total_discount: totalDiscount,
+      },
+      items: mappedItems
     });
   } catch (err) {
     console.error('Error fetching Angebot:', err);
@@ -2533,14 +2725,65 @@ app.post('/api/forms/:id/rechnung', authenticateToken, async (req, res) => {
        FROM aufmass_forms WHERE id = $1`, [id])).rows[0];
     if (!formRow) return res.status(404).json({ error: 'Form not found' });
 
-    const angebotRow = (await pool.query(
+    // (1) Legacy form-bazli Angebot
+    let angebotRow = (await pool.query(
       'SELECT netto_summe, mwst_satz, mwst_betrag, brutto_summe FROM aufmass_angebot WHERE form_id = $1',
       [id])).rows[0];
-    if (!angebotRow) return res.status(400).json({ error: 'Form has no Angebot — cannot create Rechnung' });
-
-    const itemsRows = (await pool.query(
+    let itemsRows = (await pool.query(
       'SELECT bezeichnung, menge, einzelpreis, gesamtpreis, sort_order FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id',
       [id])).rows;
+
+    // (2) MODÜL B fallback: form'un lead_id'si varsa lead-bazli items'i Angebot formatina cevir.
+    if (!angebotRow || itemsRows.length === 0) {
+      const formInfo = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [id]);
+      const leadId = formInfo.rows[0]?.lead_id;
+      if (leadId) {
+        const leadRes = await pool.query('SELECT * FROM aufmass_leads WHERE id = $1', [leadId]);
+        if (leadRes.rows.length > 0) {
+          const lead = leadRes.rows[0];
+          const leadItems = (await pool.query('SELECT * FROM aufmass_lead_items WHERE lead_id = $1 ORDER BY id', [leadId])).rows;
+          const leadExtras = (await pool.query('SELECT * FROM aufmass_lead_extras WHERE lead_id = $1 ORDER BY id', [leadId])).rows;
+
+          const totalPrice = Number(lead.total_price || 0);
+          const nettoCalc = totalPrice / 1.19;
+          const mwstSatzCalc = 19;
+          const mwstBetragCalc = totalPrice - nettoCalc;
+
+          angebotRow = {
+            netto_summe: nettoCalc.toFixed(2),
+            mwst_satz: mwstSatzCalc,
+            mwst_betrag: mwstBetragCalc.toFixed(2),
+            brutto_summe: totalPrice.toFixed(2),
+          };
+
+          let sortIdx = 0;
+          itemsRows = leadItems.map(it => {
+            const dimsLabel = (it.breite && it.tiefe)
+              ? ` (${it.breite}×${it.tiefe} mm)`
+              : (it.unit_label ? ` (${it.unit_label})` : '');
+            const lineTotal = (Number(it.unit_price) * Number(it.quantity)) - Number(it.discount || 0);
+            return {
+              bezeichnung: `${it.product_name}${dimsLabel}`,
+              menge: Number(it.quantity),
+              einzelpreis: Number(it.unit_price),
+              gesamtpreis: lineTotal,
+              sort_order: sortIdx++,
+            };
+          });
+          for (const ex of leadExtras) {
+            itemsRows.push({
+              bezeichnung: ex.description,
+              menge: 1,
+              einzelpreis: Number(ex.price),
+              gesamtpreis: Number(ex.price),
+              sort_order: sortIdx++,
+            });
+          }
+        }
+      }
+    }
+
+    if (!angebotRow) return res.status(400).json({ error: 'Form has no Angebot — cannot create Rechnung' });
     if (itemsRows.length === 0) return res.status(400).json({ error: 'Angebot has no items' });
 
     // For Schlussrechnung the displayed totals stay the full Angebot brutto;
@@ -2699,6 +2942,39 @@ app.post('/api/rechnungen/:id/pdf', authenticateToken, express.raw({ type: 'appl
     await pool.query(
       `UPDATE aufmass_rechnungen SET generated_pdf = $1, pdf_generated_at = NOW() WHERE id = $2`,
       [req.body, id]);
+
+    // MODÜL B v3: mirror to form_pdf_snapshots so the Aufmaß dropdown sees Rechnung-PDF
+    try {
+      const formRow = await pool.query('SELECT form_id FROM aufmass_rechnungen WHERE id = $1', [id]);
+      const formId = formRow.rows[0]?.form_id;
+      if (formId) {
+        const snapDir = path.join(PDF_DIR, 'snapshots');
+        if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+        const snapFilename = `form${formId}_rechnung_${Date.now()}.pdf`;
+        fs.writeFileSync(path.join(snapDir, snapFilename), req.body);
+
+        const old = await pool.query(
+          `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'rechnung'`,
+          [formId]
+        );
+        if (old.rows.length > 0) {
+          const oldPath = path.join(snapDir, old.rows[0].file_path);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          await pool.query(
+            `UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = 'rechnung'`,
+            [snapFilename, formId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, 'rechnung', $2)`,
+            [formId, snapFilename]
+          );
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Form snapshot mirror (rechnung) failed:', snapErr.message);
+    }
+
     res.json({ success: true, size: req.body.length });
   } catch (err) {
     console.error('Error saving Rechnung PDF:', err);
@@ -4761,18 +5037,16 @@ app.get('/api/boldsign/callback-log', (req, res) => {
 // Get all lead products (price matrix)
 app.get('/api/lead-products', authenticateToken, async (req, res) => {
   try {
-    let query, params;
-    if (req.branchId) {
-      query = `SELECT * FROM aufmass_lead_products
-               WHERE branch_id = $1
-               ORDER BY product_name, breite, tiefe`;
-      params = [req.branchId];
-    } else {
-      query = `SELECT * FROM aufmass_lead_products ORDER BY product_name, breite, tiefe`;
-      params = [];
-    }
-
-    const result = await pool.query(query, params);
+    // MODÜL B v3: Admin domain'inden gelen istekte de tek branch göster.
+    // Aksi halde ProductPricing matrix farkli branch'lerin satirlarini karistirir
+    // ve save yanlis ID'ye yazar.
+    const branchSlug = req.branchId || 'koblenz';
+    const result = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1
+       ORDER BY product_name, breite, tiefe`,
+      [branchSlug]
+    );
     res.json(result.rows);
   } catch (err) {
     console.error('Get lead products error:', err);
@@ -4883,15 +5157,10 @@ app.put('/api/lead-products/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { product_name, breite, tiefe, price, pricing_type, unit_label } = req.body;
 
-    // Verify product belongs to this branch
-    let checkQuery, checkParams;
-    if (req.branchId) {
-      checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1 AND branch_id = $2';
-      checkParams = [id, req.branchId];
-    } else {
-      checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1';
-      checkParams = [id];
-    }
+    // Verify product belongs to this branch (admin domain falls back to koblenz)
+    const branchSlug = req.branchId || 'koblenz';
+    const checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1 AND branch_id = $2';
+    const checkParams = [id, branchSlug];
 
     const existing = await pool.query(checkQuery, checkParams);
 
@@ -5010,22 +5279,150 @@ app.delete('/api/lead-products/:id', authenticateToken, async (req, res) => {
 // Get unique product names
 app.get('/api/lead-products/names', authenticateToken, async (req, res) => {
   try {
-    let query, params;
-    if (req.branchId) {
-      query = `SELECT DISTINCT product_name FROM aufmass_lead_products
-               WHERE branch_id = $1
-               ORDER BY product_name`;
-      params = [req.branchId];
-    } else {
-      query = `SELECT DISTINCT product_name FROM aufmass_lead_products ORDER BY product_name`;
-      params = [];
-    }
-
-    const result = await pool.query(query, params);
+    const branchSlug = req.branchId || 'koblenz';
+    const result = await pool.query(
+      `SELECT DISTINCT product_name FROM aufmass_lead_products
+       WHERE branch_id = $1
+       ORDER BY product_name`,
+      [branchSlug]
+    );
     res.json(result.rows.map(r => r.product_name));
   } catch (err) {
     console.error('Get product names error:', err);
     res.status(500).json({ error: 'Failed to fetch product names' });
+  }
+});
+
+// MODÜL B v3: Generic N-axis price lookup using size_values JSONB.
+// Used for Markise (B×L, B×L×H, B×H, B), Keil (L+H+H), and other profiles
+// that the legacy /dimensions endpoint can't represent.
+//
+// Body: { size_values: { breite: 5000, tiefe: 4000 } }   (axis names match productConfig.json)
+// Response: { matched, exact, price_missing, rounded_to?, lead_product? }
+app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req, res) => {
+  try {
+    const { productName } = req.params;
+    const { size_values } = req.body || {};
+    const branchSlug = req.branchId || 'koblenz';
+
+    if (!size_values || typeof size_values !== 'object') {
+      return res.status(400).json({ error: 'size_values object required in body' });
+    }
+
+    const axes = Object.keys(size_values).filter(k => Number.isFinite(Number(size_values[k])));
+
+    // Pricing-type='unit' fallback (no dimensions involved)
+    if (axes.length === 0) {
+      const r = await pool.query(
+        `SELECT * FROM aufmass_lead_products
+         WHERE branch_id = $1 AND product_name = $2
+           AND pricing_type = 'unit' AND is_active = true LIMIT 1`,
+        [branchSlug, productName]
+      );
+      if (r.rows.length > 0) {
+        return res.json({
+          matched: true, exact: true,
+          price_missing: r.rows[0].price == null,
+          lead_product: r.rows[0]
+        });
+      }
+      return res.json({ matched: false });
+    }
+
+    // Exact match on size_values JSONB equality
+    const normalizedSV = Object.fromEntries(axes.map(a => [a, Number(size_values[a])]));
+    const exact = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1 AND product_name = $2
+         AND size_values = $3::jsonb AND is_active = true`,
+      [branchSlug, productName, JSON.stringify(normalizedSV)]
+    );
+    if (exact.rows.length > 0) {
+      return res.json({
+        matched: true, exact: true,
+        price_missing: exact.rows[0].price == null,
+        lead_product: exact.rows[0]
+      });
+    }
+
+    // Round-up: smallest size_values where every axis >= requested
+    const conditions = axes.map((axis, i) =>
+      `(size_values->>'${axis.replace(/'/g, "''")}')::int >= $${i + 3}`
+    ).join(' AND ');
+    const orderBy = axes.map(a =>
+      `(size_values->>'${a.replace(/'/g, "''")}')::int ASC`
+    ).join(', ');
+    const params = [branchSlug, productName, ...axes.map(a => normalizedSV[a])];
+
+    const rounded = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1 AND product_name = $2 AND is_active = true
+         AND size_values IS NOT NULL AND ${conditions}
+       ORDER BY ${orderBy}
+       LIMIT 1`,
+      params
+    );
+    if (rounded.rows.length > 0) {
+      const row = rounded.rows[0];
+      return res.json({
+        matched: true,
+        exact: false,
+        rounded_to: row.size_values,
+        price_missing: row.price == null,
+        lead_product: row
+      });
+    }
+
+    res.json({ matched: false });
+  } catch (err) {
+    console.error('Lead-products lookup error:', err);
+    res.status(500).json({ error: 'Lookup failed' });
+  }
+});
+
+// Upsert price from Angebot/LeadFormModal (creates row if missing, updates price if exists)
+app.post('/api/lead-products/upsert-from-angebot', authenticateToken, async (req, res) => {
+  try {
+    const { product_name, size_values, price, category, product_type, size_profile } = req.body || {};
+    const branchSlug = req.branchId || 'koblenz';
+
+    if (!product_name || !size_values || price == null) {
+      return res.status(400).json({ error: 'product_name, size_values, price required' });
+    }
+
+    const normalizedSV = Object.fromEntries(
+      Object.entries(size_values).map(([k, v]) => [k, Number(v)])
+    );
+    const breiteCm = Math.round((normalizedSV.breite || normalizedSV.markisenbreite || normalizedSV.laenge || 0) / 10);
+    const tiefeCm  = Math.round((normalizedSV.tiefe || normalizedSV.markisenlaenge || normalizedSV.markisenhoehe || normalizedSV.hoehe || normalizedSV.vorneHoehe || 0) / 10);
+
+    // Try update existing exact size_values match
+    const upd = await pool.query(
+      `UPDATE aufmass_lead_products
+       SET price = $1
+       WHERE branch_id = $2 AND product_name = $3 AND size_values = $4::jsonb
+       RETURNING id`,
+      [price, branchSlug, product_name, JSON.stringify(normalizedSV)]
+    );
+    if (upd.rows.length > 0) {
+      return res.json({ success: true, action: 'updated', id: upd.rows[0].id });
+    }
+
+    // Insert new row
+    const ins = await pool.query(
+      `INSERT INTO aufmass_lead_products
+        (branch_id, category, product_type, product_name,
+         breite, tiefe, price, pricing_type,
+         size_values, size_profile, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'dimension', $8::jsonb, $9, true)
+       RETURNING id`,
+      [branchSlug, category || null, product_type || null, product_name,
+       breiteCm, tiefeCm, price, JSON.stringify(normalizedSV), size_profile || null]
+    );
+    res.json({ success: true, action: 'inserted', id: ins.rows[0].id });
+  } catch (err) {
+    console.error('Upsert from angebot error:', err);
+    res.status(500).json({ error: 'Upsert failed' });
   }
 });
 
@@ -5034,21 +5431,12 @@ app.get('/api/lead-products/:productName/dimensions', authenticateToken, async (
   try {
     const { productName } = req.params;
 
-    let query, params;
-    if (req.branchId) {
-      query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
-               FROM aufmass_lead_products
-               WHERE product_name = $1
-               AND (branch_id = $2 OR (branch_id IS NULL AND product_name LIKE '%PREMIUMLINE%'))
-               ORDER BY breite, tiefe`;
-      params = [productName, req.branchId];
-    } else {
-      query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
-               FROM aufmass_lead_products
-               WHERE product_name = $1
-               ORDER BY breite, tiefe`;
-      params = [productName];
-    }
+    const branchSlug = req.branchId || 'koblenz';
+    const query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
+             FROM aufmass_lead_products
+             WHERE product_name = $1 AND branch_id = $2
+             ORDER BY breite, tiefe`;
+    const params = [productName, branchSlug];
 
     const result = await pool.query(query, params);
 
@@ -5827,6 +6215,39 @@ app.post('/api/leads/:id/angebote/:angebotId/pdf', authenticateToken, upload.sin
 
     const pdfPath = path.join(LEAD_PDF_DIR, `${id}_${angebotId}.pdf`);
     fs.writeFileSync(pdfPath, req.file.buffer);
+
+    // MODÜL B v3: mirror to form_pdf_snapshots so the Aufmaß dropdown sees it
+    try {
+      const linkRes = await pool.query('SELECT id FROM aufmass_forms WHERE lead_id = $1 LIMIT 1', [id]);
+      const formId = linkRes.rows[0]?.id;
+      if (formId) {
+        const snapDir = path.join(PDF_DIR, 'snapshots');
+        if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+        const snapFilename = `form${formId}_angebot_${Date.now()}.pdf`;
+        fs.writeFileSync(path.join(snapDir, snapFilename), req.file.buffer);
+
+        const old = await pool.query(
+          `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'angebot'`,
+          [formId]
+        );
+        if (old.rows.length > 0) {
+          const oldPath = path.join(snapDir, old.rows[0].file_path);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          await pool.query(
+            `UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = 'angebot'`,
+            [snapFilename, formId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, 'angebot', $2)`,
+            [formId, snapFilename]
+          );
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Form snapshot mirror failed (angebote):', snapErr.message);
+    }
+
     res.json({ message: 'Angebot PDF saved successfully' });
   } catch (err) {
     console.error('Error saving angebot PDF:', err);
@@ -5892,6 +6313,40 @@ app.post('/api/leads/:id/pdf', authenticateToken, upload.single('pdf'), async (r
 
     const pdfPath = path.join(LEAD_PDF_DIR, `${id}.pdf`);
     fs.writeFileSync(pdfPath, req.file.buffer);
+
+    // MODÜL B v3: also write a form snapshot (Angebot-PDF) so the Aufmaß
+    // dropdown's "PDF Vorschau → Angebot-PDF" finds the right document.
+    // Bridges Modul B (lead-based) with Modul F2 (form snapshot system).
+    try {
+      const linkRes = await pool.query('SELECT id FROM aufmass_forms WHERE lead_id = $1 LIMIT 1', [id]);
+      const formId = linkRes.rows[0]?.id;
+      if (formId) {
+        const snapDir = path.join(PDF_DIR, 'snapshots');
+        if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+        const snapFilename = `form${formId}_angebot_${Date.now()}.pdf`;
+        fs.writeFileSync(path.join(snapDir, snapFilename), req.file.buffer);
+
+        const old = await pool.query(
+          `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'angebot'`,
+          [formId]
+        );
+        if (old.rows.length > 0) {
+          const oldPath = path.join(snapDir, old.rows[0].file_path);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          await pool.query(
+            `UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = 'angebot'`,
+            [snapFilename, formId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, 'angebot', $2)`,
+            [formId, snapFilename]
+          );
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Form snapshot mirror failed:', snapErr.message);
+    }
 
     res.json({ message: 'Lead PDF saved successfully' });
   } catch (err) {

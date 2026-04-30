@@ -427,9 +427,10 @@ export default function ProductPricing() {
   };
 
   // ========== EXISTING CELL EDITING ==========
-  const startEdit = (productName: string, breite: number, tiefe: number, currentPrice: number) => {
+  // currentPrice can be null for placeholder rows from eager seed (no price entered yet)
+  const startEdit = (productName: string, breite: number, tiefe: number, currentPrice: number | null | undefined) => {
     setEditingCell({ productName, breite, tiefe });
-    setEditValue(currentPrice.toString());
+    setEditValue(currentPrice != null ? currentPrice.toString() : '');
   };
 
   const cancelEdit = () => {
@@ -447,10 +448,13 @@ export default function ProductPricing() {
 
     try {
       await api.put(`/lead-products/${product.id}`, { price: newPrice });
-      await loadProducts();
+      // Optimistic update: only the changed row mutates — scroll position preserved.
+      // Avoids the full-page re-render that loadProducts() triggered (page jumped to top).
+      setProducts(prev => prev.map(p => p.id === product.id ? { ...p, price: newPrice } : p));
       cancelEdit();
     } catch (err) {
       console.error('Failed to update price:', err);
+      alert('Preis konnte nicht gespeichert werden. Bitte Seite neu laden.');
     }
   };
 
@@ -1015,78 +1019,110 @@ export default function ProductPricing() {
         </div>
       </header>
 
-      {/* Filter Section */}
-      {!loading && Object.keys(productMatrices).length > 0 && (
-        <div className="filter-section">
-          <div className="filter-group">
-            <label>Kategorie</label>
-            <select
-              value={filterCategory}
-              onChange={e => {
-                setFilterCategory(e.target.value);
-                setFilterProductType('');
-                setFilterModel('');
-              }}
-            >
-              <option value="">Alle Kategorien</option>
-              {filterOptions.categories.map(cat => (
-                <option key={cat} value={cat}>
-                  {cat === '__uncategorized__' ? 'Ohne Kategorie' : cat}
-                </option>
-              ))}
-            </select>
+      {/* Filter Section — chip-based for fast scanning across 50+ products */}
+      {!loading && Object.keys(productMatrices).length > 0 && (() => {
+        const allModelNames = Object.keys(productMatrices);
+        const totalModels = allModelNames.length;
+        const modelsWithPrice = allModelNames.filter(name => {
+          const rows = products.filter(p => p.product_name === name);
+          return rows.some(r => r.price != null && Number(r.price) > 0);
+        }).length;
+        const modelsWithoutPrice = totalModels - modelsWithPrice;
+
+        return (
+          <div className="filter-section">
+            <div className="filter-summary">
+              <strong>{totalModels} Modelle</strong>
+              <span className="summary-pill summary-with-price">✓ {modelsWithPrice} mit Preis</span>
+              {modelsWithoutPrice > 0 && (
+                <span className="summary-pill summary-without-price">⚠ {modelsWithoutPrice} ohne Preis</span>
+              )}
+            </div>
+
+            <div className="filter-chips-row">
+              <span className="filter-chip-label">Kategorie:</span>
+              <button
+                className={`filter-chip ${!filterCategory ? 'is-active' : ''}`}
+                onClick={() => { setFilterCategory(''); setFilterProductType(''); setFilterModel(''); }}
+              >
+                Alle <span className="chip-count">({totalModels})</span>
+              </button>
+              {filterOptions.categories.map(cat => {
+                const catCount = allModelNames.filter(name => {
+                  const p = products.find(pp => pp.product_name === name);
+                  if (cat === '__uncategorized__') return !p?.category;
+                  return p?.category === cat;
+                }).length;
+                if (catCount === 0) return null;
+                return (
+                  <button
+                    key={cat}
+                    className={`filter-chip ${filterCategory === cat ? 'is-active' : ''}`}
+                    onClick={() => {
+                      setFilterCategory(filterCategory === cat ? '' : cat);
+                      setFilterProductType('');
+                      setFilterModel('');
+                    }}
+                  >
+                    {cat === '__uncategorized__' ? 'Ohne Kategorie' : cat}
+                    <span className="chip-count">({catCount})</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {filterCategory && filterCategory !== '__uncategorized__' && filterOptions.getProductTypes(filterCategory).length > 0 && (
+              <div className="filter-chips-row">
+                <span className="filter-chip-label">Typ:</span>
+                <button
+                  className={`filter-chip ${!filterProductType ? 'is-active' : ''}`}
+                  onClick={() => { setFilterProductType(''); setFilterModel(''); }}
+                >
+                  Alle
+                </button>
+                {filterOptions.getProductTypes(filterCategory).map(pt => {
+                  const ptCount = allModelNames.filter(name => {
+                    const p = products.find(pp => pp.product_name === name);
+                    return p?.category === filterCategory && p?.product_type === pt;
+                  }).length;
+                  if (ptCount === 0) return null;
+                  return (
+                    <button
+                      key={pt}
+                      className={`filter-chip ${filterProductType === pt ? 'is-active' : ''}`}
+                      onClick={() => {
+                        setFilterProductType(filterProductType === pt ? '' : pt);
+                        setFilterModel('');
+                      }}
+                    >
+                      {pt}
+                      <span className="chip-count">({ptCount})</span>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+
+            {filterProductType && filterOptions.getModels(filterCategory, filterProductType).length > 0 && (
+              <div className="filter-group" style={{ maxWidth: 280 }}>
+                <label>Modell suchen</label>
+                <input
+                  type="text"
+                  placeholder="Modellname eingeben..."
+                  value={filterModel}
+                  onChange={e => setFilterModel(e.target.value)}
+                  list="filter-model-list"
+                />
+                <datalist id="filter-model-list">
+                  {filterOptions.getModels(filterCategory, filterProductType).map(m => (
+                    <option key={m} value={m} />
+                  ))}
+                </datalist>
+              </div>
+            )}
           </div>
-
-          {filterCategory && filterCategory !== '__uncategorized__' && filterOptions.getProductTypes(filterCategory).length > 0 && (
-            <div className="filter-group">
-              <label>Produkttyp</label>
-              <select
-                value={filterProductType}
-                onChange={e => {
-                  setFilterProductType(e.target.value);
-                  setFilterModel('');
-                }}
-              >
-                <option value="">Alle Produkttypen</option>
-                {filterOptions.getProductTypes(filterCategory).map(pt => (
-                  <option key={pt} value={pt}>{pt}</option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {filterProductType && filterOptions.getModels(filterCategory, filterProductType).length > 0 && (
-            <div className="filter-group">
-              <label>Modell</label>
-              <select
-                value={filterModel}
-                onChange={e => setFilterModel(e.target.value)}
-              >
-                <option value="">Alle Modelle</option>
-                {filterOptions.getModels(filterCategory, filterProductType).map(m => (
-                  <option key={m} value={m}>{m}</option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          {(filterCategory || filterProductType || filterModel) && (
-            <button
-              className="btn-clear-filter"
-              onClick={() => {
-                setFilterCategory('');
-                setFilterProductType('');
-                setFilterModel('');
-              }}
-            >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M18 6L6 18M6 6l12 12" />
-              </svg>
-              Filter zurücksetzen
-            </button>
-          )}
-        </div>
-      )}
+        );
+      })()}
 
       {error && <div className="page-error">{error}</div>}
 

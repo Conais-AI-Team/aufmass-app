@@ -1201,7 +1201,13 @@ Aylux Team`;
   // Whether a given PDF type is meaningful for the form's current status.
   // Drives the enabled/disabled state of dropdown entries.
   const isPdfTypeAvailableForStatus = (status: string, docType: FormPdfDocType): boolean => {
-    if (docType === 'rechnung') return false; // placeholder — handled by Ezgi branch
+    if (docType === 'rechnung') {
+      // Rechnung snapshot exists once Ezgi's RechnungForm has saved a Rechnung PDF
+      // (saveRechnungPdf endpoint mirrors it to aufmass_form_pdf_snapshots).
+      return ['rechnung_erstellt', 'rechnung_gesendet', 'schluss_rechnung_erstellt', 'schluss_rechnung_gesendet',
+              'anzahlung', 'auftrag_erteilt', 'bauantrag', 'bestellt', 'montage_geplant',
+              'montage_gestartet', 'abnahme', 'reklamation_eingegangen'].includes(status);
+    }
     // Aufmaß is always available once the form has progressed past "draft"
     if (docType === 'aufmass') {
       return !['entwurf', 'auftrag_abgelehnt', 'papierkorb'].includes(status);
@@ -1220,11 +1226,16 @@ Aylux Team`;
 
   // Click handler for a PDF-type entry: open existing snapshot or generate one on-the-fly.
   const handlePdfTypeClick = async (formId: number, docType: FormPdfDocType) => {
+    const existing = (formSnapshots[formId] || []).find((s) => s.document_type === docType);
+    // Rechnung has no client-side generator; only open if a saved snapshot exists.
     if (docType === 'rechnung') {
-      toast.info('Demnächst', 'Rechnung-PDF wird durch ein separates Modul bereitgestellt.');
+      if (existing) {
+        window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
+      } else {
+        toast.warning('Keine Rechnung', 'Bitte zuerst eine Rechnung erstellen.');
+      }
       return;
     }
-    const existing = (formSnapshots[formId] || []).find((s) => s.document_type === docType);
     if (existing) {
       window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
       return;
@@ -1247,39 +1258,97 @@ Aylux Team`;
   const captureSnapshot = async (formId: number, docType: FormPdfDocType): Promise<void> => {
     if (docType === 'rechnung') {
       // Rechnung-PDF generator yet to be built (handled by separate branch).
-      // Status transition still completes; snapshot can be taken later.
       return;
     }
     try {
-      const [formData, abnahmeData, abnahmeImages] = await Promise.all([
-        getForm(formId),
-        getAbnahme(formId).catch(() => null),
-        getAbnahmeImages(formId).catch(() => [])
-      ]);
+      let pdfBlob: Blob | undefined;
 
-      const pdfFormData = {
-        ...formData,
-        id: String(formData.id),
-        productSelection: {
-          category: formData.category,
-          productType: formData.productType,
-          model: formData.model ? formData.model.split(',') : []
-        },
-        specifications: formData.specifications as Record<string, string | number | boolean | string[]>,
-        bilder: formData.bilder || [],
-        customerSignature: formData.customerSignature || null,
-        signatureName: formData.signatureName || null,
-        abnahme: abnahmeData ? { ...abnahmeData, maengelBilder: abnahmeImages || [] } : undefined
-      };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = await generatePDF(pdfFormData as any, {
-        returnBlob: true,
-        abnahmeOnly: docType === 'abnahme'
-      });
-      if (result?.blob) {
-        await saveFormPdfSnapshot(formId, docType, result.blob);
-        // Refresh the cached list so the dropdown immediately reflects the new snapshot
-        setFormSnapshots((prev) => ({ ...prev, [formId]: [...(prev[formId] || []).filter(s => s.document_type !== docType), { document_type: docType, created_at: new Date().toISOString() }] }));
+      if (docType === 'angebot') {
+        // MODÜL B v3: Angebot snapshots must use generateAngebotPDF, not the
+        // Aufmaß generator. Find the linked lead → fetch its angebote → render.
+        const formData = await getForm(formId);
+        if (!formData.lead_id) {
+          // No lead linked yet — nothing to snapshot
+          return;
+        }
+        const { generateAngebotPDF } = await import('../utils/angebotPdfGenerator');
+        const leadDetail = await api.get<{
+          customer_firstname?: string; customer_lastname?: string; customer_email?: string;
+          customer_phone?: string; customer_address?: string; notes?: string;
+          kunden_nummer?: string; angebot_nummer?: string;
+          subtotal?: number; total_discount?: number; total_price: number;
+          items: { product_name: string; breite: number; tiefe: number; quantity: number; unit_price: number; discount?: number; pricing_type?: 'dimension' | 'unit'; unit_label?: string; description?: string; custom_fields?: { id: string; label: string; type: string; unit?: string }[]; custom_field_values?: Record<string, string> }[];
+          extras: { description: string; price: number }[];
+        }>(`/leads/${formData.lead_id}`);
+
+        const itemDiscounts = (leadDetail.items || []).reduce((s, i) => s + (i.discount || 0), 0);
+        const result = await generateAngebotPDF({
+          customer_firstname: leadDetail.customer_firstname || '',
+          customer_lastname: leadDetail.customer_lastname || '',
+          customer_email: leadDetail.customer_email || '',
+          customer_phone: leadDetail.customer_phone,
+          customer_address: leadDetail.customer_address,
+          notes: leadDetail.notes,
+          kunden_nummer: leadDetail.kunden_nummer,
+          angebot_nummer: leadDetail.angebot_nummer,
+          items: (leadDetail.items || []).map(i => ({
+            product_name: i.product_name,
+            breite: i.breite,
+            tiefe: i.tiefe,
+            quantity: i.quantity,
+            unit_price: i.unit_price,
+            total_price: (i.unit_price * i.quantity) - (i.discount || 0),
+            discount: i.discount,
+            pricing_type: i.pricing_type,
+            unit_label: i.unit_label,
+            description: i.description,
+            custom_fields: i.custom_fields,
+            custom_field_values: i.custom_field_values,
+          })),
+          extras: leadDetail.extras || [],
+          subtotal: leadDetail.subtotal,
+          item_discounts: itemDiscounts,
+          total_discount: leadDetail.total_discount,
+          total_price: leadDetail.total_price,
+        }, { returnBlob: true });
+        pdfBlob = result?.blob;
+      } else {
+        // aufmass / abnahme — Aufmaß generator (existing behavior)
+        const [formData, abnahmeData, abnahmeImages] = await Promise.all([
+          getForm(formId),
+          getAbnahme(formId).catch(() => null),
+          getAbnahmeImages(formId).catch(() => [])
+        ]);
+
+        const pdfFormData = {
+          ...formData,
+          id: String(formData.id),
+          productSelection: {
+            category: formData.category,
+            productType: formData.productType,
+            model: formData.model ? formData.model.split(',') : []
+          },
+          specifications: formData.specifications as Record<string, string | number | boolean | string[]>,
+          bilder: formData.bilder || [],
+          customerSignature: formData.customerSignature || null,
+          signatureName: formData.signatureName || null,
+          abnahme: abnahmeData ? { ...abnahmeData, maengelBilder: abnahmeImages || [] } : undefined
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = await generatePDF(pdfFormData as any, {
+          returnBlob: true,
+          abnahmeOnly: docType === 'abnahme'
+        });
+        pdfBlob = result?.blob;
+      }
+
+      if (pdfBlob) {
+        await saveFormPdfSnapshot(formId, docType, pdfBlob);
+        setFormSnapshots((prev) => ({
+          ...prev,
+          [formId]: [...(prev[formId] || []).filter(s => s.document_type !== docType),
+                     { document_type: docType, created_at: new Date().toISOString() }]
+        }));
       }
     } catch (err) {
       console.warn(`Snapshot capture failed (${docType}):`, err);
@@ -1792,12 +1861,13 @@ Aylux Team`;
                               return types.map(({ type, label }) => {
                                 const snap = snapshots.find((s) => s.document_type === type);
                                 const availableByStatus = isPdfTypeAvailableForStatus(formStatus, type);
-                                const enabled = !!snap || availableByStatus;
-                                const isRechnungPlaceholder = type === 'rechnung';
+                                // Rechnung needs a real saved snapshot to be openable —
+                                // we don't auto-render it from form data (no generator yet).
+                                const enabled = type === 'rechnung' ? !!snap : (!!snap || availableByStatus);
 
                                 let titleText = '';
-                                if (isRechnungPlaceholder) titleText = 'Rechnung-PDF wird durch ein separates Modul bereitgestellt';
-                                else if (snap) titleText = `Erstellt am ${new Date(snap.created_at).toLocaleDateString('de-DE')}`;
+                                if (snap) titleText = `Erstellt am ${new Date(snap.created_at).toLocaleDateString('de-DE')}`;
+                                else if (type === 'rechnung') titleText = 'Bitte zuerst eine Rechnung erstellen';
                                 else if (availableByStatus) titleText = 'Wird beim Klick erstellt und gespeichert';
                                 else titleText = 'In diesem Status nicht verfügbar';
 
@@ -1819,7 +1889,6 @@ Aylux Team`;
                                     {snap && (
                                       <span className="upload-hint">{new Date(snap.created_at).toLocaleDateString('de-DE')}</span>
                                     )}
-                                    {!snap && isRechnungPlaceholder && <span className="upload-hint">demnächst</span>}
                                   </button>
                                 );
                               });
@@ -2924,7 +2993,7 @@ Aylux Team`;
           setLeadModalEditData(null);
           setLeadModalFromAufmassId(null);
         }}
-        onSuccess={async (savedLeadId) => {
+        onSuccess={async (savedLeadId, sendEmail) => {
           // Capture chain state before clearing, so we can resume into
           // the Rechnung modal when the user came here via "Rechnung Entwurf"
           // status pick on a form that didn't have an Angebot yet.
@@ -2933,17 +3002,29 @@ Aylux Team`;
           setLeadModalOpen(false);
           setLeadModalEditData(null);
           setLeadModalFromAufmassId(null);
-          // MODÜL B: status-dropdown intent is "send" — flag the lead so
-          // backend cross-sync flips the linked Aufmaß to angebot_versendet.
-          if (savedLeadId) {
+          // MODÜL B v3: Save alone is NOT "versendet". Only mark as sent if
+          // the user ticked "Angebot direkt per E-Mail senden" — otherwise
+          // the form stays in "neu" / "aufmass_genommen" until manual send.
+          if (savedLeadId && sendEmail) {
             try {
               await markLeadAngebotAsSent(savedLeadId);
+              // Optimistic local update only when the status actually flipped
+              if (fromFormId) {
+                setForms(prev => prev.map(f =>
+                  f.id === fromFormId
+                    ? { ...f, status: 'angebot_versendet', statusDate: new Date().toISOString().split('T')[0] }
+                    : f
+                ));
+              }
             } catch (err) {
               console.error('mark-angebot-sent after save failed:', err);
             }
           }
-          // Refresh forms so the new status is reflected on the cards.
-          getForms().then(setForms).catch(err => console.error('Reload failed:', err));
+          // MODÜL B v3: After every Angebot save (regardless of send-flag),
+          // capture an Angebot-PDF snapshot so the dropdown shows the right doc.
+          if (fromFormId) {
+            void captureSnapshot(fromFormId, 'angebot');
+          }
 
           // Modul C chain: if we were on the way to creating a Rechnung,
           // promote the form to auftrag_erteilt and open the Rechnung modal.

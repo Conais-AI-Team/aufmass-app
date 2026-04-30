@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl } from '../services/api';
+import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl, lookupLeadProductBySize } from '../services/api';
 import type { FormData as AufmassFormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
+import { getSizeProfileForType, PROFILE_AXES, AXIS_LABELS, extractSizeValues, parseModelList, type SizeProfile } from '../utils/sizeProfile';
 import './LeadFormModal.css';
 
 interface AngebotData {
@@ -95,25 +96,45 @@ interface ProductRow {
   // so we can restore them after the product picker resets the row.
   aufmassBreite?: number;
   aufmassTiefe?: number;
+  // MODÜL B v3: N-axis support for non-2D profiles (Markise UNTERGLAS, Keil, etc.)
+  // When set, the row uses these instead of breite/tiefe for the lookup call.
+  size_profile?: SizeProfile | null;
+  size_axes?: string[];
+  size_values?: Record<string, number>;
+  // Source category/product_type — needed for re-running profile detection
+  source_category?: string;
+  source_product_type?: string;
+  // Last lookup status (drives the "Preis fehlt" / "auf X×Y aufgerundet" badge)
+  lookup_status?: 'matched' | 'rounded' | 'price_missing' | 'no_match';
+  rounded_to?: Record<string, number>;
 }
 
-// Rounding functions for price calculation
-const roundBreiteToGrid = (value: number): number => {
-  // Breite grid: 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200
-  const min = 200;
-  const max = 1200;
-  const step = 100;
-  const rounded = Math.ceil(value / step) * step;
-  return Math.max(min, Math.min(max, rounded));
+// MODÜL B v3: All dimensions are in mm (productConfig.json reference).
+// Dynamic round-up against the actual grid loaded from /dimensions endpoint —
+// works for any custom grid the branch added (3500, 4250 etc), not a hardcoded step.
+
+const findClosestBreiteInGrid = (dimensions: ProductDimensions, requested: number): number | null => {
+  const keys = Object.keys(dimensions).map(Number).filter(k => k >= requested).sort((a, b) => a - b);
+  return keys.length > 0 ? keys[0] : null;
 };
 
-const roundTiefeToGrid = (value: number): number => {
-  // Tiefe grid: 150, 200, 250, 300, 350, 400, 450, 500, 550, 600
-  const min = 150;
-  const max = 600;
-  const step = 50;
-  const rounded = Math.ceil(value / step) * step;
-  return Math.max(min, Math.min(max, rounded));
+const findClosestTiefeInGrid = (
+  tiefes: { tiefe: number; price: number }[],
+  requested: number
+): { tiefe: number; price: number } | null => {
+  const matches = tiefes.filter(t => t.tiefe >= requested).sort((a, b) => a.tiefe - b.tiefe);
+  return matches.length > 0 ? matches[0] : null;
+};
+
+// Legacy: hardcoded step round (used if dimensions yet to load — fallback only)
+const roundBreiteToGrid = (mmValue: number): number => {
+  const min = 2000, max = 12000, step = 1000;
+  return Math.max(min, Math.min(max, Math.ceil(mmValue / step) * step));
+};
+
+const roundTiefeToGrid = (mmValue: number): number => {
+  const min = 1500, max = 6000, step = 500;
+  return Math.max(min, Math.min(max, Math.ceil(mmValue / step) * step));
 };
 
 interface LeadExtra {
@@ -299,37 +320,149 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
       setExtras([]);
       setSendEmailAfterSave(false);
 
-      // Build one row per product in the Aufmaß (main + weitereProdukte) so
-      // the user only needs to pick the matching lead-product entry and the
-      // dimensions are already there.
-      const aufmassProducts: { breite?: number; tiefe?: number }[] = [];
+      // MODÜL B v3: Build one row per (product × model) — main product can be
+      // multi-select (N models on same dims), weitereProdukte are single-select
+      // (each has its own dims/model).
+      type AufmassEntry = {
+        category?: string;
+        productType?: string;
+        modelName: string;
+        specifications: Record<string, unknown>;
+      };
+      const entries: AufmassEntry[] = [];
+
       const mainSpecs = (data.specifications || {}) as Record<string, unknown>;
-      aufmassProducts.push({
-        breite: typeof mainSpecs.breite === 'number' ? mainSpecs.breite : undefined,
-        tiefe: typeof mainSpecs.tiefe === 'number' ? mainSpecs.tiefe : undefined,
-      });
-      if (Array.isArray(data.weitereProdukte)) {
-        for (const wp of data.weitereProdukte) {
-          const specs = (wp.specifications || {}) as Record<string, unknown>;
-          aufmassProducts.push({
-            breite: typeof specs.breite === 'number' ? specs.breite : undefined,
-            tiefe: typeof specs.tiefe === 'number' ? specs.tiefe : undefined,
+      const mainModels = parseModelList(data.model);
+      if (mainModels.length === 0) {
+        // No model selected — push a single empty row so the user can pick manually
+        entries.push({
+          category: data.category,
+          productType: data.productType,
+          modelName: '',
+          specifications: mainSpecs,
+        });
+      } else {
+        for (const m of mainModels) {
+          entries.push({
+            category: data.category,
+            productType: data.productType,
+            modelName: m,
+            specifications: mainSpecs,
           });
         }
       }
-      const rows = aufmassProducts.map(p => {
+
+      // weitereProdukte — single-select model each, own specifications
+      if (Array.isArray(data.weitereProdukte)) {
+        for (const wp of data.weitereProdukte) {
+          const wpSpecs = (wp.specifications || {}) as Record<string, unknown>;
+          const wpModelList = parseModelList(wp.model);
+          if (wpModelList.length === 0) {
+            entries.push({
+              category: wp.category,
+              productType: wp.productType,
+              modelName: '',
+              specifications: wpSpecs,
+            });
+          } else {
+            // Defensive: even if WeitereProdukte UI is single-select today, support multi
+            for (const m of wpModelList) {
+              entries.push({
+                category: wp.category,
+                productType: wp.productType,
+                modelName: m,
+                specifications: wpSpecs,
+              });
+            }
+          }
+        }
+      }
+
+      // Get available product names — auto-fill skipped if model not in this branch's catalog
+      const availableNames = await api.get<string[]>('/lead-products/names').catch(() => [] as string[]);
+
+      const enrichedRows = await Promise.all(entries.map(async (entry) => {
         const r = createEmptyRow();
-        if (p.breite) {
-          r.breite = p.breite;
-          r.aufmassBreite = p.breite;
+
+        // Determine size profile from category/product_type
+        const profile = getSizeProfileForType(entry.category, entry.productType);
+        const axes = profile ? PROFILE_AXES[profile] : [];
+        const sizeValues = profile ? extractSizeValues(entry.specifications, profile) : {};
+
+        r.size_profile = profile;
+        r.size_axes = axes;
+        r.size_values = sizeValues;
+        r.source_category = entry.category;
+        r.source_product_type = entry.productType;
+
+        // Legacy 2D fields kept in sync for the existing UI
+        // (axes[0] → breite slot, axes[1] → tiefe slot — generic mapping for display)
+        if (axes[0] && sizeValues[axes[0]] != null) {
+          r.breite = sizeValues[axes[0]];
+          r.aufmassBreite = sizeValues[axes[0]];
         }
-        if (p.tiefe) {
-          r.tiefe = p.tiefe;
-          r.aufmassTiefe = p.tiefe;
+        if (axes[1] && sizeValues[axes[1]] != null) {
+          r.tiefe = sizeValues[axes[1]];
+          r.aufmassTiefe = sizeValues[axes[1]];
         }
+
+        if (!entry.modelName || !availableNames.includes(entry.modelName)) {
+          // Mark as "no_match" so the badge says "Modell nicht im Katalog"
+          if (entry.modelName) r.lookup_status = 'no_match';
+          return r;
+        }
+
+        r.product_name = entry.modelName;
+
+        // Generic N-axis lookup via the new endpoint (handles all 8 profiles)
+        if (Object.keys(sizeValues).length > 0) {
+          try {
+            const result = await lookupLeadProductBySize(entry.modelName, sizeValues);
+            if (result.matched && result.lead_product) {
+              const lp = result.lead_product;
+              if (lp.price != null && lp.price > 0) {
+                r.price = lp.price;
+                r.lookup_status = result.exact ? 'matched' : 'rounded';
+                if (!result.exact && result.rounded_to) {
+                  r.rounded_to = result.rounded_to;
+                  // Reflect rounded values in legacy display fields too
+                  if (axes[0] && result.rounded_to[axes[0]] != null) r.roundedBreite = result.rounded_to[axes[0]];
+                  if (axes[1] && result.rounded_to[axes[1]] != null) r.roundedTiefe = result.rounded_to[axes[1]];
+                }
+              } else {
+                r.lookup_status = 'price_missing';
+              }
+              // Hydrate description/custom_fields from the legacy /dimensions response
+              // (lookup endpoint doesn't return them yet — fetch separately, non-blocking)
+              loadDimensions(entry.modelName).then(dims => {
+                if (dims.description) r.description = dims.description;
+                if (dims.custom_fields) r.custom_fields = dims.custom_fields;
+              }).catch(() => { /* ignore */ });
+              // Also fill .dimensions for the existing edit UI
+              try {
+                const dims = await loadDimensions(entry.modelName);
+                r.dimensions = dims.dimensions || {};
+                r.pricing_type = dims.pricing_type;
+                if (dims.pricing_type === 'unit') {
+                  r.unit_label = dims.unit_label;
+                  if (!r.price && dims.unit_price) r.price = dims.unit_price;
+                }
+                r.description = dims.description;
+                r.custom_fields = dims.custom_fields;
+              } catch { /* ignore */ }
+            } else {
+              r.lookup_status = 'no_match';
+            }
+          } catch (e) {
+            console.warn('Generic lookup failed for', entry.modelName, e);
+            r.lookup_status = 'no_match';
+          }
+        }
+
         return r;
-      });
-      setProductRows(rows.length > 0 ? rows : [createEmptyRow()]);
+      }));
+
+      setProductRows(enrichedRows.length > 0 ? enrichedRows : [createEmptyRow()]);
     } catch (err) {
       console.error('Failed to load Aufmaß for auto-fill:', err);
       setError('Aufmaß-Daten konnten nicht geladen werden.');
@@ -411,24 +544,28 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           });
         }
       } else if (field === 'breite' || field === 'tiefe') {
-        // Calculate price using rounded values
         const breiteValue = field === 'breite' ? (value as number) : (updated.breite as number);
         const tiefeValue = field === 'tiefe' ? (value as number) : (updated.tiefe as number);
 
         if (breiteValue && tiefeValue && Object.keys(updated.dimensions).length > 0) {
-          // Round values for price lookup
-          const roundedBreite = roundBreiteToGrid(breiteValue);
-          const roundedTiefe = roundTiefeToGrid(tiefeValue);
-
-          updated.roundedBreite = roundedBreite;
-          updated.roundedTiefe = roundedTiefe;
-
-          // Find price from dimensions matrix using rounded values
-          const breiteKey = Object.keys(updated.dimensions).find(b => Number(b) === roundedBreite);
-          if (breiteKey && updated.dimensions[Number(breiteKey)]) {
-            const found = updated.dimensions[Number(breiteKey)].find(d => d.tiefe === roundedTiefe);
-            updated.price = found?.price || 0;
+          // Dynamic round-up against actual grid keys (handles custom branch grids)
+          const rb = findClosestBreiteInGrid(updated.dimensions, breiteValue);
+          if (rb !== null) {
+            const rtMatch = findClosestTiefeInGrid(updated.dimensions[rb], tiefeValue);
+            if (rtMatch) {
+              updated.roundedBreite = rb;
+              updated.roundedTiefe = rtMatch.tiefe;
+              updated.price = rtMatch.price;
+            } else {
+              // Tiefe out of grid: leave price 0, mark only breite-rounded
+              updated.roundedBreite = rb;
+              updated.roundedTiefe = undefined;
+              updated.price = 0;
+            }
           } else {
+            // Beyond grid max: no rounding possible
+            updated.roundedBreite = undefined;
+            updated.roundedTiefe = undefined;
             updated.price = 0;
           }
         } else {
@@ -622,30 +759,32 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
           const result = await api.post<{ id: number }>('/leads', payload);
 
-          // Generate PDF for this single-item lead
-          try {
-            const pdfResult = await generateAngebotPDF({
-              customer_firstname: firstname.trim(),
-              customer_lastname: lastname.trim(),
-              customer_email: email.trim(),
-              customer_phone: phone.trim() || undefined,
-              customer_address: address.trim() || undefined,
-              notes: notes.trim() || undefined,
-              items: [buildPdfItem(item)],
-              extras: itemExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-              subtotal: itemTotal + extrasTotal,
-              item_discounts: item.discount || 0,
-              total_discount: 0,
-              total_discount_percent: 0,
-              total_price: itemTotal + extrasTotal
-            }, { returnBlob: true });
-
-            if (pdfResult?.blob) {
-              await saveLeadPdf(result.id, pdfResult.blob);
+          // Generate PDF in background — modal kapanmasini bloklamasin
+          // (multi-product cover + AGB merge dakikalar surebilir).
+          const einzelLeadId = result.id;
+          const einzelPdfPayload = {
+            customer_firstname: firstname.trim(),
+            customer_lastname: lastname.trim(),
+            customer_email: email.trim(),
+            customer_phone: phone.trim() || undefined,
+            customer_address: address.trim() || undefined,
+            notes: notes.trim() || undefined,
+            items: [buildPdfItem(item)],
+            extras: itemExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
+            subtotal: itemTotal + extrasTotal,
+            item_discounts: item.discount || 0,
+            total_discount: 0,
+            total_discount_percent: 0,
+            total_price: itemTotal + extrasTotal
+          };
+          void (async () => {
+            try {
+              const pdfResult = await generateAngebotPDF(einzelPdfPayload, { returnBlob: true });
+              if (pdfResult?.blob) await saveLeadPdf(einzelLeadId, pdfResult.blob);
+            } catch (pdfErr) {
+              console.error('Einzelangebot PDF failed:', pdfErr);
             }
-          } catch (pdfErr) {
-            console.error('Einzelangebot PDF failed:', pdfErr);
-          }
+          })();
         }
         // einzelAngebote may have created several leads; we don't pick a
         // single id to chain the EmailComposer in this mode (would be
@@ -664,33 +803,35 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
         const result = await api.post<{ id: number; angebot_nummer: string }>(`/leads/${newAngebotForLeadId}/angebote`, angebotPayload);
 
-        // Generate and save PDF for this angebot
-        try {
-          const itemDiscountsTotal = calculateItemDiscounts();
-          const pdfResult = await generateAngebotPDF({
-            customer_firstname: firstname.trim(),
-            customer_lastname: lastname.trim(),
-            customer_email: email.trim(),
-            customer_phone: phone.trim() || undefined,
-            customer_address: address.trim() || undefined,
-            notes: notes.trim() || undefined,
-            kunden_nummer: editData?.kunden_nummer || undefined,
-            angebot_nummer: result.angebot_nummer || undefined,
-            items: validItems.map(buildPdfItem),
-            extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-            subtotal: calculateSubtotal(),
-            item_discounts: itemDiscountsTotal,
-            total_discount: totalDiscount || 0,
-            total_discount_percent: getTotalDiscountPercent(),
-            total_price: calculateTotal()
-          }, { returnBlob: true });
-
-          if (pdfResult?.blob) {
-            await saveAngebotPdf(newAngebotForLeadId, result.id, pdfResult.blob);
+        // Generate and save PDF in background — modal kapanmasini bloklamasin
+        const newAngLeadId = newAngebotForLeadId;
+        const newAngId = result.id;
+        const newAngebotNummer = result.angebot_nummer;
+        const newAngPdfPayload = {
+          customer_firstname: firstname.trim(),
+          customer_lastname: lastname.trim(),
+          customer_email: email.trim(),
+          customer_phone: phone.trim() || undefined,
+          customer_address: address.trim() || undefined,
+          notes: notes.trim() || undefined,
+          kunden_nummer: editData?.kunden_nummer || undefined,
+          angebot_nummer: newAngebotNummer || undefined,
+          items: validItems.map(buildPdfItem),
+          extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
+          subtotal: calculateSubtotal(),
+          item_discounts: calculateItemDiscounts(),
+          total_discount: totalDiscount || 0,
+          total_discount_percent: getTotalDiscountPercent(),
+          total_price: calculateTotal()
+        };
+        void (async () => {
+          try {
+            const pdfResult = await generateAngebotPDF(newAngPdfPayload, { returnBlob: true });
+            if (pdfResult?.blob) await saveAngebotPdf(newAngLeadId, newAngId, pdfResult.blob);
+          } catch (pdfErr) {
+            console.error('Angebot PDF generation failed:', pdfErr);
           }
-        } catch (pdfErr) {
-          console.error('Angebot PDF generation failed:', pdfErr);
-        }
+        })();
       } else {
         // === NORMAL MODE: Single lead with all products ===
         const payload = {
@@ -714,41 +855,43 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         const resAngebotNummer = (result as { angebot_nummer?: string }).angebot_nummer || editData?.angebot_nummer;
         const resKundenNummer = (result as { kunden_nummer?: string }).kunden_nummer || editData?.kunden_nummer;
 
-        // Generate and save Angebot PDF
-        try {
-          const itemDiscountsTotal = calculateItemDiscounts();
-          const pdfResult = await generateAngebotPDF({
-            customer_firstname: firstname.trim(),
-            customer_lastname: lastname.trim(),
-            customer_email: email.trim(),
-            customer_phone: phone.trim() || undefined,
-            customer_address: address.trim() || undefined,
-            notes: notes.trim() || undefined,
-            kunden_nummer: resKundenNummer || undefined,
-            angebot_nummer: resAngebotNummer || undefined,
-            items: validItems.map(buildPdfItem),
-            extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-            subtotal: calculateSubtotal(),
-            item_discounts: itemDiscountsTotal,
-            total_discount: totalDiscount || 0,
-            total_discount_percent: getTotalDiscountPercent(),
-            total_price: calculateTotal(),
-            // MODÜL B: forward Aufmaß photos so the generator can embed them.
-            // Empty for non-fromAufmass modes — keeps prior behavior intact.
-            bilder: isFromAufmassMode ? aufmassImages : undefined
-          }, { returnBlob: true });
-
-          if (pdfResult?.blob) {
-            if (editAngebotId) {
+        // Generate and save Angebot PDF in background — modal kapanmasini bloklamasin
+        const normalLeadId = leadId;
+        const normalAngebotId = editAngebotId;
+        const normalPdfPayload = {
+          customer_firstname: firstname.trim(),
+          customer_lastname: lastname.trim(),
+          customer_email: email.trim(),
+          customer_phone: phone.trim() || undefined,
+          customer_address: address.trim() || undefined,
+          notes: notes.trim() || undefined,
+          kunden_nummer: resKundenNummer || undefined,
+          angebot_nummer: resAngebotNummer || undefined,
+          items: validItems.map(buildPdfItem),
+          extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
+          subtotal: calculateSubtotal(),
+          item_discounts: calculateItemDiscounts(),
+          total_discount: totalDiscount || 0,
+          total_discount_percent: getTotalDiscountPercent(),
+          total_price: calculateTotal(),
+          // MODÜL B: forward Aufmaß photos so the generator can embed them.
+          // Empty for non-fromAufmass modes — keeps prior behavior intact.
+          bilder: isFromAufmassMode ? aufmassImages : undefined
+        };
+        void (async () => {
+          try {
+            const pdfResult = await generateAngebotPDF(normalPdfPayload, { returnBlob: true });
+            if (!pdfResult?.blob) return;
+            if (normalAngebotId) {
               const { saveAngebotPdf } = await import('../services/api');
-              await saveAngebotPdf(leadId, editAngebotId, pdfResult.blob);
+              await saveAngebotPdf(normalLeadId, normalAngebotId, pdfResult.blob);
             } else {
-              await saveLeadPdf(leadId, pdfResult.blob);
+              await saveLeadPdf(normalLeadId, pdfResult.blob);
             }
+          } catch (pdfErr) {
+            console.error('Angebot PDF generation failed:', pdfErr);
           }
-        } catch (pdfErr) {
-          console.error('Angebot PDF generation failed:', pdfErr);
-        }
+        })();
       }
 
       // MODÜL B: pass savedLeadId + sendEmailAfterSave so the parent can
@@ -941,29 +1084,29 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                       ) : (
                         <>
                           <div className="select-group">
-                            <label>Breite (cm)</label>
+                            <label>Breite (mm)</label>
                             <input
                               type="number"
                               min="1"
-                              max="1200"
+                              max="12000"
                               value={row.breite}
                               onChange={e => updateRow(row.id, 'breite', e.target.value ? Number(e.target.value) : '')}
                               disabled={!row.product_name}
-                              placeholder="z.B. 485"
+                              placeholder="z.B. 4850"
                               className="dimension-input"
                             />
                           </div>
 
                           <div className="select-group">
-                            <label>Tiefe (cm)</label>
+                            <label>Tiefe (mm)</label>
                             <input
                               type="number"
                               min="1"
-                              max="600"
+                              max="6000"
                               value={row.tiefe}
                               onChange={e => updateRow(row.id, 'tiefe', e.target.value ? Number(e.target.value) : '')}
                               disabled={!row.product_name}
-                              placeholder="z.B. 287"
+                              placeholder="z.B. 2870"
                               className="dimension-input"
                             />
                           </div>
