@@ -2725,14 +2725,65 @@ app.post('/api/forms/:id/rechnung', authenticateToken, async (req, res) => {
        FROM aufmass_forms WHERE id = $1`, [id])).rows[0];
     if (!formRow) return res.status(404).json({ error: 'Form not found' });
 
-    const angebotRow = (await pool.query(
+    // (1) Legacy form-bazli Angebot
+    let angebotRow = (await pool.query(
       'SELECT netto_summe, mwst_satz, mwst_betrag, brutto_summe FROM aufmass_angebot WHERE form_id = $1',
       [id])).rows[0];
-    if (!angebotRow) return res.status(400).json({ error: 'Form has no Angebot — cannot create Rechnung' });
-
-    const itemsRows = (await pool.query(
+    let itemsRows = (await pool.query(
       'SELECT bezeichnung, menge, einzelpreis, gesamtpreis, sort_order FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id',
       [id])).rows;
+
+    // (2) MODÜL B fallback: form'un lead_id'si varsa lead-bazli items'i Angebot formatina cevir.
+    if (!angebotRow || itemsRows.length === 0) {
+      const formInfo = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [id]);
+      const leadId = formInfo.rows[0]?.lead_id;
+      if (leadId) {
+        const leadRes = await pool.query('SELECT * FROM aufmass_leads WHERE id = $1', [leadId]);
+        if (leadRes.rows.length > 0) {
+          const lead = leadRes.rows[0];
+          const leadItems = (await pool.query('SELECT * FROM aufmass_lead_items WHERE lead_id = $1 ORDER BY id', [leadId])).rows;
+          const leadExtras = (await pool.query('SELECT * FROM aufmass_lead_extras WHERE lead_id = $1 ORDER BY id', [leadId])).rows;
+
+          const totalPrice = Number(lead.total_price || 0);
+          const nettoCalc = totalPrice / 1.19;
+          const mwstSatzCalc = 19;
+          const mwstBetragCalc = totalPrice - nettoCalc;
+
+          angebotRow = {
+            netto_summe: nettoCalc.toFixed(2),
+            mwst_satz: mwstSatzCalc,
+            mwst_betrag: mwstBetragCalc.toFixed(2),
+            brutto_summe: totalPrice.toFixed(2),
+          };
+
+          let sortIdx = 0;
+          itemsRows = leadItems.map(it => {
+            const dimsLabel = (it.breite && it.tiefe)
+              ? ` (${it.breite}×${it.tiefe} mm)`
+              : (it.unit_label ? ` (${it.unit_label})` : '');
+            const lineTotal = (Number(it.unit_price) * Number(it.quantity)) - Number(it.discount || 0);
+            return {
+              bezeichnung: `${it.product_name}${dimsLabel}`,
+              menge: Number(it.quantity),
+              einzelpreis: Number(it.unit_price),
+              gesamtpreis: lineTotal,
+              sort_order: sortIdx++,
+            };
+          });
+          for (const ex of leadExtras) {
+            itemsRows.push({
+              bezeichnung: ex.description,
+              menge: 1,
+              einzelpreis: Number(ex.price),
+              gesamtpreis: Number(ex.price),
+              sort_order: sortIdx++,
+            });
+          }
+        }
+      }
+    }
+
+    if (!angebotRow) return res.status(400).json({ error: 'Form has no Angebot — cannot create Rechnung' });
     if (itemsRows.length === 0) return res.status(400).json({ error: 'Angebot has no items' });
 
     // For Schlussrechnung the displayed totals stay the full Angebot brutto;
