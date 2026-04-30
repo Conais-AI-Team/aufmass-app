@@ -98,20 +98,31 @@ interface ProductRow {
 }
 
 // MODÜL B v3: All dimensions are in mm (productConfig.json reference).
-// DB migrated cm → mm in one shot; backend dimensions endpoint returns mm keys directly.
+// Dynamic round-up against the actual grid loaded from /dimensions endpoint —
+// works for any custom grid the branch added (3500, 4250 etc), not a hardcoded step.
 
-// Round to grid in mm: aufmass typical roof 3-10 m, marquee 2-7 m
-// Step 100 mm = 10 cm (yeterli granular ama matrise sığar)
+const findClosestBreiteInGrid = (dimensions: ProductDimensions, requested: number): number | null => {
+  const keys = Object.keys(dimensions).map(Number).filter(k => k >= requested).sort((a, b) => a - b);
+  return keys.length > 0 ? keys[0] : null;
+};
+
+const findClosestTiefeInGrid = (
+  tiefes: { tiefe: number; price: number }[],
+  requested: number
+): { tiefe: number; price: number } | null => {
+  const matches = tiefes.filter(t => t.tiefe >= requested).sort((a, b) => a.tiefe - b.tiefe);
+  return matches.length > 0 ? matches[0] : null;
+};
+
+// Legacy: hardcoded step round (used if dimensions yet to load — fallback only)
 const roundBreiteToGrid = (mmValue: number): number => {
-  const min = 2000, max = 12000, step = 100;
-  const rounded = Math.ceil(mmValue / step) * step;
-  return Math.max(min, Math.min(max, rounded));
+  const min = 2000, max = 12000, step = 1000;
+  return Math.max(min, Math.min(max, Math.ceil(mmValue / step) * step));
 };
 
 const roundTiefeToGrid = (mmValue: number): number => {
-  const min = 1500, max = 6000, step = 100;
-  const rounded = Math.ceil(mmValue / step) * step;
-  return Math.max(min, Math.min(max, rounded));
+  const min = 1500, max = 6000, step = 500;
+  return Math.max(min, Math.min(max, Math.ceil(mmValue / step) * step));
 };
 
 interface LeadExtra {
@@ -364,16 +375,16 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
               r.dimensions = dimensions;
               r.description = dims.description;
               r.custom_fields = dims.custom_fields;
-              // Round-up + price lookup if Aufmaß provided dimensions
+              // Round-up against actual grid keys (handles any custom step bayi added)
               if (p.breite && p.tiefe && Object.keys(dimensions).length > 0) {
-                const rb = roundBreiteToGrid(p.breite);
-                const rt = roundTiefeToGrid(p.tiefe);
-                r.roundedBreite = rb;
-                r.roundedTiefe = rt;
-                const breiteKey = Object.keys(dimensions).find(b => Number(b) === rb);
-                if (breiteKey) {
-                  const found = dimensions[Number(breiteKey)].find(d => d.tiefe === rt);
-                  if (found) r.price = found.price;
+                const rb = findClosestBreiteInGrid(dimensions, p.breite);
+                if (rb !== null) {
+                  const rtMatch = findClosestTiefeInGrid(dimensions[rb], p.tiefe);
+                  if (rtMatch) {
+                    r.roundedBreite = rb;
+                    r.roundedTiefe = rtMatch.tiefe;
+                    r.price = rtMatch.price;
+                  }
                 }
               }
             }
@@ -466,24 +477,28 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           });
         }
       } else if (field === 'breite' || field === 'tiefe') {
-        // Calculate price using rounded values
         const breiteValue = field === 'breite' ? (value as number) : (updated.breite as number);
         const tiefeValue = field === 'tiefe' ? (value as number) : (updated.tiefe as number);
 
         if (breiteValue && tiefeValue && Object.keys(updated.dimensions).length > 0) {
-          // Round values for price lookup
-          const roundedBreite = roundBreiteToGrid(breiteValue);
-          const roundedTiefe = roundTiefeToGrid(tiefeValue);
-
-          updated.roundedBreite = roundedBreite;
-          updated.roundedTiefe = roundedTiefe;
-
-          // Find price from dimensions matrix using rounded values
-          const breiteKey = Object.keys(updated.dimensions).find(b => Number(b) === roundedBreite);
-          if (breiteKey && updated.dimensions[Number(breiteKey)]) {
-            const found = updated.dimensions[Number(breiteKey)].find(d => d.tiefe === roundedTiefe);
-            updated.price = found?.price || 0;
+          // Dynamic round-up against actual grid keys (handles custom branch grids)
+          const rb = findClosestBreiteInGrid(updated.dimensions, breiteValue);
+          if (rb !== null) {
+            const rtMatch = findClosestTiefeInGrid(updated.dimensions[rb], tiefeValue);
+            if (rtMatch) {
+              updated.roundedBreite = rb;
+              updated.roundedTiefe = rtMatch.tiefe;
+              updated.price = rtMatch.price;
+            } else {
+              // Tiefe out of grid: leave price 0, mark only breite-rounded
+              updated.roundedBreite = rb;
+              updated.roundedTiefe = undefined;
+              updated.price = 0;
+            }
           } else {
+            // Beyond grid max: no rounding possible
+            updated.roundedBreite = undefined;
+            updated.roundedTiefe = undefined;
             updated.price = 0;
           }
         } else {
