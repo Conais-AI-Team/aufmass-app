@@ -2508,18 +2508,95 @@ app.get('/api/forms/:id/angebot', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Form not found' });
     }
 
-    // Get angebot summary
-    const summaryResult = await pool.query('SELECT * FROM aufmass_angebot WHERE form_id = $1', [id]);
-
-    // Get angebot items
-    const itemsResult = await pool.query(
+    // (1) Legacy form-bazli Angebot (eski Caglayan oncesi akis)
+    const legacySummary = await pool.query('SELECT * FROM aufmass_angebot WHERE form_id = $1', [id]);
+    const legacyItems = await pool.query(
       'SELECT * FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id',
       [id]
     );
+    if (legacySummary.rows.length > 0 && legacyItems.rows.length > 0) {
+      return res.json({ summary: legacySummary.rows[0], items: legacyItems.rows });
+    }
+
+    // (2) MODÜL B v3: form'un lead_id'si varsa lead-bazli items'i Angebot formatina cevir.
+    // Bu sayede RechnungForm (Modül C) Caglayan'in LeadFormModal akisinda olusan
+    // verileri de gorebilir.
+    const formRow = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [id]);
+    const leadId = formRow.rows[0]?.lead_id;
+    if (!leadId) {
+      return res.json({ summary: null, items: [] });
+    }
+
+    const leadRes = await pool.query('SELECT * FROM aufmass_leads WHERE id = $1', [leadId]);
+    if (leadRes.rows.length === 0) {
+      return res.json({ summary: null, items: [] });
+    }
+    const lead = leadRes.rows[0];
+
+    const itemsRes = await pool.query(
+      'SELECT * FROM aufmass_lead_items WHERE lead_id = $1 ORDER BY id',
+      [leadId]
+    );
+    const extrasRes = await pool.query(
+      'SELECT * FROM aufmass_lead_extras WHERE lead_id = $1 ORDER BY id',
+      [leadId]
+    );
+
+    // Map lead_items → Angebot.items shape (bezeichnung, menge, einzelpreis, gesamtpreis)
+    let sortIdx = 0;
+    const mappedItems = itemsRes.rows.map(it => {
+      const dimsLabel = (it.breite && it.tiefe)
+        ? ` (${it.breite}×${it.tiefe} mm)`
+        : (it.unit_label ? ` (${it.unit_label})` : '');
+      const lineTotal = (Number(it.unit_price) * Number(it.quantity)) - Number(it.discount || 0);
+      return {
+        id: it.id,
+        form_id: parseInt(id),
+        bezeichnung: `${it.product_name}${dimsLabel}`,
+        menge: Number(it.quantity),
+        einzelpreis: Number(it.unit_price),
+        gesamtpreis: lineTotal,
+        sort_order: sortIdx++,
+      };
+    });
+
+    // Append extras as additional invoice lines
+    for (const ex of extrasRes.rows) {
+      mappedItems.push({
+        id: -ex.id,           // negative ids to avoid collision
+        form_id: parseInt(id),
+        bezeichnung: ex.description,
+        menge: 1,
+        einzelpreis: Number(ex.price),
+        gesamtpreis: Number(ex.price),
+        sort_order: sortIdx++,
+      });
+    }
+
+    // Compute totals matching Angebot summary contract (netto/mwst/brutto)
+    const subtotal = Number(lead.subtotal || 0);
+    const totalDiscount = Number(lead.total_discount || 0);
+    const totalPrice = Number(lead.total_price || 0);
+    const netto = totalPrice / 1.19;
+    const mwstSatz = 19;
+    const mwstBetrag = totalPrice - netto;
 
     res.json({
-      summary: summaryResult.rows[0] || null,
-      items: itemsResult.rows
+      summary: {
+        id: lead.id,
+        form_id: parseInt(id),
+        netto_summe: netto.toFixed(2),
+        mwst_satz: mwstSatz,
+        mwst_betrag: mwstBetrag.toFixed(2),
+        brutto_summe: totalPrice.toFixed(2),
+        angebot_datum: lead.created_at,
+        bemerkungen: lead.notes,
+        // For UI: indicate which path the data came from
+        source: 'lead',
+        original_subtotal: subtotal,
+        original_total_discount: totalDiscount,
+      },
+      items: mappedItems
     });
   } catch (err) {
     console.error('Error fetching Angebot:', err);
