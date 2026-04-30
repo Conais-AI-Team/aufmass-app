@@ -66,6 +66,10 @@ export interface FormData {
   customerSignature?: string | null;
   signatureName?: string | null;
   abnahmeSignPending?: boolean;
+  // First time the Aufmaß PDF was sent by e-mail (form's "E-Mail senden"
+  // button after save, or Dashboard card's e-mail icon). NULL means
+  // nothing has gone out yet — Dashboard renders an "ausstehend" badge.
+  email_sent_at?: string | null;
 }
 
 export interface ApiForm {
@@ -99,6 +103,7 @@ export interface ApiForm {
   customer_signature?: string | null;
   signature_name?: string | null;
   abnahme_sign_pending?: boolean;
+  email_sent_at?: string | null;
 }
 
 export interface Stats {
@@ -336,7 +341,8 @@ function transformApiToFrontend(apiForm: ApiForm): FormData {
     lead_id: apiForm.lead_id,
     customerSignature: apiForm.customer_signature || null,
     signatureName: apiForm.signature_name || null,
-    abnahmeSignPending: Boolean(apiForm.abnahme_sign_pending)
+    abnahmeSignPending: Boolean(apiForm.abnahme_sign_pending),
+    email_sent_at: apiForm.email_sent_at ?? null
   };
 }
 

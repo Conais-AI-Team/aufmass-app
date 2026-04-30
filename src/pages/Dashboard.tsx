@@ -1515,6 +1515,24 @@ Aylux Team`;
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" /></svg>
                           {form.kundenlokation || 'Keine Adresse'}
                         </p>
+                        {/* E-Mail status badge: green when an Aufmaß PDF was
+                            sent (form's "E-Mail senden" or Dashboard icon),
+                            yellow "ausstehend" otherwise. */}
+                        {form.email_sent_at ? (
+                          <span
+                            className="email-sent-badge"
+                            title={`E-Mail versendet: ${new Date(form.email_sent_at).toLocaleString('de-DE')}`}
+                          >
+                            ✓ E-Mail versendet
+                          </span>
+                        ) : (
+                          <span
+                            className="email-pending-badge"
+                            title="Es wurde noch keine E-Mail versendet"
+                          >
+                            📧 E-Mail ausstehend
+                          </span>
+                        )}
                       </div>
                       {isAdminOrOffice() ? (
                         <div className="status-selector">
@@ -2021,8 +2039,10 @@ Aylux Team`;
                     )}
                     {form.kundeEmail && (
                       <button
-                        className="action-btn email"
-                        title={`E-Mail an ${form.kundeEmail}`}
+                        className={`action-btn email ${form.email_sent_at ? 'sent' : ''}`}
+                        title={form.email_sent_at
+                          ? `E-Mail an ${form.kundeEmail} (versendet: ${new Date(form.email_sent_at).toLocaleString('de-DE')})`
+                          : `E-Mail an ${form.kundeEmail}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           const template = getEmailTemplate(form);
@@ -2036,6 +2056,9 @@ Aylux Team`;
                         }}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" /><polyline points="22,6 12,13 2,6" /></svg>
+                        {form.email_sent_at && (
+                          <span className="email-sent-check" aria-hidden="true">✓</span>
+                        )}
                       </button>
                     )}
                     {/* E-Signature button - only show if feature is enabled */}

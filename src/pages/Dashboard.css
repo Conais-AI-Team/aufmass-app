@@ -4971,3 +4971,58 @@
     width: 100%;
   }
 }
+
+/* Aufmaß card e-mail status badges */
+.email-sent-badge,
+.email-pending-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  padding: 0.15rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 600;
+  margin-top: 0.35rem;
+  cursor: default;
+  user-select: none;
+}
+
+.email-sent-badge {
+  color: #16a34a;
+  background: rgba(22, 163, 74, 0.12);
+  border: 1px solid rgba(22, 163, 74, 0.35);
+}
+
+.email-pending-badge {
+  color: #d97706;
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.35);
+}
+
+/* E-Mail sent check overlay on the action button (Dashboard + AusAufmassTab share these styles) */
+.action-btn.email,
+.btn-icon {
+  position: relative;
+}
+
+.email-sent-check {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  border-radius: 50%;
+  background: #16a34a;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  border: 2px solid var(--bg-secondary, #1a1a1a);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+  pointer-events: none;
+}
+
+.action-btn.email.sent {
+  border-color: rgba(22, 163, 74, 0.45);
+}
