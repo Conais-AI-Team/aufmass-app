@@ -692,30 +692,32 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
           const result = await api.post<{ id: number }>('/leads', payload);
 
-          // Generate PDF for this single-item lead
-          try {
-            const pdfResult = await generateAngebotPDF({
-              customer_firstname: firstname.trim(),
-              customer_lastname: lastname.trim(),
-              customer_email: email.trim(),
-              customer_phone: phone.trim() || undefined,
-              customer_address: address.trim() || undefined,
-              notes: notes.trim() || undefined,
-              items: [buildPdfItem(item)],
-              extras: itemExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-              subtotal: itemTotal + extrasTotal,
-              item_discounts: item.discount || 0,
-              total_discount: 0,
-              total_discount_percent: 0,
-              total_price: itemTotal + extrasTotal
-            }, { returnBlob: true });
-
-            if (pdfResult?.blob) {
-              await saveLeadPdf(result.id, pdfResult.blob);
+          // Generate PDF in background — modal kapanmasini bloklamasin
+          // (multi-product cover + AGB merge dakikalar surebilir).
+          const einzelLeadId = result.id;
+          const einzelPdfPayload = {
+            customer_firstname: firstname.trim(),
+            customer_lastname: lastname.trim(),
+            customer_email: email.trim(),
+            customer_phone: phone.trim() || undefined,
+            customer_address: address.trim() || undefined,
+            notes: notes.trim() || undefined,
+            items: [buildPdfItem(item)],
+            extras: itemExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
+            subtotal: itemTotal + extrasTotal,
+            item_discounts: item.discount || 0,
+            total_discount: 0,
+            total_discount_percent: 0,
+            total_price: itemTotal + extrasTotal
+          };
+          void (async () => {
+            try {
+              const pdfResult = await generateAngebotPDF(einzelPdfPayload, { returnBlob: true });
+              if (pdfResult?.blob) await saveLeadPdf(einzelLeadId, pdfResult.blob);
+            } catch (pdfErr) {
+              console.error('Einzelangebot PDF failed:', pdfErr);
             }
-          } catch (pdfErr) {
-            console.error('Einzelangebot PDF failed:', pdfErr);
-          }
+          })();
         }
         // einzelAngebote may have created several leads; we don't pick a
         // single id to chain the EmailComposer in this mode (would be
@@ -734,33 +736,35 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
         const result = await api.post<{ id: number; angebot_nummer: string }>(`/leads/${newAngebotForLeadId}/angebote`, angebotPayload);
 
-        // Generate and save PDF for this angebot
-        try {
-          const itemDiscountsTotal = calculateItemDiscounts();
-          const pdfResult = await generateAngebotPDF({
-            customer_firstname: firstname.trim(),
-            customer_lastname: lastname.trim(),
-            customer_email: email.trim(),
-            customer_phone: phone.trim() || undefined,
-            customer_address: address.trim() || undefined,
-            notes: notes.trim() || undefined,
-            kunden_nummer: editData?.kunden_nummer || undefined,
-            angebot_nummer: result.angebot_nummer || undefined,
-            items: validItems.map(buildPdfItem),
-            extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-            subtotal: calculateSubtotal(),
-            item_discounts: itemDiscountsTotal,
-            total_discount: totalDiscount || 0,
-            total_discount_percent: getTotalDiscountPercent(),
-            total_price: calculateTotal()
-          }, { returnBlob: true });
-
-          if (pdfResult?.blob) {
-            await saveAngebotPdf(newAngebotForLeadId, result.id, pdfResult.blob);
+        // Generate and save PDF in background — modal kapanmasini bloklamasin
+        const newAngLeadId = newAngebotForLeadId;
+        const newAngId = result.id;
+        const newAngebotNummer = result.angebot_nummer;
+        const newAngPdfPayload = {
+          customer_firstname: firstname.trim(),
+          customer_lastname: lastname.trim(),
+          customer_email: email.trim(),
+          customer_phone: phone.trim() || undefined,
+          customer_address: address.trim() || undefined,
+          notes: notes.trim() || undefined,
+          kunden_nummer: editData?.kunden_nummer || undefined,
+          angebot_nummer: newAngebotNummer || undefined,
+          items: validItems.map(buildPdfItem),
+          extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
+          subtotal: calculateSubtotal(),
+          item_discounts: calculateItemDiscounts(),
+          total_discount: totalDiscount || 0,
+          total_discount_percent: getTotalDiscountPercent(),
+          total_price: calculateTotal()
+        };
+        void (async () => {
+          try {
+            const pdfResult = await generateAngebotPDF(newAngPdfPayload, { returnBlob: true });
+            if (pdfResult?.blob) await saveAngebotPdf(newAngLeadId, newAngId, pdfResult.blob);
+          } catch (pdfErr) {
+            console.error('Angebot PDF generation failed:', pdfErr);
           }
-        } catch (pdfErr) {
-          console.error('Angebot PDF generation failed:', pdfErr);
-        }
+        })();
       } else {
         // === NORMAL MODE: Single lead with all products ===
         const payload = {
@@ -784,41 +788,43 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         const resAngebotNummer = (result as { angebot_nummer?: string }).angebot_nummer || editData?.angebot_nummer;
         const resKundenNummer = (result as { kunden_nummer?: string }).kunden_nummer || editData?.kunden_nummer;
 
-        // Generate and save Angebot PDF
-        try {
-          const itemDiscountsTotal = calculateItemDiscounts();
-          const pdfResult = await generateAngebotPDF({
-            customer_firstname: firstname.trim(),
-            customer_lastname: lastname.trim(),
-            customer_email: email.trim(),
-            customer_phone: phone.trim() || undefined,
-            customer_address: address.trim() || undefined,
-            notes: notes.trim() || undefined,
-            kunden_nummer: resKundenNummer || undefined,
-            angebot_nummer: resAngebotNummer || undefined,
-            items: validItems.map(buildPdfItem),
-            extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-            subtotal: calculateSubtotal(),
-            item_discounts: itemDiscountsTotal,
-            total_discount: totalDiscount || 0,
-            total_discount_percent: getTotalDiscountPercent(),
-            total_price: calculateTotal(),
-            // MODÜL B: forward Aufmaß photos so the generator can embed them.
-            // Empty for non-fromAufmass modes — keeps prior behavior intact.
-            bilder: isFromAufmassMode ? aufmassImages : undefined
-          }, { returnBlob: true });
-
-          if (pdfResult?.blob) {
-            if (editAngebotId) {
+        // Generate and save Angebot PDF in background — modal kapanmasini bloklamasin
+        const normalLeadId = leadId;
+        const normalAngebotId = editAngebotId;
+        const normalPdfPayload = {
+          customer_firstname: firstname.trim(),
+          customer_lastname: lastname.trim(),
+          customer_email: email.trim(),
+          customer_phone: phone.trim() || undefined,
+          customer_address: address.trim() || undefined,
+          notes: notes.trim() || undefined,
+          kunden_nummer: resKundenNummer || undefined,
+          angebot_nummer: resAngebotNummer || undefined,
+          items: validItems.map(buildPdfItem),
+          extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
+          subtotal: calculateSubtotal(),
+          item_discounts: calculateItemDiscounts(),
+          total_discount: totalDiscount || 0,
+          total_discount_percent: getTotalDiscountPercent(),
+          total_price: calculateTotal(),
+          // MODÜL B: forward Aufmaß photos so the generator can embed them.
+          // Empty for non-fromAufmass modes — keeps prior behavior intact.
+          bilder: isFromAufmassMode ? aufmassImages : undefined
+        };
+        void (async () => {
+          try {
+            const pdfResult = await generateAngebotPDF(normalPdfPayload, { returnBlob: true });
+            if (!pdfResult?.blob) return;
+            if (normalAngebotId) {
               const { saveAngebotPdf } = await import('../services/api');
-              await saveAngebotPdf(leadId, editAngebotId, pdfResult.blob);
+              await saveAngebotPdf(normalLeadId, normalAngebotId, pdfResult.blob);
             } else {
-              await saveLeadPdf(leadId, pdfResult.blob);
+              await saveLeadPdf(normalLeadId, pdfResult.blob);
             }
+          } catch (pdfErr) {
+            console.error('Angebot PDF generation failed:', pdfErr);
           }
-        } catch (pdfErr) {
-          console.error('Angebot PDF generation failed:', pdfErr);
-        }
+        })();
       }
 
       // MODÜL B: pass savedLeadId + sendEmailAfterSave so the parent can
