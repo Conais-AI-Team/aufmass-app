@@ -1417,7 +1417,13 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
       {/* Progress indicator */}
       <div className="progress-container">
         <div className="progress-steps">
-          {steps.map((step, index) => (
+          {steps.map((step, index) => {
+            // Bearbeiten ("Aufmaß düzenleme") modunda her step'e direkt
+            // zıplanabilir — form zaten dolu, validation gerekmez. Yeni
+            // form akışında (isExistingForm=false) sequential davranış
+            // korunur: sadece geri zıplama mümkün.
+            const canJumpToStep = isExistingForm || index < currentStep;
+            return (
             <motion.div
               key={step.id}
               className={`progress-step ${index === currentStep ? 'active' : ''} ${index < currentStep ? 'completed' : ''}`}
@@ -1425,18 +1431,19 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.3, delay: index * 0.1 }}
               onClick={() => {
-                if (index < currentStep) {
+                if (canJumpToStep && index !== currentStep) {
                   setCurrentStep(index);
                 }
               }}
-              style={{ cursor: index < currentStep ? 'pointer' : 'default' }}
+              style={{ cursor: canJumpToStep ? 'pointer' : 'default' }}
             >
               <div className="step-number">
                 <StepIcon step={index + 1} />
               </div>
               <div className="step-title">{step.title}</div>
             </motion.div>
-          ))}
+            );
+          })}
         </div>
         <div className="progress-bar">
           <motion.div
