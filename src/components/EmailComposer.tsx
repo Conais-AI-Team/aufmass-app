@@ -17,6 +17,7 @@ interface EmailComposerProps {
   body: string;
   formId?: number;
   leadId?: number;
+  rechnungId?: number;
   angebote?: AngebotAttachment[];
   emailType?: string;
   attachmentName?: string;
@@ -24,7 +25,7 @@ interface EmailComposerProps {
   onSent?: () => void;
 }
 
-const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId, leadId, angebote, emailType, attachmentName, onClose, onSent }: EmailComposerProps) => {
+const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId, leadId, rechnungId, angebote, emailType, attachmentName, onClose, onSent }: EmailComposerProps) => {
   const toast = useToast();
   const [subject, setSubject] = useState(initialSubject);
   const [body, setBody] = useState(initialBody);
@@ -37,7 +38,7 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
   const [pdfReady, setPdfReady] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
-  const [pdfFileName, setPdfFileName] = useState(attachmentName || (formId ? `Aufmass_${formId}.pdf` : leadId ? `Angebot_${leadId}.pdf` : ''));
+  const [pdfFileName, setPdfFileName] = useState(attachmentName || (rechnungId ? `Rechnung_${rechnungId}.pdf` : formId ? `Aufmass_${formId}.pdf` : leadId ? `Angebot_${leadId}.pdf` : ''));
 
   // Multi-angebot selection (for leads with multiple angebote)
   const [selectedAngebote, setSelectedAngebote] = useState<Set<number>>(() => {
@@ -66,6 +67,14 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
       setPdfReady(true);
     }
   }, [isLeadPdfPreSaved, attachPdf]);
+
+  // Rechnung PDF is generated server-side before EmailComposer opens
+  useEffect(() => {
+    if (rechnungId && attachPdf === null) {
+      setAttachPdf(true);
+      setPdfReady(true);
+    }
+  }, [rechnungId, attachPdf]);
 
   const handleGeneratePdf = useCallback(async () => {
     if (!formId) return;
@@ -109,12 +118,30 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
   // When user selects "Ja" for PDF
   const handleAttachPdfChange = (value: boolean) => {
     setAttachPdf(value);
-    if (value && formId && !pdfReady && !isLeadPdfPreSaved) {
+    if (value && formId && !pdfReady && !isLeadPdfPreSaved && !rechnungId) {
       handleGeneratePdf();
     }
   };
 
   const handleSend = async () => {
+    // Postal-only path: open the PDF in a new tab for the user to print, then close.
+    if (postalOnly) {
+      if (rechnungId) {
+        // Lazy import to avoid circular dep
+        const { getRechnungPdfUrl } = await import('../services/api');
+        window.open(getRechnungPdfUrl(rechnungId), '_blank', 'noopener');
+      } else if (formId) {
+        const { getPdfUrl } = await import('../services/api');
+        window.open(getPdfUrl(formId), '_blank', 'noopener');
+      } else if (leadId) {
+        const { getLeadPdfUrl } = await import('../services/api');
+        window.open(getLeadPdfUrl(leadId), '_blank', 'noopener');
+      }
+      toast.success('Per Post', 'PDF zum Drucken geöffnet. Status bleibt unverändert.');
+      onClose();
+      return;
+    }
+
     if (!to) { toast.warning('Keine E-Mail', 'Empfänger-E-Mail fehlt.'); return; }
     if (attachPdf === null) { toast.warning('PDF-Anhang', 'Bitte wählen Sie, ob ein PDF angehängt werden soll.'); return; }
     if (attachPdf && !pdfReady) { toast.warning('PDF wird erstellt', 'Bitte warten Sie, bis das PDF erstellt wurde.'); return; }
@@ -123,8 +150,9 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
     try {
       await sendEmail({
         to, subject, body,
-        form_id: attachPdf ? formId : undefined,
+        form_id: attachPdf && !rechnungId ? formId : undefined,
         lead_id: attachPdf ? leadId : undefined,
+        rechnung_id: attachPdf ? rechnungId : undefined,
         angebot_ids: attachPdf && selectedAngebote.size > 0 ? Array.from(selectedAngebote) : undefined,
         email_type: emailType,
         attachment_name: pdfFileName
@@ -139,7 +167,10 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
     }
   };
 
-  const hasPdfOption = !!(formId || leadId);
+  const hasPdfOption = !!(formId || leadId || rechnungId);
+  // Postal-only delivery: user prints the PDF and mails it themselves; close
+  // without sending an SMTP email. Only available when there's a PDF attached.
+  const [postalOnly, setPostalOnly] = useState(false);
   const canSend = statusLoaded && emailStatus?.configured && !sending && attachPdf !== null
     && (!attachPdf || pdfReady || (hasMultiAngebote && selectedAngebote.size > 0));
 
@@ -228,8 +259,30 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
               style={{ ...inputStyle, resize: 'vertical', lineHeight: '1.6', minHeight: '160px' }} />
           </div>
 
-          {/* PDF Attachment Toggle */}
+          {/* Postal-only delivery checkbox (skips SMTP) */}
           {hasPdfOption && (
+            <label style={{
+              display: 'flex', alignItems: 'center', gap: '8px',
+              padding: '10px 14px', borderRadius: '10px', marginBottom: '10px',
+              background: postalOnly ? 'rgba(127,169,61,0.08)' : 'var(--bg-secondary)',
+              border: `1px solid ${postalOnly ? 'rgba(127,169,61,0.3)' : 'var(--border-primary)'}`,
+              cursor: 'pointer', userSelect: 'none',
+            }}>
+              <input
+                type="checkbox"
+                checked={postalOnly}
+                onChange={(e) => setPostalOnly(e.target.checked)}
+                style={{ width: '15px', height: '15px', accentColor: '#7fa93d' }}
+              />
+              <div>
+                <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>Per Post versenden (kein E-Mail)</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>PDF wird zum Ausdrucken geöffnet — keine E-Mail wird gesendet.</div>
+              </div>
+            </label>
+          )}
+
+          {/* PDF Attachment Toggle */}
+          {hasPdfOption && !postalOnly && (
             <div style={{
               padding: '14px 16px', borderRadius: '12px', marginBottom: '4px',
               background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
@@ -330,19 +383,21 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
           </button>
           <button
             onClick={handleSend}
-            disabled={!canSend}
+            disabled={postalOnly ? sending : !canSend}
             style={{
               padding: '8px 20px', borderRadius: '8px', border: 'none',
-              background: canSend ? 'linear-gradient(135deg, #7fa93d, #6a9432)' : 'var(--bg-tertiary)',
-              color: canSend ? '#fff' : 'var(--text-tertiary)',
+              background: (postalOnly || canSend) ? 'linear-gradient(135deg, #7fa93d, #6a9432)' : 'var(--bg-tertiary)',
+              color: (postalOnly || canSend) ? '#fff' : 'var(--text-tertiary)',
               fontSize: '13px', fontWeight: 600,
-              cursor: canSend ? 'pointer' : 'not-allowed',
+              cursor: (postalOnly || canSend) ? 'pointer' : 'not-allowed',
               display: 'flex', alignItems: 'center', gap: '6px',
-              boxShadow: canSend ? '0 2px 8px rgba(127,169,61,0.3)' : 'none',
+              boxShadow: (postalOnly || canSend) ? '0 2px 8px rgba(127,169,61,0.3)' : 'none',
             }}
           >
             {sending ? (
               <><div style={{ width: '14px', height: '14px', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.6s linear infinite' }} />Senden...</>
+            ) : postalOnly ? (
+              <><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><polyline points="6 9 6 2 18 2 18 9" /><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2" /><rect x="6" y="14" width="12" height="8" /></svg>PDF zum Drucken öffnen</>
             ) : (
               <><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>Jetzt senden</>
             )}

@@ -490,6 +490,20 @@ export interface AbnahmeSignRequestResponse {
   expiresAt: string;
 }
 
+export interface PublicRechnungSummary {
+  id: number;
+  rechnung_nr: string;
+  type: 'anzahlungsrechnung' | 'schlussrechnung';
+  brutto_betrag: number;
+  has_pdf: boolean;
+}
+
+export interface PublicRestbetrag {
+  brutto: number;
+  anzahlungen: number;
+  rest: number;
+}
+
 export interface PublicAbnahmeSignRequest {
   id: number;
   formId: number;
@@ -498,6 +512,12 @@ export interface PublicAbnahmeSignRequest {
   signedAt?: string | null;
   expiresAt: string;
   snapshot: AbnahmeSignSnapshot;
+  restbetrag?: PublicRestbetrag | null;
+  rechnungen?: PublicRechnungSummary[];
+}
+
+export function getPublicRechnungPdfUrl(token: string, rechnungId: number): string {
+  return `${API_BASE_URL}/public/abnahme-sign/${token}/rechnung/${rechnungId}/pdf`;
 }
 
 export async function createAbnahmeSignRequest(formId: number): Promise<AbnahmeSignRequestResponse> {
@@ -970,7 +990,27 @@ export interface AngebotData {
 export async function getAngebot(formId: number): Promise<AngebotData> {
   const response = await authFetch(`${API_BASE_URL}/forms/${formId}/angebot`);
   if (!response.ok) throw new Error('Failed to fetch Angebot data');
-  return response.json();
+  const raw = await response.json();
+  // Postgres NUMERIC arrives as string — coerce to number so .toFixed() etc. work
+  const toNum = (v: unknown): number => {
+    if (v === null || v === undefined) return 0;
+    return typeof v === 'string' ? parseFloat(v) : (v as number);
+  };
+  return {
+    summary: raw.summary ? {
+      ...raw.summary,
+      netto_summe: toNum(raw.summary.netto_summe),
+      mwst_satz: toNum(raw.summary.mwst_satz),
+      mwst_betrag: toNum(raw.summary.mwst_betrag),
+      brutto_summe: toNum(raw.summary.brutto_summe),
+    } : null,
+    items: (raw.items || []).map((it: Record<string, unknown>) => ({
+      ...it,
+      menge: toNum(it.menge),
+      einzelpreis: toNum(it.einzelpreis),
+      gesamtpreis: toNum(it.gesamtpreis),
+    })),
+  };
 }
 
 // Save Angebot data
@@ -1180,6 +1220,7 @@ export const testEmailConnection = (settings: {
 export const sendEmail = (data: {
   to: string; subject: string; body: string; body_html?: string;
   form_id?: number; lead_id?: number; angebot_ids?: number[];
+  rechnung_id?: number;
   email_type?: string; attachment_name?: string;
 }): Promise<{ success: boolean; message: string }> => api.post('/email/send', data);
 
@@ -1283,4 +1324,135 @@ export const getBranchStats = (from?: string, to?: string): Promise<BranchStatsR
   const qs = params.toString();
   return api.get(`/admin/branch-stats${qs ? `?${qs}` : ''}`);
 };
+
+// ============ RECHNUNG (INVOICE) — Modul C ============
+export type RechnungType = 'anzahlungsrechnung' | 'schlussrechnung';
+export type RechnungStatus = 'entwurf' | 'gesendet' | 'bezahlt';
+export type ZahlungsMethode = 'bar' | 'überweisung' | 'paypal' | 'other';
+
+export interface RechnungItem {
+  bezeichnung: string;
+  menge: number;
+  einzelpreis: number;
+  gesamtpreis: number;
+  sort_order?: number;
+}
+
+export interface Rechnung {
+  id: number;
+  rechnung_nr: string;
+  type: RechnungType;
+  form_id: number;
+  branch_id: string;
+  kunde_vorname: string | null;
+  kunde_nachname: string | null;
+  kunde_email: string | null;
+  kunde_telefon: string | null;
+  kunde_adresse: string | null;
+  netto_betrag: number | string;
+  mwst_satz: number | string;
+  mwst_betrag: number | string;
+  brutto_betrag: number | string;
+  rechnungsdatum: string;
+  leistungsdatum: string | null;
+  zahlungsziel: string;
+  items_json: RechnungItem[] | string;
+  status: RechnungStatus;
+  sent_at: string | null;
+  paid_at: string | null;
+  pdf_generated_at: string | null;
+  created_at: string;
+}
+
+export interface CreateRechnungPayload {
+  type: RechnungType;
+  rechnungsdatum: string;
+  leistungsdatum?: string | null;
+  zahlungsziel: string;
+}
+
+export interface UpdateRechnungPayload {
+  rechnungsdatum?: string;
+  leistungsdatum?: string | null;
+  zahlungsziel?: string;
+}
+
+export interface Anzahlung {
+  id: number;
+  form_id: number;
+  rechnung_id: number | null;
+  betrag: number | string;
+  zahlungsdatum: string;
+  zahlungsmethode: ZahlungsMethode;
+  beleg_file_id: number | null;
+  notiz: string | null;
+  created_at: string;
+}
+
+export interface CreateAnzahlungPayload {
+  betrag: number;
+  zahlungsdatum: string;
+  zahlungsmethode?: ZahlungsMethode;
+  beleg_file_id?: number | null;
+  notiz?: string | null;
+  rechnung_id?: number | null;
+}
+
+export const createRechnung = (formId: number, payload: CreateRechnungPayload): Promise<Rechnung> =>
+  api.post(`/forms/${formId}/rechnung`, payload);
+
+export const getRechnungenByForm = (formId: number): Promise<Rechnung[]> =>
+  api.get(`/forms/${formId}/rechnungen`);
+
+export const getRechnung = (id: number): Promise<Rechnung> =>
+  api.get(`/rechnungen/${id}`);
+
+export const updateRechnung = (id: number, payload: UpdateRechnungPayload): Promise<Rechnung> =>
+  api.put(`/rechnungen/${id}`, payload);
+
+export const markRechnungSent = (id: number): Promise<{ success: boolean; form_status: string }> =>
+  api.post(`/rechnungen/${id}/mark-sent`);
+
+export async function saveRechnungPdf(id: number, pdfBlob: Blob): Promise<{ success: boolean; size: number }> {
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/rechnungen/${id}/pdf`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/pdf',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    },
+    body: pdfBlob
+  });
+  if (!response.ok) throw new Error('Failed to save Rechnung PDF');
+  return response.json();
+}
+
+export function getRechnungPdfUrl(id: number): string {
+  const token = getStoredToken();
+  return `${API_BASE_URL}/rechnungen/${id}/pdf${token ? `?token=${token}` : ''}`;
+}
+
+export const createAnzahlung = (formId: number, payload: CreateAnzahlungPayload): Promise<Anzahlung> =>
+  api.post(`/forms/${formId}/anzahlungen`, payload);
+
+export const getAnzahlungenByForm = (formId: number): Promise<Anzahlung[]> =>
+  api.get(`/forms/${formId}/anzahlungen`);
+
+export const deleteAnzahlung = (id: number): Promise<{ success: boolean }> =>
+  api.delete(`/anzahlungen/${id}`);
+
+// Helper: parse items_json which arrives either as JSON string or as object array
+export function parseRechnungItems(items: RechnungItem[] | string | null | undefined): RechnungItem[] {
+  if (!items) return [];
+  if (typeof items === 'string') {
+    try { return JSON.parse(items) as RechnungItem[]; } catch { return []; }
+  }
+  return items;
+}
+
+// Helper: normalize numeric column (Postgres NUMERIC arrives as string)
+export function num(v: number | string | null | undefined): number {
+  if (v === null || v === undefined) return 0;
+  return typeof v === 'string' ? parseFloat(v) : v;
+}
 

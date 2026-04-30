@@ -5,8 +5,11 @@ import { AufmassForm } from '../App';
 import { FormData } from '../types';
 import { DynamicFormData } from '../types/productConfig';
 import { getForm, createForm, updateForm, uploadImages, savePdf, updateLeadStatus, getAbnahme, getAbnahmeImages, FormData as ApiFormData } from '../services/api';
+import type { Rechnung, RechnungType } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import EmailComposer from '../components/EmailComposer';
+import RechnungForm from '../components/RechnungForm';
+import AnzahlungForm from '../components/AnzahlungForm';
 import { useToast } from '../components/Toast';
 
 interface LeadItem {
@@ -44,7 +47,11 @@ const FormPage = () => {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
   const [initialData, setInitialData] = useState<FormData | null>(null);
-  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; formId: number } | null>(null);
+  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; formId?: number; rechnungId?: number; emailType?: string; attachmentName?: string } | null>(null);
+  // Modul C: Rechnung / Anzahlung modals
+  const [rechnungModalOpen, setRechnungModalOpen] = useState(false);
+  const [rechnungType, setRechnungType] = useState<RechnungType>('anzahlungsrechnung');
+  const [anzahlungModalOpen, setAnzahlungModalOpen] = useState(false);
   const [savedFormId, setSavedFormId] = useState<number | null>(null);
   const [savedKundeEmail, setSavedKundeEmail] = useState('');
   const [savedKundeName, setSavedKundeName] = useState('');
@@ -75,9 +82,40 @@ const FormPage = () => {
         await updateForm(parseInt(id), { status: newStatus });
         setFormStatus(newStatus);
       }
+      // Modul C: when entering anzahlung status, open the payment management modal
+      const plainStatus = newStatus.includes(':') ? newStatus.split(':')[0] : newStatus;
+      if (plainStatus === 'anzahlung') {
+        setAnzahlungModalOpen(true);
+      }
     } catch (err) {
       console.error('Error updating status:', err);
       toast.error('Fehler', 'Status konnte nicht aktualisiert werden.');
+    }
+  };
+
+  // ============ MODUL C: RECHNUNG TRIGGER ============
+  const handleOpenRechnung = (type: RechnungType) => {
+    setRechnungType(type);
+    setRechnungModalOpen(true);
+  };
+
+  const handleRechnungSaved = (rechnung: Rechnung, opts: { sendEmail: boolean }) => {
+    setRechnungModalOpen(false);
+    // Entwurf: form goes to *_erstellt; email/mark-sent later advances to gesendet
+    const draftStatus = rechnung.type === 'schlussrechnung' ? 'schluss_rechnung_erstellt' : 'rechnung_erstellt';
+    setFormStatus(draftStatus);
+    if (opts.sendEmail && rechnung.kunde_email) {
+      const labelDe = rechnung.type === 'schlussrechnung' ? 'Schlussrechnung' : 'Anzahlungsrechnung';
+      setEmailComposer({
+        to: rechnung.kunde_email,
+        subject: `${labelDe} ${rechnung.rechnung_nr}`,
+        body: `Sehr geehrte/r ${rechnung.kunde_vorname || ''} ${rechnung.kunde_nachname || ''},\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.\n\nMit freundlichen Grüßen`,
+        rechnungId: rechnung.id,
+        emailType: rechnung.type === 'schlussrechnung' ? 'rechnung_schluss' : 'rechnung_anzahlung',
+        attachmentName: `Rechnung_${rechnung.rechnung_nr}.pdf`,
+      });
+    } else {
+      toast.success('Rechnung als Entwurf erstellt', `Nr. ${rechnung.rechnung_nr}. Per E-Mail oder manuell als „gesendet" markieren, um abzuschließen.`);
     }
   };
 
@@ -461,8 +499,62 @@ const FormPage = () => {
     });
   };
 
+  const numericFormId = id && id !== 'new' ? parseInt(id) : null;
+
   return (
     <>
+      {/* Modul C: Rechnung action bar — only visible for existing forms in trigger statuses */}
+      {numericFormId && (formStatus === 'auftrag_erteilt' || formStatus === 'abnahme' || formStatus === 'anzahlung') && (
+        <div style={{
+          display: 'flex', justifyContent: 'flex-end', gap: '8px',
+          padding: '10px 20px', borderBottom: '1px solid var(--border-primary)',
+          background: 'var(--bg-secondary)',
+        }}>
+          {formStatus === 'auftrag_erteilt' && (
+            <button
+              onClick={() => handleOpenRechnung('anzahlungsrechnung')}
+              style={{
+                padding: '8px 16px', borderRadius: '8px', border: '1px solid rgba(14,165,233,0.3)',
+                background: 'rgba(14,165,233,0.1)', color: '#0ea5e9',
+                fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+              Anzahlungsrechnung erstellen
+            </button>
+          )}
+          {formStatus === 'abnahme' && (
+            <button
+              onClick={() => handleOpenRechnung('schlussrechnung')}
+              style={{
+                padding: '8px 16px', borderRadius: '8px', border: '1px solid rgba(8,145,178,0.3)',
+                background: 'rgba(8,145,178,0.1)', color: '#0891b2',
+                fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+              Schlussrechnung erstellen
+            </button>
+          )}
+          {formStatus === 'anzahlung' && (
+            <button
+              onClick={() => setAnzahlungModalOpen(true)}
+              style={{
+                padding: '8px 16px', borderRadius: '8px', border: '1px solid rgba(6,182,212,0.3)',
+                background: 'rgba(6,182,212,0.1)', color: '#06b6d4',
+                fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><circle cx="12" cy="12" r="10" /><line x1="12" y1="6" x2="12" y2="12" /><line x1="12" y1="12" x2="16" y2="14" /></svg>
+              Anzahlungen verwalten
+            </button>
+          )}
+        </div>
+      )}
+
       <AufmassForm
         initialData={initialData}
         onSave={handleSave}
@@ -481,8 +573,32 @@ const FormPage = () => {
             subject={emailComposer.subject}
             body={emailComposer.body}
             formId={emailComposer.formId}
-            emailType="aufmass"
+            rechnungId={emailComposer.rechnungId}
+            emailType={emailComposer.emailType || 'aufmass'}
+            attachmentName={emailComposer.attachmentName}
             onClose={() => setEmailComposer(null)}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Modul C: Rechnung modal */}
+      <AnimatePresence>
+        {rechnungModalOpen && numericFormId && (
+          <RechnungForm
+            formId={numericFormId}
+            type={rechnungType}
+            onClose={() => setRechnungModalOpen(false)}
+            onSaved={handleRechnungSaved}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Modul C: Anzahlung modal */}
+      <AnimatePresence>
+        {anzahlungModalOpen && numericFormId && (
+          <AnzahlungForm
+            formId={numericFormId}
+            onClose={() => setAnzahlungModalOpen(false)}
           />
         )}
       </AnimatePresence>
