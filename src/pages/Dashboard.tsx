@@ -10,6 +10,10 @@ import { useStats } from '../AppWrapper';
 import { useToast } from '../components/Toast';
 import EmailComposer from '../components/EmailComposer';
 import LeadFormModal from '../components/LeadFormModal';
+import RechnungForm from '../components/RechnungForm';
+import AnzahlungForm from '../components/AnzahlungForm';
+import type { Rechnung, RechnungType } from '../services/api';
+import { getRechnungenByForm, markRechnungSent, getAnzahlungenByForm, num } from '../services/api';
 import './Dashboard.css';
 
 // Check if current user is admin or office (both have elevated permissions)
@@ -26,12 +30,16 @@ const STATUS_OPTIONS = [
   { value: 'neu', label: 'Aufmaß Genommen', color: '#8b5cf6' },
   { value: 'angebot_versendet', label: 'Angebot Versendet', color: '#a78bfa' },
   { value: 'auftrag_erteilt', label: 'Auftrag Erteilt', color: '#3b82f6' },
+  { value: 'rechnung_erstellt', label: 'Rechnung Entwurf', color: '#38bdf8' },
+  { value: 'gesendet', label: 'Rechnung Gesendet', color: '#0ea5e9' },
   { value: 'bauantrag', label: 'Bauantrag', color: '#2563eb' },
   { value: 'anzahlung', label: 'Anzahlung Erhalten', color: '#06b6d4' },
   { value: 'bestellt', label: 'Bestellt/In Bearbeitung', color: '#f59e0b' },
   { value: 'montage_geplant', label: 'Montage Geplant', color: '#a855f7' },
   { value: 'montage_gestartet', label: 'Montage Gestartet', color: '#ec4899' },
   { value: 'abnahme', label: 'Abnahme', color: '#10b981' },
+  { value: 'schluss_rechnung_erstellt', label: 'Schlussrechnung Entwurf', color: '#22d3ee' },
+  { value: 'rest_rechnung_erstellt', label: 'Schlussrechnung Gesendet', color: '#0891b2' },
   { value: 'reklamation_eingegangen', label: 'Reklamation Eingegangen', color: '#ef4444' },
   { value: 'reklamation_bestellt', label: 'Reklamation Bestellt', color: '#dc2626' },
   { value: 'reklamation_abgelehnt', label: 'Reklamation Abgelehnt', color: '#b91c1c' },
@@ -45,12 +53,16 @@ const STATUS_ORDER = [
   'neu',
   'angebot_versendet',
   'auftrag_erteilt',  // lock starts AFTER this
+  'rechnung_erstellt',
+  'gesendet',
   'bauantrag',
   'anzahlung',
   'bestellt',
   'montage_geplant',
   'montage_gestartet',
   'abnahme',
+  'schluss_rechnung_erstellt',
+  'rest_rechnung_erstellt',
   'reklamation_eingegangen',
   'reklamation_bestellt',
   'reklamation_abgelehnt',
@@ -86,12 +98,29 @@ const Dashboard = () => {
   const [montageteams, setMontageteams] = useState<Montageteam[]>([]);
 
   // Email composer state
-  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; formId?: number; emailType?: string } | null>(null);
+  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; formId?: number; rechnungId?: number; emailType?: string; attachmentName?: string } | null>(null);
   // MODÜL B — LeadFormModal triggered from the status dropdown when picking
   // "Angebot Versendet" (replaces the legacy AngebotItems modal flow).
   const [leadModalOpen, setLeadModalOpen] = useState(false);
   const [leadModalEditData, setLeadModalEditData] = useState<unknown>(null);
   const [leadModalFromAufmassId, setLeadModalFromAufmassId] = useState<number | null>(null);
+  // Rechnung / Anzahlung modal state (Modul C)
+  const [rechnungModalOpen, setRechnungModalOpen] = useState(false);
+  const [rechnungFormId, setRechnungFormId] = useState<number | null>(null);
+  const [rechnungType, setRechnungType] = useState<RechnungType>('anzahlungsrechnung');
+  const [anzahlungModalOpen, setAnzahlungModalOpen] = useState(false);
+  const [anzahlungFormId, setAnzahlungFormId] = useState<number | null>(null);
+  // Pending Rechnung chain: when user goes to a status that needs an Angebot but
+  // has none, we open the Angebot modal first; this remembers what to do after
+  // the Angebot is saved.
+  const [rechnungChainTarget, setRechnungChainTarget] = useState<{ formId: number; type: RechnungType } | null>(null);
+  // Mark-sent confirm modal
+  const [markSentTarget, setMarkSentTarget] = useState<{ rechnungId: number; rechnungNr: string } | null>(null);
+  const [markSentBusy, setMarkSentBusy] = useState(false);
+  // Restbetrag info shown inside the Abnahme modal — Angebot brutto minus
+  // already-received Anzahlungen. Null means we couldn't compute it
+  // (no Angebot yet, or fetch failed).
+  const [abnahmeRestbetrag, setAbnahmeRestbetrag] = useState<{ brutto: number; anzahlungen: number; rest: number } | null>(null);
   const [teamDropdownOpen, setTeamDropdownOpen] = useState<number | null>(null);
   const [statusDropdownOpen, setStatusDropdownOpen] = useState<number | null>(null);
   const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
@@ -383,13 +412,23 @@ const Dashboard = () => {
       setAbnahmeFormId(formId);
       // Reset image states
       setMaengelImageFiles([]);
-      // Load existing abnahme data, images, and signature status
+      setAbnahmeRestbetrag(null);
+      // Load existing abnahme data, images, signature status, and the
+      // Restbetrag (Angebot-Brutto − Σ Anzahlungen) so we can warn the user
+      // before they finalize the acceptance.
       try {
-        const [existingAbnahme, existingImages, sigStatus] = await Promise.all([
+        const [existingAbnahme, existingImages, sigStatus, angebot, anzahlungen] = await Promise.all([
           getAbnahme(formId),
           getAbnahmeImages(formId),
-          getEsignatureStatus(formId).catch(() => null)
+          getEsignatureStatus(formId).catch(() => null),
+          getAngebot(formId).catch(() => null),
+          getAnzahlungenByForm(formId).catch(() => []),
         ]);
+        if (angebot?.summary) {
+          const brutto = num(angebot.summary.brutto_summe);
+          const anzSum = (anzahlungen || []).reduce((s, a) => s + num(a.betrag), 0);
+          setAbnahmeRestbetrag({ brutto, anzahlungen: anzSum, rest: brutto - anzSum });
+        }
         if (existingAbnahme) {
           setAbnahmeData(existingAbnahme);
         } else {
@@ -429,6 +468,21 @@ const Dashboard = () => {
       return;
     }
 
+    // If selecting anzahlung status, open Anzahlung management modal (Modul C)
+    if (newStatus === 'anzahlung') {
+      setAnzahlungFormId(formId);
+      setAnzahlungModalOpen(true);
+      setStatusDropdownOpen(null);
+      // Persist status change too — same pattern as plain status, just default to today
+      try {
+        await updateForm(formId, { status: newStatus, statusDate: new Date().toISOString().split('T')[0] });
+        setForms(prev => prev.map(f => f.id === formId ? { ...f, status: newStatus } : f));
+      } catch (err) {
+        console.error('Error updating status to anzahlung:', err);
+      }
+      return;
+    }
+
     // For all other status changes, open date picker modal
     setStatusDateFormId(formId);
     setPendingStatus(newStatus);
@@ -437,6 +491,88 @@ const Dashboard = () => {
     setStatusDateValue(today);
     setStatusDateModalOpen(true);
     setStatusDropdownOpen(null);
+  };
+
+  // ============ MODUL C: RECHNUNG TRIGGER ============
+  const handleOpenRechnung = (formId: number, type: RechnungType) => {
+    setRechnungFormId(formId);
+    setRechnungType(type);
+    setRechnungModalOpen(true);
+  };
+
+  // Manually mark the latest Entwurf Rechnung as sent (postal/manual flow).
+  // Opens a styled confirmation modal; the actual API call lives in confirmMarkRechnungSent.
+  const handleMarkRechnungSent = async (formId: number) => {
+    try {
+      const rechnungen = await getRechnungenByForm(formId);
+      const target = rechnungen.find(r => r.status === 'entwurf');
+      if (!target) {
+        toast.warning('Keine Entwurf-Rechnung', 'Es gibt keine Rechnung im Entwurf-Status.');
+        return;
+      }
+      setMarkSentTarget({ rechnungId: target.id, rechnungNr: target.rechnung_nr });
+    } catch (err) {
+      toast.error('Fehler', err instanceof Error ? err.message : 'Konnte nicht geladen werden.');
+    }
+  };
+
+  const confirmMarkRechnungSent = async () => {
+    if (!markSentTarget) return;
+    setMarkSentBusy(true);
+    try {
+      await markRechnungSent(markSentTarget.rechnungId);
+      toast.success('Markiert', `Rechnung ${markSentTarget.rechnungNr} als gesendet markiert.`);
+      setMarkSentTarget(null);
+      loadData();
+    } catch (err) {
+      toast.error('Fehler', err instanceof Error ? err.message : 'Konnte nicht markiert werden.');
+    } finally {
+      setMarkSentBusy(false);
+    }
+  };
+
+  // Open email composer for the latest Entwurf Rechnung of a form (used by the
+  // "Senden" button on cards in *_erstellt status — manual delivery flow).
+  const handleResendRechnungEmail = async (formId: number) => {
+    try {
+      const rechnungen = await getRechnungenByForm(formId);
+      const target = rechnungen.find(r => r.status === 'entwurf') || rechnungen[0];
+      if (!target) {
+        toast.warning('Keine Rechnung', 'Für dieses Aufmaß wurde noch keine Rechnung erstellt.');
+        return;
+      }
+      const labelDe = target.type === 'schlussrechnung' ? 'Schlussrechnung' : 'Anzahlungsrechnung';
+      setEmailComposer({
+        to: target.kunde_email || '',
+        subject: `${labelDe} ${target.rechnung_nr}`,
+        body: `Sehr geehrte/r ${target.kunde_vorname || ''} ${target.kunde_nachname || ''},\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${target.rechnung_nr}.\n\nMit freundlichen Grüßen`,
+        rechnungId: target.id,
+        emailType: target.type === 'schlussrechnung' ? 'rechnung_schluss' : 'rechnung_anzahlung',
+        attachmentName: `Rechnung_${target.rechnung_nr}.pdf`,
+      });
+    } catch (err) {
+      toast.error('Fehler', err instanceof Error ? err.message : 'Rechnung konnte nicht geladen werden.');
+    }
+  };
+
+  const handleRechnungSaved = (rechnung: Rechnung, opts: { sendEmail: boolean }) => {
+    setRechnungModalOpen(false);
+    // Backend bumps form.status to *_erstellt (Entwurf). Email send (or admin
+    // mark-sent) advances it to gesendet / rest_rechnung_erstellt.
+    loadData();
+    if (opts.sendEmail && rechnung.kunde_email) {
+      const labelDe = rechnung.type === 'schlussrechnung' ? 'Schlussrechnung' : 'Anzahlungsrechnung';
+      setEmailComposer({
+        to: rechnung.kunde_email,
+        subject: `${labelDe} ${rechnung.rechnung_nr}`,
+        body: `Sehr geehrte/r ${rechnung.kunde_vorname || ''} ${rechnung.kunde_nachname || ''},\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.\n\nMit freundlichen Grüßen`,
+        rechnungId: rechnung.id,
+        emailType: rechnung.type === 'schlussrechnung' ? 'rechnung_schluss' : 'rechnung_anzahlung',
+        attachmentName: `Rechnung_${rechnung.rechnung_nr}.pdf`,
+      });
+    } else {
+      toast.success('Rechnung als Entwurf erstellt', `Nr. ${rechnung.rechnung_nr}. Per E-Mail oder manuell als „gesendet" markieren, um abzuschließen.`);
+    }
   };
 
   // Open status history modal
@@ -612,10 +748,13 @@ Aylux Team`;
 
       if (updatedForm?.kundeEmail) {
         const kundenName = `${updatedForm.kundeVorname} ${updatedForm.kundeNachname}`.trim();
+        const restNote = abnahmeRestbetrag && abnahmeRestbetrag.rest > 0
+          ? `\n\nHinweis: Nach Abnahme verbleibt ein Restbetrag in Höhe von ${abnahmeRestbetrag.rest.toLocaleString('de-DE', { minimumFractionDigits: 2 })} EUR. Eine Schlussrechnung wird Ihnen separat zugestellt.`
+          : '';
         setEmailComposer({
           to: updatedForm.kundeEmail,
           subject: 'Bitte bestätigen Sie Ihre Abnahme',
-          body: `Sehr geehrte/r ${kundenName},\n\nbitte bestätigen Sie die Abnahme über folgenden Link:\n${signRequest.signUrl}\n\nMit freundlichen Grüßen\nAylux Team`,
+          body: `Sehr geehrte/r ${kundenName},\n\nbitte bestätigen Sie die Abnahme über folgenden Link:\n${signRequest.signUrl}${restNote}\n\nMit freundlichen Grüßen\nAylux Team`,
           formId: abnahmeFormId,
           emailType: 'abnahme'
         });
@@ -855,15 +994,28 @@ Aylux Team`;
       if (branchFeatures?.esignature_enabled && !angebotEditMode) {
         setAngebotConfirmOpen(true);
       } else {
-        // Just save and update status
-        await updateForm(angebotFormId, { status: 'angebot_versendet', statusDate: angebotDate });
-        setForms(forms.map(f => f.id === angebotFormId ? { ...f, status: 'angebot_versendet', statusDate: angebotDate } : f));
+        // If we got here because the user was actually trying to create a
+        // Rechnung (and we forced them through Angebot first), promote the
+        // status straight to auftrag_erteilt and open the Rechnung modal next.
+        const chain = rechnungChainTarget && rechnungChainTarget.formId === angebotFormId ? rechnungChainTarget : null;
+        const finalStatus = chain ? 'auftrag_erteilt' : 'angebot_versendet';
+        await updateForm(angebotFormId, { status: finalStatus, statusDate: angebotDate });
+        setForms(forms.map(f => f.id === angebotFormId ? { ...f, status: finalStatus, statusDate: angebotDate } : f));
         // Freeze the Angebot-PDF so it survives later status changes
         void captureSnapshot(angebotFormId, 'angebot');
         setAngebotModalOpen(false);
+        const savedFormId = angebotFormId;
         setAngebotFormId(null);
         refreshStats();
-        toast.success('Gespeichert', 'Angebot wurde gespeichert.');
+        if (chain) {
+          setRechnungChainTarget(null);
+          setRechnungFormId(savedFormId);
+          setRechnungType(chain.type);
+          setRechnungModalOpen(true);
+          toast.success('Angebot gespeichert', 'Rechnung wird jetzt erstellt...');
+        } else {
+          toast.success('Gespeichert', 'Angebot wurde gespeichert.');
+        }
       }
     } catch (err) {
       console.error('Error saving angebot:', err);
@@ -1805,6 +1957,68 @@ Aylux Team`;
                         )}
                       </AnimatePresence>
                     </div>
+                    {/* Modul C: Rechnung-Buttons */}
+                    {getFormStatus(form) === 'auftrag_erteilt' && (
+                      <button
+                        className="action-btn"
+                        style={{ background: 'rgba(14,165,233,0.1)', color: '#0ea5e9', border: '1px solid rgba(14,165,233,0.2)' }}
+                        title="Anzahlungsrechnung erstellen"
+                        onClick={(e) => { e.stopPropagation(); handleOpenRechnung(form.id!, 'anzahlungsrechnung'); }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
+                        <span>Rechnung</span>
+                      </button>
+                    )}
+                    {getFormStatus(form) === 'abnahme' && (
+                      <button
+                        className="action-btn"
+                        style={{ background: 'rgba(8,145,178,0.1)', color: '#0891b2', border: '1px solid rgba(8,145,178,0.2)' }}
+                        title="Schlussrechnung erstellen"
+                        onClick={(e) => { e.stopPropagation(); handleOpenRechnung(form.id!, 'schlussrechnung'); }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
+                        <span>Rest-Rechnung</span>
+                      </button>
+                    )}
+                    {getFormStatus(form) === 'anzahlung' && (
+                      <button
+                        className="action-btn"
+                        style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}
+                        title="Anzahlungen verwalten"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setAnzahlungFormId(form.id!);
+                          setAnzahlungModalOpen(true);
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="12" y1="6" x2="12" y2="12" /><line x1="12" y1="12" x2="16" y2="14" /></svg>
+                        <span>Anzahlungen</span>
+                      </button>
+                    )}
+                    {(getFormStatus(form) === 'rechnung_erstellt' || getFormStatus(form) === 'schluss_rechnung_erstellt') && (
+                      <>
+                        <button
+                          className="action-btn"
+                          style={{ background: 'rgba(56,189,248,0.12)', color: '#38bdf8', border: '1px solid rgba(56,189,248,0.25)' }}
+                          title="Rechnung per E-Mail versenden"
+                          onClick={(e) => { e.stopPropagation(); handleResendRechnungEmail(form.id!); }}
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+                          <span>Senden</span>
+                        </button>
+                        {isAdminOrOffice() && (
+                          <button
+                            className="action-btn"
+                            style={{ background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.25)' }}
+                            title="Manuell als gesendet markieren (Post)"
+                            onClick={(e) => { e.stopPropagation(); handleMarkRechnungSent(form.id!); }}
+                          >
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="20 6 9 17 4 12" /></svg>
+                            <span>Als gesendet markieren</span>
+                          </button>
+                        )}
+                      </>
+                    )}
                     {form.kundeEmail && (
                       <button
                         className="action-btn email"
@@ -2027,11 +2241,45 @@ Aylux Team`;
                       // Trigger snapshot if this status implies a new document type
                       const snapType = statusToSnapshotType(pendingStatus);
                       if (snapType) void captureSnapshot(statusDateFormId, snapType);
+                      // Capture before clearing — used by the Rechnung chain below
+                      const chainedFormId = statusDateFormId;
+                      const chainedStatus = pendingStatus;
                       setStatusDateModalOpen(false);
                       setStatusDateFormId(null);
                       setStatusDateValue('');
                       setPendingStatus('');
                       refreshStats();
+
+                      // Modul C chain: when the user picks an "Entwurf" status,
+                      // open the Rechnung modal automatically. If no Angebot exists,
+                      // open the Angebot modal first and remember the chain so we
+                      // resume into the Rechnung modal once the Angebot is saved.
+                      const rechnungChainStatus =
+                        chainedStatus === 'rechnung_erstellt' ? 'anzahlungsrechnung'
+                        : chainedStatus === 'schluss_rechnung_erstellt' ? 'schlussrechnung'
+                        : null;
+                      if (rechnungChainStatus) {
+                        try {
+                          const ang = await getAngebot(chainedFormId);
+                          if (ang?.items && ang.items.length > 0) {
+                            setRechnungFormId(chainedFormId);
+                            setRechnungType(rechnungChainStatus);
+                            setRechnungModalOpen(true);
+                          } else {
+                            // Modul B akışı: Angebot artık LeadFormModal üzerinden
+                            // oluşturuluyor. Chain target set edip LeadFormModal'ı
+                            // açıyoruz; save sonrası onSuccess handler chain'i
+                            // devam ettirip Rechnung modal'ını açacak.
+                            toast.warning('Angebot fehlt', 'Bitte zuerst ein Angebot erstellen — danach wird die Rechnung automatisch fortgesetzt.');
+                            setRechnungChainTarget({ formId: chainedFormId, type: rechnungChainStatus });
+                            setLeadModalEditData(null);
+                            setLeadModalFromAufmassId(chainedFormId);
+                            setLeadModalOpen(true);
+                          }
+                        } catch (chainErr) {
+                          console.error('Rechnung chain failed:', chainErr);
+                        }
+                      }
                     } catch (err) {
                       console.error('Error updating status:', err);
                       toast.error('Fehler', 'Status konnte nicht gespeichert werden.');
@@ -2240,6 +2488,40 @@ Aylux Team`;
                     <path d="M7 11V7a5 5 0 0110 0v4" />
                   </svg>
                   <span>Diese Abnahme wurde bereits abgeschlossen und kann nicht mehr bearbeitet werden.</span>
+                </div>
+              )}
+              {/* Modul C: Restbetrag warning before acceptance */}
+              {abnahmeRestbetrag && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: '12px',
+                  padding: '12px 16px', borderRadius: '10px', margin: '0 0 14px 0',
+                  background: abnahmeRestbetrag.rest > 0 ? 'rgba(245,158,11,0.10)' : 'rgba(16,185,129,0.10)',
+                  border: `1px solid ${abnahmeRestbetrag.rest > 0 ? 'rgba(245,158,11,0.30)' : 'rgba(16,185,129,0.30)'}`,
+                }}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke={abnahmeRestbetrag.rest > 0 ? '#f59e0b' : '#10b981'} strokeWidth="2" width="20" height="20" style={{ flexShrink: 0 }}>
+                    {abnahmeRestbetrag.rest > 0 ? (
+                      <><circle cx="12" cy="12" r="10" /><line x1="12" y1="8" x2="12" y2="12" /><line x1="12" y1="16" x2="12.01" y2="16" /></>
+                    ) : (
+                      <><polyline points="20 6 9 17 4 12" /></>
+                    )}
+                  </svg>
+                  <div style={{ fontSize: '13px', lineHeight: 1.4, color: 'var(--text-primary)' }}>
+                    {abnahmeRestbetrag.rest > 0 ? (
+                      <>
+                        <strong>Verbleibender Restbetrag: {abnahmeRestbetrag.rest.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} EUR</strong>
+                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
+                          Brutto {abnahmeRestbetrag.brutto.toLocaleString('de-DE', { minimumFractionDigits: 2 })} EUR − Anzahlungen {abnahmeRestbetrag.anzahlungen.toLocaleString('de-DE', { minimumFractionDigits: 2 })} EUR · Bitte vor Abnahme mit dem Kunden klären.
+                        </div>
+                      </>
+                    ) : (
+                      <>
+                        <strong>Vollständig bezahlt — kein Restbetrag offen.</strong>
+                        <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>
+                          Brutto {abnahmeRestbetrag.brutto.toLocaleString('de-DE', { minimumFractionDigits: 2 })} EUR · Anzahlungen {abnahmeRestbetrag.anzahlungen.toLocaleString('de-DE', { minimumFractionDigits: 2 })} EUR
+                        </div>
+                      </>
+                    )}
+                  </div>
                 </div>
               )}
               <div className={`abnahme-form ${isAbnahmeLocked ? 'locked' : ''}`}>
@@ -2624,8 +2906,11 @@ Aylux Team`;
             subject={emailComposer.subject}
             body={emailComposer.body}
             formId={emailComposer.formId}
+            rechnungId={emailComposer.rechnungId}
             emailType={emailComposer.emailType}
+            attachmentName={emailComposer.attachmentName}
             onClose={() => setEmailComposer(null)}
+            onSent={() => loadData()}
           />
         )}
       </AnimatePresence>
@@ -2640,6 +2925,11 @@ Aylux Team`;
           setLeadModalFromAufmassId(null);
         }}
         onSuccess={async (savedLeadId) => {
+          // Capture chain state before clearing, so we can resume into
+          // the Rechnung modal when the user came here via "Rechnung Entwurf"
+          // status pick on a form that didn't have an Angebot yet.
+          const chain = rechnungChainTarget;
+          const fromFormId = leadModalFromAufmassId;
           setLeadModalOpen(false);
           setLeadModalEditData(null);
           setLeadModalFromAufmassId(null);
@@ -2654,10 +2944,108 @@ Aylux Team`;
           }
           // Refresh forms so the new status is reflected on the cards.
           getForms().then(setForms).catch(err => console.error('Reload failed:', err));
+
+          // Modul C chain: if we were on the way to creating a Rechnung,
+          // promote the form to auftrag_erteilt and open the Rechnung modal.
+          if (chain && fromFormId && chain.formId === fromFormId) {
+            try {
+              await updateForm(fromFormId, { status: 'auftrag_erteilt', statusDate: new Date().toISOString().split('T')[0] });
+            } catch (err) {
+              console.error('Status promote to auftrag_erteilt failed:', err);
+            }
+            setRechnungChainTarget(null);
+            setRechnungFormId(fromFormId);
+            setRechnungType(chain.type);
+            setRechnungModalOpen(true);
+            toast.success('Angebot gespeichert', 'Rechnung wird jetzt erstellt...');
+          }
         }}
         editData={leadModalEditData as React.ComponentProps<typeof LeadFormModal>['editData']}
         fromAufmassFormId={leadModalFromAufmassId}
       />
+
+      {/* Rechnung Modal (Modul C) */}
+      <AnimatePresence>
+        {rechnungModalOpen && rechnungFormId !== null && (
+          <RechnungForm
+            formId={rechnungFormId}
+            type={rechnungType}
+            onClose={() => setRechnungModalOpen(false)}
+            onSaved={handleRechnungSaved}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Anzahlung Modal (Modul C) */}
+      <AnimatePresence>
+        {anzahlungModalOpen && anzahlungFormId !== null && (
+          <AnzahlungForm
+            formId={anzahlungFormId}
+            onClose={() => setAnzahlungModalOpen(false)}
+            onSaved={() => loadData()}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Mark-sent confirm modal (Modul C) */}
+      <AnimatePresence>
+        {markSentTarget && (
+          <motion.div
+            className="modal-overlay-modern"
+            initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+            onClick={() => !markSentBusy && setMarkSentTarget(null)}
+            style={{ zIndex: 10000 }}
+          >
+            <motion.div
+              onClick={(e) => e.stopPropagation()}
+              initial={{ scale: 0.95, opacity: 0, y: 20 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.95, opacity: 0, y: 20 }}
+              transition={{ type: 'spring', damping: 25, stiffness: 350 }}
+              style={{
+                width: '100%', maxWidth: '440px', margin: 'auto', borderRadius: '16px',
+                background: 'var(--bg-primary)', border: '1px solid var(--border-primary)',
+                boxShadow: '0 25px 60px rgba(0,0,0,0.4)', overflow: 'hidden',
+              }}
+            >
+              <div style={{ padding: '20px 22px', borderBottom: '1px solid var(--border-primary)', display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <div style={{ width: '36px', height: '36px', borderRadius: '10px', background: 'rgba(16,185,129,0.12)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="#10b981" strokeWidth="2.2" width="18" height="18"><polyline points="20 6 9 17 4 12" /></svg>
+                </div>
+                <div>
+                  <div style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>Als gesendet markieren?</div>
+                  <div style={{ fontSize: '12px', color: 'var(--text-tertiary)', marginTop: '2px' }}>Rechnung {markSentTarget.rechnungNr}</div>
+                </div>
+              </div>
+              <div style={{ padding: '16px 22px', fontSize: '13px', color: 'var(--text-secondary)', lineHeight: 1.55 }}>
+                Diese Rechnung wurde per Post oder anders versendet. Mit der Bestätigung wird sie als <strong>gesendet</strong> markiert und der Aufmaß-Status wechselt zu „Rechnung Gesendet".
+              </div>
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px', padding: '12px 22px', borderTop: '1px solid var(--border-primary)', background: 'var(--bg-secondary)' }}>
+                <button
+                  disabled={markSentBusy}
+                  onClick={() => setMarkSentTarget(null)}
+                  style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid var(--border-primary)', background: 'transparent', color: 'var(--text-secondary)', fontSize: '13px', fontWeight: 500, cursor: markSentBusy ? 'not-allowed' : 'pointer' }}
+                >
+                  Abbrechen
+                </button>
+                <button
+                  disabled={markSentBusy}
+                  onClick={confirmMarkRechnungSent}
+                  style={{
+                    padding: '8px 20px', borderRadius: '8px', border: 'none',
+                    background: markSentBusy ? 'var(--bg-tertiary)' : 'linear-gradient(135deg, #10b981, #059669)',
+                    color: '#fff', fontSize: '13px', fontWeight: 600,
+                    cursor: markSentBusy ? 'not-allowed' : 'pointer',
+                    boxShadow: markSentBusy ? 'none' : '0 2px 8px rgba(16,185,129,0.3)',
+                  }}
+                >
+                  {markSentBusy ? 'Markiert...' : 'Ja, als gesendet markieren'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
     </>
   );

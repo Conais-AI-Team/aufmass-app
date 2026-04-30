@@ -518,6 +518,74 @@ async function initializeTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_form_pdf_snapshots_lookup ON aufmass_form_pdf_snapshots(form_id, document_type)`);
     console.log('Form PDF snapshots table ready');
 
+    // ============ RECHNUNG (Modul C) ============
+    // Legal invoices per UStG §14. items_json is an immutable snapshot of the Angebot
+    // items at the time of invoice creation: once issued, the invoice content must not
+    // change even if the underlying Angebot is later edited.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_rechnungen (
+        id SERIAL PRIMARY KEY,
+        rechnung_nr VARCHAR(40) NOT NULL UNIQUE,
+        type VARCHAR(20) NOT NULL,
+        form_id INT REFERENCES aufmass_forms(id) ON DELETE SET NULL,
+        branch_id VARCHAR(50),
+        kunde_vorname VARCHAR(100),
+        kunde_nachname VARCHAR(100),
+        kunde_email VARCHAR(255),
+        kunde_telefon VARCHAR(50),
+        kunde_adresse TEXT,
+        netto_betrag DECIMAL(12,2) NOT NULL,
+        mwst_satz DECIMAL(5,2) NOT NULL DEFAULT 19,
+        mwst_betrag DECIMAL(12,2) NOT NULL,
+        brutto_betrag DECIMAL(12,2) NOT NULL,
+        rechnungsdatum DATE NOT NULL,
+        leistungsdatum DATE,
+        zahlungsziel DATE NOT NULL,
+        items_json JSONB NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'entwurf',
+        sent_at TIMESTAMP NULL,
+        paid_at TIMESTAMP NULL,
+        generated_pdf BYTEA,
+        pdf_generated_at TIMESTAMP NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        created_by INT REFERENCES aufmass_users(id) ON DELETE SET NULL
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS ix_aufmass_rechnungen_form_id ON aufmass_rechnungen(form_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS ix_aufmass_rechnungen_branch_id ON aufmass_rechnungen(branch_id)`);
+    console.log('aufmass_rechnungen table ready');
+
+    // Cash receipts (down payments). Independent from the legal Anzahlungsrechnung:
+    // a row here is a recorded payment, optionally linked to an invoice via rechnung_id.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_anzahlungen (
+        id SERIAL PRIMARY KEY,
+        form_id INT REFERENCES aufmass_forms(id) ON DELETE CASCADE,
+        rechnung_id INT REFERENCES aufmass_rechnungen(id) ON DELETE SET NULL,
+        betrag DECIMAL(12,2) NOT NULL,
+        zahlungsdatum DATE NOT NULL,
+        zahlungsmethode VARCHAR(20) NOT NULL,
+        beleg_file_id INT NULL,
+        notiz TEXT,
+        branch_id VARCHAR(50),
+        created_at TIMESTAMP DEFAULT NOW(),
+        created_by INT REFERENCES aufmass_users(id) ON DELETE SET NULL
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS ix_aufmass_anzahlungen_form_id ON aufmass_anzahlungen(form_id)`);
+    console.log('aufmass_anzahlungen table ready');
+
+    // Race-safe Rechnung counter (mirrors aufmass_angebot_counters pattern).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_rechnung_counters (
+        branch_key VARCHAR(20) NOT NULL,
+        year INTEGER NOT NULL,
+        last_num INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (branch_key, year)
+      )
+    `);
+    console.log('aufmass_rechnung_counters table ready');
+
     console.log('Database tables initialized');
   } catch (err) {
     console.error('Table initialization failed:', err.message);
@@ -1979,6 +2047,46 @@ app.get('/api/public/abnahme-sign/:token', async (req, res) => {
     const request = result.rows[0];
     const isExpired = request.expires_at && new Date(request.expires_at) < new Date();
 
+    // Compute current Restbetrag (Brutto − Anzahlungen) and list invoices
+    // for display on the public sign page. We compute live (not from the
+    // snapshot) so any payments added since the link was sent are reflected.
+    let restbetrag = null;
+    let rechnungen = [];
+    if (request.form_id) {
+      try {
+        const angebot = await pool.query(
+          `SELECT brutto_summe FROM aufmass_angebot WHERE form_id = $1`,
+          [request.form_id]
+        );
+        const anzSum = await pool.query(
+          `SELECT COALESCE(SUM(betrag), 0) AS total FROM aufmass_anzahlungen WHERE form_id = $1`,
+          [request.form_id]
+        );
+        if (angebot.rows.length > 0) {
+          const brutto = parseFloat(angebot.rows[0].brutto_summe);
+          const anzahlungen = parseFloat(anzSum.rows[0].total);
+          restbetrag = { brutto, anzahlungen, rest: brutto - anzahlungen };
+        }
+        const rRes = await pool.query(
+          `SELECT id, rechnung_nr, type, brutto_betrag,
+                  (generated_pdf IS NOT NULL) AS has_pdf
+             FROM aufmass_rechnungen
+            WHERE form_id = $1 AND status = 'gesendet'
+            ORDER BY created_at ASC`,
+          [request.form_id]
+        );
+        rechnungen = rRes.rows.map(r => ({
+          id: r.id,
+          rechnung_nr: r.rechnung_nr,
+          type: r.type,
+          brutto_betrag: parseFloat(r.brutto_betrag),
+          has_pdf: r.has_pdf,
+        }));
+      } catch (cErr) {
+        console.warn('Restbetrag/rechnung enrichment failed:', cErr.message);
+      }
+    }
+
     res.json({
       id: request.id,
       formId: request.form_id,
@@ -1986,7 +2094,9 @@ app.get('/api/public/abnahme-sign/:token', async (req, res) => {
       signerName: request.signer_name,
       signedAt: request.signed_at,
       expiresAt: request.expires_at,
-      snapshot: JSON.parse(request.snapshot_json)
+      snapshot: JSON.parse(request.snapshot_json),
+      restbetrag,
+      rechnungen,
     });
   } catch (err) {
     console.error('Error getting public abnahme sign request:', err);
@@ -2063,6 +2173,38 @@ app.post('/api/public/abnahme-sign/:token', async (req, res) => {
 });
 
 // Public PDF download for signed abnahme
+// Public download for a Rechnung tied to the form behind the sign-request token.
+// No JWT — access is gated by the customer's per-Aufmaß sign token.
+app.get('/api/public/abnahme-sign/:token/rechnung/:rechnungId/pdf', async (req, res) => {
+  try {
+    const tokenHash = hashPublicToken(req.params.token);
+    const reqRow = await pool.query(
+      `SELECT form_id FROM aufmass_abnahme_sign_requests WHERE token_hash = $1`,
+      [tokenHash]
+    );
+    if (reqRow.rows.length === 0) return res.status(404).json({ error: 'Sign request not found' });
+
+    const r = await pool.query(
+      `SELECT generated_pdf, rechnung_nr, form_id FROM aufmass_rechnungen WHERE id = $1`,
+      [req.params.rechnungId]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Rechnung not found' });
+    if (r.rows[0].form_id !== reqRow.rows[0].form_id) {
+      // Prevent cross-form access via guessed rechnung_id
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    if (!r.rows[0].generated_pdf) return res.status(404).json({ error: 'PDF not generated' });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Rechnung_${r.rows[0].rechnung_nr}.pdf"`);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(r.rows[0].generated_pdf);
+  } catch (err) {
+    console.error('Public Rechnung PDF error:', err);
+    res.status(500).json({ error: 'Failed to fetch PDF' });
+  }
+});
+
 app.get('/api/public/abnahme-sign/:token/pdf', async (req, res) => {
   try {
     const tokenHash = hashPublicToken(req.params.token);
@@ -2356,6 +2498,334 @@ app.post('/api/forms/:id/angebot', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Error saving Angebot:', err);
     res.status(500).json({ error: 'Failed to save Angebot data' });
+  }
+});
+
+// ============ RECHNUNG (INVOICE) ENDPOINTS — Modul C ============
+
+// Verify a Rechnung belongs to the caller's branch.
+async function verifyRechnungBranch(rechnungId, branchId) {
+  const r = await pool.query('SELECT branch_id FROM aufmass_rechnungen WHERE id = $1', [rechnungId]);
+  if (r.rows.length === 0) return null;
+  if (r.rows[0].branch_id && branchId && r.rows[0].branch_id !== branchId) return null;
+  return r.rows[0];
+}
+
+// POST /api/forms/:id/rechnung — create a new invoice from a form's Angebot
+app.post('/api/forms/:id/rechnung', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!await verifyFormBranch(id, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    const { type, rechnungsdatum, leistungsdatum, zahlungsziel } = req.body;
+    if (!['anzahlungsrechnung', 'schlussrechnung'].includes(type)) {
+      return res.status(400).json({ error: 'Invalid type' });
+    }
+    if (!rechnungsdatum || !zahlungsziel) {
+      return res.status(400).json({ error: 'rechnungsdatum and zahlungsziel are required' });
+    }
+
+    // Snapshot form (kunde_*) and angebot (totals + items)
+    const formRow = (await pool.query(
+      `SELECT kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, branch_id
+       FROM aufmass_forms WHERE id = $1`, [id])).rows[0];
+    if (!formRow) return res.status(404).json({ error: 'Form not found' });
+
+    const angebotRow = (await pool.query(
+      'SELECT netto_summe, mwst_satz, mwst_betrag, brutto_summe FROM aufmass_angebot WHERE form_id = $1',
+      [id])).rows[0];
+    if (!angebotRow) return res.status(400).json({ error: 'Form has no Angebot — cannot create Rechnung' });
+
+    const itemsRows = (await pool.query(
+      'SELECT bezeichnung, menge, einzelpreis, gesamtpreis, sort_order FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id',
+      [id])).rows;
+    if (itemsRows.length === 0) return res.status(400).json({ error: 'Angebot has no items' });
+
+    // For Schlussrechnung the displayed totals stay the full Angebot brutto;
+    // the "Restbetrag" is computed at PDF render time from anzahlungen.
+    const netto = parseFloat(angebotRow.netto_summe);
+    const mwstSatz = parseFloat(angebotRow.mwst_satz);
+    const mwstBetrag = parseFloat(angebotRow.mwst_betrag);
+    const brutto = parseFloat(angebotRow.brutto_summe);
+
+    const rechnungNr = await generateNextRechnungNummer(req.branchId);
+
+    // 3-step flow: creating a Rechnung produces an Entwurf (draft); the form
+    // moves to a "Rechnung erstellt" status. Sending the email later promotes
+    // both the Rechnung and the form to the final "gesendet" status.
+    const inserted = await pool.query(
+      `INSERT INTO aufmass_rechnungen
+         (rechnung_nr, type, form_id, branch_id,
+          kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kunde_adresse,
+          netto_betrag, mwst_satz, mwst_betrag, brutto_betrag,
+          rechnungsdatum, leistungsdatum, zahlungsziel,
+          items_json, status, created_by)
+       VALUES ($1,$2,$3,$4, $5,$6,$7,$8,$9, $10,$11,$12,$13, $14,$15,$16, $17,'entwurf',$18)
+       RETURNING *`,
+      [rechnungNr, type, id, req.branchId,
+       formRow.kunde_vorname, formRow.kunde_nachname, formRow.kunde_email, formRow.kunde_telefon, formRow.kundenlokation,
+       netto, mwstSatz, mwstBetrag, brutto,
+       rechnungsdatum, leistungsdatum || null, zahlungsziel,
+       JSON.stringify(itemsRows), req.user.id]
+    );
+
+    // Advance the parent form to "Entwurf" workflow status
+    const newFormStatus = type === 'schlussrechnung' ? 'schluss_rechnung_erstellt' : 'rechnung_erstellt';
+    await pool.query(
+      `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
+      [newFormStatus, id]
+    );
+
+    res.status(201).json(inserted.rows[0]);
+  } catch (err) {
+    console.error('Error creating Rechnung:', err);
+    res.status(500).json({ error: 'Failed to create Rechnung' });
+  }
+});
+
+// GET /api/forms/:id/rechnungen — list invoices for a form
+app.get('/api/forms/:id/rechnungen', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!await verifyFormBranch(id, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const rows = (await pool.query(
+      `SELECT id, rechnung_nr, type, form_id, branch_id,
+              kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kunde_adresse,
+              netto_betrag, mwst_satz, mwst_betrag, brutto_betrag,
+              rechnungsdatum, leistungsdatum, zahlungsziel,
+              items_json, status, sent_at, paid_at, pdf_generated_at, created_at
+         FROM aufmass_rechnungen WHERE form_id = $1 ORDER BY created_at DESC`,
+      [id])).rows;
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing Rechnungen:', err);
+    res.status(500).json({ error: 'Failed to list Rechnungen' });
+  }
+});
+
+// GET /api/rechnungen/:id — single invoice detail
+app.get('/api/rechnungen/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await pool.query(
+      `SELECT id, rechnung_nr, type, form_id, branch_id,
+              kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kunde_adresse,
+              netto_betrag, mwst_satz, mwst_betrag, brutto_betrag,
+              rechnungsdatum, leistungsdatum, zahlungsziel,
+              items_json, status, sent_at, paid_at, pdf_generated_at, created_at
+         FROM aufmass_rechnungen WHERE id = $1`, [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Rechnung not found' });
+    if (r.rows[0].branch_id && req.branchId && r.rows[0].branch_id !== req.branchId) {
+      return res.status(404).json({ error: 'Rechnung not found' });
+    }
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('Error fetching Rechnung:', err);
+    res.status(500).json({ error: 'Failed to fetch Rechnung' });
+  }
+});
+
+// PUT /api/rechnungen/:id — update invoice (only while entwurf)
+app.put('/api/rechnungen/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await verifyRechnungBranch(id, req.branchId);
+    if (!existing) return res.status(404).json({ error: 'Rechnung not found' });
+
+    const cur = await pool.query('SELECT status FROM aufmass_rechnungen WHERE id = $1', [id]);
+    if (cur.rows[0].status !== 'entwurf') {
+      return res.status(409).json({ error: 'Only entwurf invoices can be edited' });
+    }
+
+    const { rechnungsdatum, leistungsdatum, zahlungsziel } = req.body;
+    // Editing invalidates the cached PDF
+    const updated = await pool.query(
+      `UPDATE aufmass_rechnungen
+         SET rechnungsdatum = COALESCE($2, rechnungsdatum),
+             leistungsdatum = $3,
+             zahlungsziel   = COALESCE($4, zahlungsziel),
+             generated_pdf  = NULL,
+             pdf_generated_at = NULL
+       WHERE id = $1
+       RETURNING *`,
+      [id, rechnungsdatum || null, leistungsdatum || null, zahlungsziel || null]
+    );
+    res.json(updated.rows[0]);
+  } catch (err) {
+    console.error('Error updating Rechnung:', err);
+    res.status(500).json({ error: 'Failed to update Rechnung' });
+  }
+});
+
+// POST /api/rechnungen/:id/mark-sent — admin manually marks paper-mailed invoice as sent
+app.post('/api/rechnungen/:id/mark-sent', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await verifyRechnungBranch(id, req.branchId);
+    if (!existing) return res.status(404).json({ error: 'Rechnung not found' });
+
+    const r = await pool.query(
+      `UPDATE aufmass_rechnungen
+         SET status = 'gesendet', sent_at = COALESCE(sent_at, NOW())
+       WHERE id = $1 AND status = 'entwurf'
+       RETURNING form_id, type`, [id]);
+    if (r.rows.length === 0) return res.status(409).json({ error: 'Rechnung is not entwurf' });
+
+    // Advance form status as well
+    const formStatus = r.rows[0].type === 'schlussrechnung' ? 'rest_rechnung_erstellt' : 'gesendet';
+    await pool.query(
+      `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
+      [formStatus, r.rows[0].form_id]);
+
+    res.json({ success: true, form_status: formStatus });
+  } catch (err) {
+    console.error('Error marking Rechnung as sent:', err);
+    res.status(500).json({ error: 'Failed to mark as sent' });
+  }
+});
+
+// POST /api/rechnungen/:id/pdf — store the rendered PDF blob (called after client-side render)
+app.post('/api/rechnungen/:id/pdf', authenticateToken, express.raw({ type: 'application/pdf', limit: '20mb' }), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await verifyRechnungBranch(id, req.branchId);
+    if (!existing) return res.status(404).json({ error: 'Rechnung not found' });
+    if (!req.body || !req.body.length) return res.status(400).json({ error: 'PDF body missing' });
+
+    await pool.query(
+      `UPDATE aufmass_rechnungen SET generated_pdf = $1, pdf_generated_at = NOW() WHERE id = $2`,
+      [req.body, id]);
+    res.json({ success: true, size: req.body.length });
+  } catch (err) {
+    console.error('Error saving Rechnung PDF:', err);
+    res.status(500).json({ error: 'Failed to save PDF' });
+  }
+});
+
+// GET /api/rechnungen/:id/pdf — return the cached PDF
+app.get('/api/rechnungen/:id/pdf', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await pool.query(
+      `SELECT generated_pdf, branch_id, rechnung_nr FROM aufmass_rechnungen WHERE id = $1`, [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Rechnung not found' });
+    if (r.rows[0].branch_id && req.branchId && r.rows[0].branch_id !== req.branchId) {
+      return res.status(404).json({ error: 'Rechnung not found' });
+    }
+    if (!r.rows[0].generated_pdf) return res.status(404).json({ error: 'PDF not generated yet' });
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="Rechnung_${r.rows[0].rechnung_nr}.pdf"`
+    });
+    res.send(r.rows[0].generated_pdf);
+  } catch (err) {
+    console.error('Error fetching Rechnung PDF:', err);
+    res.status(500).json({ error: 'Failed to fetch PDF' });
+  }
+});
+
+// POST /api/forms/:id/anzahlungen — record a down-payment receipt
+app.post('/api/forms/:id/anzahlungen', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!await verifyFormBranch(id, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const { betrag, zahlungsdatum, beleg_file_id, notiz } = req.body;
+    const betragNum = parseFloat(betrag);
+    if (!betragNum || betragNum <= 0) return res.status(400).json({ error: 'Betrag must be > 0' });
+    if (!zahlungsdatum) return res.status(400).json({ error: 'Zahlungsdatum required' });
+
+    // Each Anzahlung automatically gets its own Anzahlungsrechnung (legal receipt)
+    // covering exactly that amount. Brutto-inclusive: VAT is backed out at 19%.
+    const formRow = (await pool.query(
+      `SELECT kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, branch_id
+         FROM aufmass_forms WHERE id = $1`, [id])).rows[0];
+
+    const mwstSatz = 19;
+    const brutto = betragNum;
+    const netto = Math.round((brutto / 1.19) * 100) / 100;
+    const mwstBetrag = Math.round((brutto - netto) * 100) / 100;
+    const itemBezeichnung = `Anzahlung gemäß Auftrag (${zahlungsdatum})`;
+    const items = [{
+      bezeichnung: itemBezeichnung,
+      menge: 1,
+      einzelpreis: netto,
+      gesamtpreis: netto,
+      sort_order: 0,
+    }];
+
+    const rechnungNr = await generateNextRechnungNummer(req.branchId);
+    const zahlungsziel = zahlungsdatum;
+    const rRes = await pool.query(
+      `INSERT INTO aufmass_rechnungen
+         (rechnung_nr, type, form_id, branch_id,
+          kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kunde_adresse,
+          netto_betrag, mwst_satz, mwst_betrag, brutto_betrag,
+          rechnungsdatum, leistungsdatum, zahlungsziel,
+          items_json, status, sent_at, created_by)
+       VALUES ($1,'anzahlungsrechnung',$2,$3, $4,$5,$6,$7,$8, $9,$10,$11,$12, $13,$14,$15, $16,'gesendet',NOW(),$17)
+       RETURNING id`,
+      [rechnungNr, id, req.branchId,
+       formRow?.kunde_vorname || null, formRow?.kunde_nachname || null, formRow?.kunde_email || null, formRow?.kunde_telefon || null, formRow?.kundenlokation || null,
+       netto, mwstSatz, mwstBetrag, brutto,
+       zahlungsdatum, zahlungsdatum, zahlungsziel,
+       JSON.stringify(items), req.user.id]
+    );
+    const newRechnungId = rRes.rows[0].id;
+
+    const ins = await pool.query(
+      `INSERT INTO aufmass_anzahlungen
+         (form_id, rechnung_id, betrag, zahlungsdatum, zahlungsmethode, beleg_file_id, notiz, branch_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [id, newRechnungId, betragNum, zahlungsdatum, 'überweisung',
+       beleg_file_id || null, notiz || null, req.branchId, req.user.id]
+    );
+    // Echo the Rechnung-Nr in the response so the frontend can render its PDF
+    res.status(201).json({ ...ins.rows[0], rechnung_nr: rechnungNr });
+  } catch (err) {
+    console.error('Error creating Anzahlung:', err);
+    res.status(500).json({ error: 'Failed to create Anzahlung' });
+  }
+});
+
+// GET /api/forms/:id/anzahlungen — list down-payment receipts for a form
+app.get('/api/forms/:id/anzahlungen', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!await verifyFormBranch(id, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const rows = (await pool.query(
+      `SELECT id, form_id, rechnung_id, betrag, zahlungsdatum, zahlungsmethode,
+              beleg_file_id, notiz, created_at
+         FROM aufmass_anzahlungen WHERE form_id = $1 ORDER BY zahlungsdatum ASC, id ASC`,
+      [id])).rows;
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing Anzahlungen:', err);
+    res.status(500).json({ error: 'Failed to list Anzahlungen' });
+  }
+});
+
+// DELETE /api/anzahlungen/:id — admin/office removes a payment row
+app.delete('/api/anzahlungen/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await pool.query('SELECT branch_id FROM aufmass_anzahlungen WHERE id = $1', [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Anzahlung not found' });
+    if (r.rows[0].branch_id && req.branchId && r.rows[0].branch_id !== req.branchId) {
+      return res.status(404).json({ error: 'Anzahlung not found' });
+    }
+    await pool.query('DELETE FROM aufmass_anzahlungen WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting Anzahlung:', err);
+    res.status(500).json({ error: 'Failed to delete Anzahlung' });
   }
 });
 
@@ -4788,6 +5258,19 @@ async function generateNextKundenNummer(branchId) {
   );
   return `${branchKey}-K-${year}-${padNumber(result.rows[0].last_num)}`;
 }
+async function generateNextRechnungNummer(branchId) {
+  const year = new Date().getFullYear();
+  const branchKey = branchPrefixFor(branchId);
+  const result = await pool.query(
+    `INSERT INTO aufmass_rechnung_counters (branch_key, year, last_num)
+     VALUES ($1, $2, 1)
+     ON CONFLICT (branch_key, year)
+     DO UPDATE SET last_num = aufmass_rechnung_counters.last_num + 1
+     RETURNING last_num`,
+    [branchKey, year]
+  );
+  return `${branchKey}-R-${year}-${padNumber(result.rows[0].last_num)}`;
+}
 
 // Helper: enrich lead items with description + custom_fields schema from product master,
 // and parse custom_field_values JSON. Used so the frontend can render PRODUKTDETAILS labels.
@@ -5767,7 +6250,7 @@ app.post('/api/email/test', authenticateToken, requireAdmin, async (req, res) =>
 app.post('/api/email/send', authenticateToken, async (req, res) => {
   try {
     const branchSlug = req.branchId || 'koblenz';
-    const { to, subject, body, body_html, form_id, lead_id, angebot_ids, email_type, attachment_name, attach_agb, extra_pdfs, suppress_main_pdf } = req.body;
+    const { to, subject, body, body_html, form_id, lead_id, angebot_ids, rechnung_id, email_type, attachment_name, attach_agb, extra_pdfs, suppress_main_pdf } = req.body;
 
     if (!to || !subject || !body) {
       return res.status(400).json({ error: 'Empfänger, Betreff und Nachricht sind erforderlich' });
@@ -5944,14 +6427,53 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
       }
     }
 
+    // Rechnung PDF attachment (Modul C)
+    let rechnungRow = null;
+    if (rechnung_id) {
+      const rRes = await pool.query(
+        `SELECT id, rechnung_nr, type, form_id, branch_id, generated_pdf, status
+           FROM aufmass_rechnungen WHERE id = $1`,
+        [rechnung_id]
+      );
+      if (rRes.rows.length > 0) {
+        rechnungRow = rRes.rows[0];
+        // Branch isolation
+        if (rechnungRow.branch_id && rechnungRow.branch_id !== branchSlug) {
+          return res.status(403).json({ error: 'Rechnung gehört zu einer anderen Filiale' });
+        }
+        if (rechnungRow.generated_pdf) {
+          mailOptions.attachments.push({
+            filename: attachment_name || `Rechnung_${rechnungRow.rechnung_nr}.pdf`,
+            content: rechnungRow.generated_pdf,
+            contentType: 'application/pdf'
+          });
+        }
+      }
+    }
+
     // Send
     await transporter.sendMail(mailOptions);
+
+    // Post-send Rechnung side-effects: mark sent + advance form status
+    if (rechnungRow && rechnungRow.status === 'entwurf') {
+      await pool.query(
+        `UPDATE aufmass_rechnungen SET status = 'gesendet', sent_at = NOW() WHERE id = $1`,
+        [rechnungRow.id]
+      );
+      if (rechnungRow.form_id) {
+        const newFormStatus = rechnungRow.type === 'schlussrechnung' ? 'rest_rechnung_erstellt' : 'gesendet';
+        await pool.query(
+          `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
+          [newFormStatus, rechnungRow.form_id]
+        );
+      }
+    }
 
     // Log
     await pool.query(
       `INSERT INTO aufmass_email_log (form_id, lead_id, branch_id, email_type, recipient_email, subject, status, sent_by)
        VALUES ($1, $2, $3, $4, $5, $6, 'sent', $7)`,
-      [form_id || null, lead_id || null, branchSlug, email_type || 'manual', to, subject, req.user.id]
+      [form_id || (rechnungRow ? rechnungRow.form_id : null), lead_id || null, branchSlug, email_type || 'manual', to, subject, req.user.id]
     );
 
     res.json({ success: true, message: 'E-Mail erfolgreich gesendet' });
