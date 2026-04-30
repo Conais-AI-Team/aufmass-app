@@ -5146,6 +5146,139 @@ app.get('/api/lead-products/names', authenticateToken, async (req, res) => {
   }
 });
 
+// MODÜL B v3: Generic N-axis price lookup using size_values JSONB.
+// Used for Markise (B×L, B×L×H, B×H, B), Keil (L+H+H), and other profiles
+// that the legacy /dimensions endpoint can't represent.
+//
+// Body: { size_values: { breite: 5000, tiefe: 4000 } }   (axis names match productConfig.json)
+// Response: { matched, exact, price_missing, rounded_to?, lead_product? }
+app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req, res) => {
+  try {
+    const { productName } = req.params;
+    const { size_values } = req.body || {};
+    const branchSlug = req.branchId || 'koblenz';
+
+    if (!size_values || typeof size_values !== 'object') {
+      return res.status(400).json({ error: 'size_values object required in body' });
+    }
+
+    const axes = Object.keys(size_values).filter(k => Number.isFinite(Number(size_values[k])));
+
+    // Pricing-type='unit' fallback (no dimensions involved)
+    if (axes.length === 0) {
+      const r = await pool.query(
+        `SELECT * FROM aufmass_lead_products
+         WHERE branch_id = $1 AND product_name = $2
+           AND pricing_type = 'unit' AND is_active = true LIMIT 1`,
+        [branchSlug, productName]
+      );
+      if (r.rows.length > 0) {
+        return res.json({
+          matched: true, exact: true,
+          price_missing: r.rows[0].price == null,
+          lead_product: r.rows[0]
+        });
+      }
+      return res.json({ matched: false });
+    }
+
+    // Exact match on size_values JSONB equality
+    const normalizedSV = Object.fromEntries(axes.map(a => [a, Number(size_values[a])]));
+    const exact = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1 AND product_name = $2
+         AND size_values = $3::jsonb AND is_active = true`,
+      [branchSlug, productName, JSON.stringify(normalizedSV)]
+    );
+    if (exact.rows.length > 0) {
+      return res.json({
+        matched: true, exact: true,
+        price_missing: exact.rows[0].price == null,
+        lead_product: exact.rows[0]
+      });
+    }
+
+    // Round-up: smallest size_values where every axis >= requested
+    const conditions = axes.map((axis, i) =>
+      `(size_values->>'${axis.replace(/'/g, "''")}')::int >= $${i + 3}`
+    ).join(' AND ');
+    const orderBy = axes.map(a =>
+      `(size_values->>'${a.replace(/'/g, "''")}')::int ASC`
+    ).join(', ');
+    const params = [branchSlug, productName, ...axes.map(a => normalizedSV[a])];
+
+    const rounded = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1 AND product_name = $2 AND is_active = true
+         AND size_values IS NOT NULL AND ${conditions}
+       ORDER BY ${orderBy}
+       LIMIT 1`,
+      params
+    );
+    if (rounded.rows.length > 0) {
+      const row = rounded.rows[0];
+      return res.json({
+        matched: true,
+        exact: false,
+        rounded_to: row.size_values,
+        price_missing: row.price == null,
+        lead_product: row
+      });
+    }
+
+    res.json({ matched: false });
+  } catch (err) {
+    console.error('Lead-products lookup error:', err);
+    res.status(500).json({ error: 'Lookup failed' });
+  }
+});
+
+// Upsert price from Angebot/LeadFormModal (creates row if missing, updates price if exists)
+app.post('/api/lead-products/upsert-from-angebot', authenticateToken, async (req, res) => {
+  try {
+    const { product_name, size_values, price, category, product_type, size_profile } = req.body || {};
+    const branchSlug = req.branchId || 'koblenz';
+
+    if (!product_name || !size_values || price == null) {
+      return res.status(400).json({ error: 'product_name, size_values, price required' });
+    }
+
+    const normalizedSV = Object.fromEntries(
+      Object.entries(size_values).map(([k, v]) => [k, Number(v)])
+    );
+    const breiteCm = Math.round((normalizedSV.breite || normalizedSV.markisenbreite || normalizedSV.laenge || 0) / 10);
+    const tiefeCm  = Math.round((normalizedSV.tiefe || normalizedSV.markisenlaenge || normalizedSV.markisenhoehe || normalizedSV.hoehe || normalizedSV.vorneHoehe || 0) / 10);
+
+    // Try update existing exact size_values match
+    const upd = await pool.query(
+      `UPDATE aufmass_lead_products
+       SET price = $1
+       WHERE branch_id = $2 AND product_name = $3 AND size_values = $4::jsonb
+       RETURNING id`,
+      [price, branchSlug, product_name, JSON.stringify(normalizedSV)]
+    );
+    if (upd.rows.length > 0) {
+      return res.json({ success: true, action: 'updated', id: upd.rows[0].id });
+    }
+
+    // Insert new row
+    const ins = await pool.query(
+      `INSERT INTO aufmass_lead_products
+        (branch_id, category, product_type, product_name,
+         breite, tiefe, price, pricing_type,
+         size_values, size_profile, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'dimension', $8::jsonb, $9, true)
+       RETURNING id`,
+      [branchSlug, category || null, product_type || null, product_name,
+       breiteCm, tiefeCm, price, JSON.stringify(normalizedSV), size_profile || null]
+    );
+    res.json({ success: true, action: 'inserted', id: ins.rows[0].id });
+  } catch (err) {
+    console.error('Upsert from angebot error:', err);
+    res.status(500).json({ error: 'Upsert failed' });
+  }
+});
+
 // Get available dimensions for a product
 app.get('/api/lead-products/:productName/dimensions', authenticateToken, async (req, res) => {
   try {

@@ -1383,6 +1383,45 @@ export const getBranchTerms = (): Promise<BranchTerms> => api.get('/branch/terms
 export const saveBranchTerms = (terms: BranchTerms): Promise<{ success: boolean }> =>
   api.put('/branch/terms', terms);
 
+// ============ MODÜL B v3: Generic N-axis price lookup ============
+export interface LeadProductLookupResult {
+  matched: boolean;
+  exact?: boolean;
+  price_missing?: boolean;
+  rounded_to?: Record<string, number>;
+  lead_product?: {
+    id: number;
+    product_name: string;
+    price: number | null;
+    size_values: Record<string, number>;
+    size_profile: string | null;
+    category: string | null;
+    product_type: string | null;
+    pricing_type: string;
+    unit_label: string | null;
+    description: string | null;
+    custom_fields: string | null;
+  };
+}
+
+/** Generic lookup that supports any size profile (P1–P8). Pass size_values in mm. */
+export const lookupLeadProductBySize = (
+  productName: string,
+  sizeValues: Record<string, number>
+): Promise<LeadProductLookupResult> =>
+  api.post(`/lead-products/${encodeURIComponent(productName)}/lookup`, { size_values: sizeValues });
+
+/** Upsert a price from the Angebot modal — creates row if missing, updates if exists. */
+export const upsertLeadProductFromAngebot = (input: {
+  product_name: string;
+  size_values: Record<string, number>;
+  price: number;
+  category?: string;
+  product_type?: string;
+  size_profile?: string;
+}): Promise<{ success: boolean; action: 'inserted' | 'updated'; id: number }> =>
+  api.post('/lead-products/upsert-from-angebot', input);
+
 // ============ MODÜL F2: PDF Cover/AGB Override ============
 export interface ProductCoverPdf {
   id: number;
