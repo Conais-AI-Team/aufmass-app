@@ -586,10 +586,127 @@ async function initializeTables() {
     `);
     console.log('aufmass_rechnung_counters table ready');
 
+    // ============ MODÜL B v3: Lead-products eager seed ============
+    // Adds size_values JSONB + size_profile so non-2D shapes (Markise, Keil) can be priced.
+    // Makes price NULLABLE so empty placeholder rows can exist.
+    // Existing Köln test data is preserved; we only ADD missing rows from productConfig.json.
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_values JSONB`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_profile VARCHAR(10)`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ALTER COLUMN price DROP NOT NULL`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_products_size_values ON aufmass_lead_products USING GIN (size_values)`);
+    console.log('Modul B v3 columns ready (size_values, size_profile)');
+
+    // Eager seed runs in the background so server startup is not blocked
+    // (~13k idempotent INSERTs across all branches). Errors logged but don't crash startup.
+    seedLeadProductsFromConfig()
+      .then(() => console.log('Lead-products eager seed: done (background)'))
+      .catch((seedErr) => console.error('Lead-products eager seed failed:', seedErr.message));
+
     console.log('Database tables initialized');
   } catch (err) {
     console.error('Table initialization failed:', err.message);
   }
+}
+
+// ============ MODÜL B v3: Eager Seed Helper ============
+// Reads productConfig.json, infers each model's size profile, and inserts placeholder rows
+// (price=NULL) for every active branch. Idempotent: existing rows are never overwritten.
+//
+// Unit handling: productConfig.json fields are mm. The legacy aufmass_lead_products.breite/tiefe
+// columns store cm (Çağlayan's data). To stay backwards compatible we WRITE cm into legacy
+// columns AND mm into size_values JSONB. Lookup queries can use either.
+
+const SIZE_PROFILE_DEFAULTS = {
+  // mm grids — divided by 10 when written to legacy breite/tiefe (cm)
+  P1: { axes: ['breite', 'tiefe'],                                 grid: { breite: [3000,4000,5000,6000,7000], tiefe: [2500,3000,3500,4000,5000] } },
+  P2: { axes: ['markisenbreite', 'markisenlaenge'],                grid: { markisenbreite: [3000,4000,5000,6000], markisenlaenge: [2000,2500,3000,3500] } },
+  P3: { axes: ['markisenbreite', 'markisenlaenge', 'markisenhoehe'], grid: { markisenbreite: [3000,4000,5000], markisenlaenge: [2000,2500,3000], markisenhoehe: [2500,3000] } },
+  P4: { axes: ['markisenbreite', 'markisenhoehe'],                 grid: { markisenbreite: [1500,2000,2500,3000], markisenhoehe: [2000,2500,3000] } },
+  P5: { axes: ['markisenbreite'],                                  grid: { markisenbreite: [3000,4000,5000,6000,7000] } },
+  P6: { axes: ['breite', 'hoehe'],                                 grid: { breite: [1000,1500,2000,2500,3000], hoehe: [2000,2200,2500,2800] } },
+  P7: { axes: ['breite', 'vorneHoehe', 'hintenHoehe'],             grid: { breite: [1000,1500,2000], vorneHoehe: [2000,2200,2500], hintenHoehe: [2500,2800,3000] } },
+  P8: { axes: ['laenge', 'vorneHoehe', 'hintenHoehe'],             grid: { laenge: [500,1000,1500,2000], vorneHoehe: [2000,2500], hintenHoehe: [2500,3000] } }
+};
+
+function inferSizeProfile(fields) {
+  const names = (fields || []).map(f => f.name);
+  if (names.includes('markisenbreite') && names.includes('markisenlaenge') && names.includes('markisenhoehe')) return 'P3';
+  if (names.includes('markisenbreite') && names.includes('markisenlaenge')) return 'P2';
+  if (names.includes('markisenbreite') && names.includes('markisenhoehe')) return 'P4';
+  if (names.includes('markisenbreite')) return 'P5';
+  if (names.includes('breite') && names.includes('vorneHoehe') && names.includes('hintenHoehe')) return 'P7';
+  if (names.includes('laenge') && names.includes('vorneHoehe') && names.includes('hintenHoehe')) return 'P8';
+  if (names.includes('breite') && names.includes('hoehe')) return 'P6';
+  if (names.includes('breite') && names.includes('tiefe')) return 'P1';
+  return null;
+}
+
+function cartesianProduct(arrays) {
+  return arrays.reduce((acc, arr) => acc.flatMap(a => arr.map(b => [...a, b])), [[]]);
+}
+
+async function seedLeadProductsFromConfig() {
+  const fs = await import('fs');
+  const path = await import('path');
+  const configPath = path.join(process.cwd(), '..', 'src', 'config', 'productConfig.json');
+  if (!fs.existsSync(configPath)) {
+    console.warn('productConfig.json not found at', configPath, '- skipping seed');
+    return;
+  }
+  const productConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+  // Active branches: every distinct branch_id ever seen in any data table, plus a default.
+  // We don't have a branches table here so we union from existing user/lead data.
+  const branchesResult = await pool.query(`
+    SELECT DISTINCT branch_id AS slug FROM aufmass_users WHERE branch_id IS NOT NULL
+    UNION SELECT DISTINCT branch_id FROM aufmass_lead_products WHERE branch_id IS NOT NULL
+  `);
+  const branches = branchesResult.rows.map(r => r.slug).filter(Boolean);
+  if (branches.length === 0) branches.push('koblenz');  // safety default
+
+  let totalInserted = 0;
+  for (const [category, types] of Object.entries(productConfig)) {
+    for (const [productType, typeData] of Object.entries(types)) {
+      const profileKey = inferSizeProfile(typeData.fields || []);
+      if (!profileKey) continue;
+      const profile = SIZE_PROFILE_DEFAULTS[profileKey];
+      const grid = profile.grid;
+      const combos = cartesianProduct(profile.axes.map(ax => grid[ax]));
+
+      for (const modelName of (typeData.models || [])) {
+        for (const combo of combos) {
+          const sizeValuesMm = Object.fromEntries(profile.axes.map((ax, i) => [ax, combo[i]]));
+          // Legacy breite/tiefe columns: cm scale, derived from primary two axes
+          const breiteCm = Math.round((sizeValuesMm[profile.axes[0]] || 0) / 10);
+          const tiefeCm  = Math.round((sizeValuesMm[profile.axes[1]] || 0) / 10);  // 1D profiles: 0
+
+          for (const branchSlug of branches) {
+            // No UNIQUE constraint exists — use NOT EXISTS to keep seed idempotent.
+            // Explicit casts because PG can't infer types when same param is used as
+            // VARCHAR (insert) and as filter value (where).
+            const result = await pool.query(`
+              INSERT INTO aufmass_lead_products
+                (branch_id, category, product_type, product_name,
+                 breite, tiefe, price, pricing_type,
+                 size_values, size_profile, is_active)
+              SELECT $1::varchar, $2::varchar, $3::varchar, $4::varchar,
+                     $5::int, $6::int, NULL, 'dimension', $7::jsonb, $8::varchar, true
+              WHERE NOT EXISTS (
+                SELECT 1 FROM aufmass_lead_products
+                WHERE branch_id = $1::varchar AND product_name = $4::varchar
+                  AND breite = $5::int AND tiefe = $6::int
+              )
+              RETURNING id
+            `, [branchSlug, category, productType, modelName, breiteCm, tiefeCm,
+                JSON.stringify(sizeValuesMm), profileKey]);
+            if (result.rows.length > 0) totalInserted++;
+          }
+        }
+      }
+    }
+  }
+  if (totalInserted > 0) console.log(`Eager seed: ${totalInserted} placeholder rows inserted across ${branches.length} branches`);
+  else console.log(`Eager seed: no new rows (catalog up-to-date)`);
 }
 
 // ============ AUTH MIDDLEWARE ============
