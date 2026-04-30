@@ -107,6 +107,10 @@ const Dashboard = () => {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [formToDelete, setFormToDelete] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  // Sort order for the Aufmaß list. Default mirrors the existing backend
+  // ordering ("Neueste zuerst" / created_at DESC). Persisted only in this
+  // session — fresh navigation resets to default.
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [, setMontageteamStats] = useState<MontageteamStats[]>([]);
   const [montageteams, setMontageteams] = useState<Montageteam[]>([]);
 
@@ -1371,7 +1375,7 @@ Aylux Team`;
 
   const filteredForms = useMemo(() => {
     const term = searchTerm.toLowerCase();
-    return forms.filter(form => {
+    const filtered = forms.filter(form => {
       const matchesSearch = !term ||
         form.kundeVorname?.toLowerCase().includes(term) ||
         form.kundeNachname?.toLowerCase().includes(term) ||
@@ -1392,7 +1396,13 @@ Aylux Team`;
       }
       return matchesSearch && matchesFilter;
     });
-  }, [forms, searchTerm, filterStatus]);
+    // Sort by created_at — falls back to updated_at then 0 so missing
+    // timestamps don't poison the comparison.
+    const ts = (f: FormData) => new Date(f.created_at || f.updated_at || 0).getTime();
+    return [...filtered].sort((a, b) =>
+      sortOrder === 'asc' ? ts(a) - ts(b) : ts(b) - ts(a)
+    );
+  }, [forms, searchTerm, filterStatus, sortOrder]);
 
   const statusCounts = useMemo(() => {
     const counts: Record<string, number> = { alle: 0, __email_sent: 0, __post_sent: 0 };
@@ -1463,6 +1473,25 @@ Aylux Team`;
             <input type="text" placeholder="Suchen..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
             {searchTerm && <button className="clear-search" onClick={() => setSearchTerm('')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg></button>}
           </div>
+          {/* Sort dropdown — admin & office only (back-office tooling).
+              Regular users keep the default newest-first ordering. */}
+          {isAdminOrOffice() && (
+            <div className="sort-container">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <path d="M3 6h13M3 12h9M3 18h5" />
+                <path d="M17 8l4-4 4 4M21 4v16" />
+              </svg>
+              <select
+                className="sort-select"
+                value={sortOrder}
+                onChange={(e) => setSortOrder(e.target.value as 'desc' | 'asc')}
+                aria-label="Sortierung"
+              >
+                <option value="desc">Neueste zuerst</option>
+                <option value="asc">Älteste zuerst</option>
+              </select>
+            </div>
+          )}
           <div className="view-toggle">
             <button className={`view-btn ${viewMode === 'grid' ? 'active' : ''}`} onClick={() => setViewMode('grid')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
