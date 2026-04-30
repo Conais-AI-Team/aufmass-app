@@ -676,14 +676,12 @@ async function seedLeadProductsFromConfig() {
       for (const modelName of (typeData.models || [])) {
         for (const combo of combos) {
           const sizeValuesMm = Object.fromEntries(profile.axes.map((ax, i) => [ax, combo[i]]));
-          // Legacy breite/tiefe columns: cm scale, derived from primary two axes
-          const breiteCm = Math.round((sizeValuesMm[profile.axes[0]] || 0) / 10);
-          const tiefeCm  = Math.round((sizeValuesMm[profile.axes[1]] || 0) / 10);  // 1D profiles: 0
+          // MODÜL B v3: DB now stores mm directly (no cm conversion).
+          const breiteMm = sizeValuesMm[profile.axes[0]] || 0;
+          const tiefeMm  = sizeValuesMm[profile.axes[1]] || 0;  // 1D profiles: 0
 
           for (const branchSlug of branches) {
             // No UNIQUE constraint exists — use NOT EXISTS to keep seed idempotent.
-            // Explicit casts because PG can't infer types when same param is used as
-            // VARCHAR (insert) and as filter value (where).
             const result = await pool.query(`
               INSERT INTO aufmass_lead_products
                 (branch_id, category, product_type, product_name,
@@ -697,7 +695,7 @@ async function seedLeadProductsFromConfig() {
                   AND breite = $5::int AND tiefe = $6::int
               )
               RETURNING id
-            `, [branchSlug, category, productType, modelName, breiteCm, tiefeCm,
+            `, [branchSlug, category, productType, modelName, breiteMm, tiefeMm,
                 JSON.stringify(sizeValuesMm), profileKey]);
             if (result.rows.length > 0) totalInserted++;
           }

@@ -97,22 +97,20 @@ interface ProductRow {
   aufmassTiefe?: number;
 }
 
-// Rounding functions for price calculation
-const roundBreiteToGrid = (value: number): number => {
-  // Breite grid: 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200
-  const min = 200;
-  const max = 1200;
-  const step = 100;
-  const rounded = Math.ceil(value / step) * step;
+// MODÜL B v3: All dimensions are in mm (productConfig.json reference).
+// DB migrated cm → mm in one shot; backend dimensions endpoint returns mm keys directly.
+
+// Round to grid in mm: aufmass typical roof 3-10 m, marquee 2-7 m
+// Step 100 mm = 10 cm (yeterli granular ama matrise sığar)
+const roundBreiteToGrid = (mmValue: number): number => {
+  const min = 2000, max = 12000, step = 100;
+  const rounded = Math.ceil(mmValue / step) * step;
   return Math.max(min, Math.min(max, rounded));
 };
 
-const roundTiefeToGrid = (value: number): number => {
-  // Tiefe grid: 150, 200, 250, 300, 350, 400, 450, 500, 550, 600
-  const min = 150;
-  const max = 600;
-  const step = 50;
-  const rounded = Math.ceil(value / step) * step;
+const roundTiefeToGrid = (mmValue: number): number => {
+  const min = 1500, max = 6000, step = 100;
+  const rounded = Math.ceil(mmValue / step) * step;
   return Math.max(min, Math.min(max, rounded));
 };
 
@@ -998,29 +996,29 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                       ) : (
                         <>
                           <div className="select-group">
-                            <label>Breite (cm)</label>
+                            <label>Breite (mm)</label>
                             <input
                               type="number"
                               min="1"
-                              max="1200"
+                              max="12000"
                               value={row.breite}
                               onChange={e => updateRow(row.id, 'breite', e.target.value ? Number(e.target.value) : '')}
                               disabled={!row.product_name}
-                              placeholder="z.B. 485"
+                              placeholder="z.B. 4850"
                               className="dimension-input"
                             />
                           </div>
 
                           <div className="select-group">
-                            <label>Tiefe (cm)</label>
+                            <label>Tiefe (mm)</label>
                             <input
                               type="number"
                               min="1"
-                              max="600"
+                              max="6000"
                               value={row.tiefe}
                               onChange={e => updateRow(row.id, 'tiefe', e.target.value ? Number(e.target.value) : '')}
                               disabled={!row.product_name}
-                              placeholder="z.B. 287"
+                              placeholder="z.B. 2870"
                               className="dimension-input"
                             />
                           </div>
