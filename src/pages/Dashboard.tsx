@@ -2942,8 +2942,16 @@ Aylux Team`;
               console.error('mark-angebot-sent after save failed:', err);
             }
           }
-          // Refresh forms so the new status is reflected on the cards.
-          getForms().then(setForms).catch(err => console.error('Reload failed:', err));
+          // Optimistic update: backend cross-sync flips this form to
+          // 'angebot_versendet'. Mirror it in local state instead of
+          // reloading all 508 forms (admin sees all branches → ~MB payload).
+          if (fromFormId) {
+            setForms(prev => prev.map(f =>
+              f.id === fromFormId
+                ? { ...f, status: 'angebot_versendet', statusDate: new Date().toISOString().split('T')[0] }
+                : f
+            ));
+          }
 
           // Modul C chain: if we were on the way to creating a Rechnung,
           // promote the form to auftrag_erteilt and open the Rechnung modal.
