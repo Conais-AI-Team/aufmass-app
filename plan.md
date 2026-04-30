@@ -164,7 +164,8 @@
 | 5 | `feat(modul-b): embed Aufmaß photos in Angebot PDF` | ADIM 6 | ✅ Atıldı (`8e72294`) — testler geçti |
 | 6 | `feat(modul-b): admin-only manual mark-sent button + Versendet badge` | ADIM 9 + ADIM 10 | ✅ Atıldı (`f7b6ba3`) — testler geçti |
 | 7 | `feat(modul-b): unify "Angebot Versendet" status flow into LeadFormModal across Dashboard and Bearbeiten` | Ek scope (Soru 1-A, 2-D, 3-F) | ✅ Atıldı (`ce104f9`) — testler geçti |
-| 8 | `feat(modul-b): bidirectional Versendet sync, single-lead-per-Aufmaß, Aus Aufmaß status filter, Schnellangebot deduplication` | Ek scope (test geri bildirimleri) | ⏳ Onay bekliyor |
+| 8 | `feat(modul-b): bidirectional Versendet sync, single-lead-per-Aufmaß, Aus Aufmaß status filter, Schnellangebot deduplication` | Ek scope (test geri bildirimleri) | ✅ Atıldı (`e6e42d7`) — testler geçti |
+| 9 | `feat(modul-b): unify Aus Aufmaß card with Schnellangebot actions and refresh forms after mark-sent` | Ek scope (UX paritesi) | ⏳ Onay bekliyor |
 | 7 | `fix(modul-b): <test sonucu>` veya `refactor(modul-b): <iyileştirme>` | ADIM 11 + 12 test sonucu varsa | 📋 Yapılacak |
 
 **Push politikası:** Local commit atılır, `git push` için ayrıca onay alınır. Kullanıcı "push at" demedikçe local'de kalır.

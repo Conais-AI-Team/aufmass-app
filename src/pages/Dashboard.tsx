@@ -1701,7 +1701,7 @@ Aylux Team`;
                     {Boolean(((form.kundeVorname || '').trim() || (form.kundeNachname || '').trim()) &&
                              ((form.category || '').trim() && (form.productType || '').trim())) && (
                       <button
-                        className="action-btn"
+                        className="action-btn angebot"
                         title="Angebot aus diesem Aufmaß erstellen"
                         onClick={() => navigate(`/angebote?tab=aus_aufmass&from_aufmass=${form.id}`)}
                       >

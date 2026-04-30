@@ -363,7 +363,14 @@ export default function Angebote() {
     try {
       await markLeadAngebotAsSentManual(leadId);
       setManualSentConfirmId(null);
-      await loadLeads();
+      // Refresh both leads (Versendet badge) and Aufmaß forms (status moves
+      // to 'angebot_versendet' via backend syncFormsFromLead). Without the
+      // aufmassForms reload the Aus Aufmaß tab would keep the source form
+      // pinned to the "Aufmaß Genommen" tab.
+      await Promise.all([
+        loadLeads(),
+        getForms().then(setAufmassForms).catch(err => console.error('Reload aufmass forms failed:', err)),
+      ]);
       toast.success('Versendet markiert', `Angebot für Lead #${leadId} wurde als versendet markiert.`);
     } catch (err) {
       console.error('Manual mark-sent failed:', err);
@@ -707,14 +714,10 @@ export default function Angebote() {
     });
   };
 
-  // MODÜL B: only hide a lead from Schnellangebot while its source Aufmaß
-  // is still surfaced by the Aus Aufmaß tab (status === 'neu'). Once the
-  // Aufmaß moves past "Aufmaß Genommen" (e.g. angebot_versendet, abnahme)
-  // it leaves Aus Aufmaß, so the lead must reappear in Schnellangebot —
-  // otherwise the lead would disappear from the UI entirely.
-  const independentLeads = leads.filter(
-    l => !(l.aufmass_form_id && l.aufmass_form_status === 'neu')
-  );
+  // MODÜL B: leads that originated from an Aufmaß stay exclusively in the
+  // Aus Aufmaß tab (which itself surfaces both 'neu' and 'angebot_versendet'
+  // source states). Schnellangebot is reserved for stand-alone leads.
+  const independentLeads = leads.filter(l => !l.aufmass_form_id);
 
   const filteredLeads = independentLeads.filter(lead => {
     const matchesStatus = filterStatus === 'alle' || lead.status === filterStatus;
@@ -775,10 +778,26 @@ export default function Angebote() {
       {activeTab === 'aus_aufmass' ? (
         <AusAufmassTab
           forms={aufmassForms}
+          leadsById={new Map(leads.map(l => [l.id, l]))}
           loading={aufmassLoading}
           searchQuery={aufmassSearchQuery}
           onSearchChange={setAufmassSearchQuery}
           onPickAufmass={openFromAufmass}
+          onOpenLeadPdf={(leadId) => openLeadPdfWithFallback(leadId)}
+          onSendLeadEmail={(leadId) => {
+            const lead = leads.find(l => l.id === leadId);
+            if (lead) handleSendLeadByEmail(lead);
+          }}
+          onEditLead={(leadId) => handleEditLead(leadId)}
+          onViewLeadDetails={(leadId) => handleViewDetails(leadId)}
+          onAddLeadAngebot={(leadId) => handleAddAngebot(leadId)}
+          onDeleteLead={(leadId) => setDeleteConfirmId(leadId)}
+          onManualMarkSent={(leadId) => setManualSentConfirmId(leadId)}
+          manualSentConfirmId={manualSentConfirmId}
+          onConfirmManualMarkSent={(leadId) => handleMarkAngebotSentManual(leadId)}
+          onCancelManualMarkSent={() => setManualSentConfirmId(null)}
+          isAdmin={isAdmin()}
+          formatPrice={formatPrice}
         />
       ) : (
         <>
@@ -1382,7 +1401,10 @@ export default function Angebote() {
               const isAngebot = emailComposer.emailType === 'angebot';
               if (sentLeadId && isAngebot) {
                 markLeadAngebotAsSent(sentLeadId)
-                  .then(() => loadLeads())
+                  .then(() => Promise.all([
+                    loadLeads(),
+                    getForms().then(setAufmassForms).catch(() => {}),
+                  ]))
                   .catch(err => console.error('mark-angebot-sent failed:', err));
               }
             }}
