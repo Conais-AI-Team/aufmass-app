@@ -317,19 +317,63 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           });
         }
       }
-      const rows = aufmassProducts.map(p => {
+      // MODÜL B v3: Aufmaß formundaki model adlarını da topla — auto-select için
+      const mainModel = (data.model || '').split(',')[0]?.trim() || '';
+      const aufmassProductsWithModel = aufmassProducts.map((p, idx) => {
+        if (idx === 0) return { ...p, modelName: mainModel };
+        const wp = data.weitereProdukte?.[idx - 1];
+        const wpModel = (wp?.model || '').split(',')[0]?.trim() || '';
+        return { ...p, modelName: wpModel };
+      });
+
+      // Get the available product names so we only auto-select models that exist
+      // in this branch's lead_products table
+      const availableNames = await api.get<string[]>('/lead-products/names').catch(() => [] as string[]);
+
+      const enrichedRows = await Promise.all(aufmassProductsWithModel.map(async (p) => {
         const r = createEmptyRow();
-        if (p.breite) {
-          r.breite = p.breite;
-          r.aufmassBreite = p.breite;
-        }
-        if (p.tiefe) {
-          r.tiefe = p.tiefe;
-          r.aufmassTiefe = p.tiefe;
+        if (p.breite) { r.breite = p.breite; r.aufmassBreite = p.breite; }
+        if (p.tiefe)  { r.tiefe  = p.tiefe;  r.aufmassTiefe  = p.tiefe;  }
+
+        // Only auto-fill if Aufmaß model exists in lead_products (eager-seeded earlier)
+        if (p.modelName && availableNames.includes(p.modelName)) {
+          r.product_name = p.modelName;
+          try {
+            const dims = await loadDimensions(p.modelName);
+            if (dims.pricing_type === 'unit') {
+              r.pricing_type = 'unit';
+              r.unit_label = dims.unit_label;
+              r.price = dims.unit_price || 0;
+              r.dimensions = {};
+              r.description = dims.description;
+              r.custom_fields = dims.custom_fields;
+            } else {
+              const dimensions = dims.dimensions || {};
+              r.pricing_type = 'dimension';
+              r.dimensions = dimensions;
+              r.description = dims.description;
+              r.custom_fields = dims.custom_fields;
+              // Round-up + price lookup if Aufmaß provided dimensions
+              if (p.breite && p.tiefe && Object.keys(dimensions).length > 0) {
+                const rb = roundBreiteToGrid(p.breite);
+                const rt = roundTiefeToGrid(p.tiefe);
+                r.roundedBreite = rb;
+                r.roundedTiefe = rt;
+                const breiteKey = Object.keys(dimensions).find(b => Number(b) === rb);
+                if (breiteKey) {
+                  const found = dimensions[Number(breiteKey)].find(d => d.tiefe === rt);
+                  if (found) r.price = found.price;
+                }
+              }
+            }
+          } catch (e) {
+            console.warn('Auto-fill loadDimensions failed for', p.modelName, e);
+          }
         }
         return r;
-      });
-      setProductRows(rows.length > 0 ? rows : [createEmptyRow()]);
+      }));
+
+      setProductRows(enrichedRows.length > 0 ? enrichedRows : [createEmptyRow()]);
     } catch (err) {
       console.error('Failed to load Aufmaß for auto-fill:', err);
       setError('Aufmaß-Daten konnten nicht geladen werden.');
