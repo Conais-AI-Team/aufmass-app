@@ -427,9 +427,10 @@ export default function ProductPricing() {
   };
 
   // ========== EXISTING CELL EDITING ==========
-  const startEdit = (productName: string, breite: number, tiefe: number, currentPrice: number) => {
+  // currentPrice can be null for placeholder rows from eager seed (no price entered yet)
+  const startEdit = (productName: string, breite: number, tiefe: number, currentPrice: number | null | undefined) => {
     setEditingCell({ productName, breite, tiefe });
-    setEditValue(currentPrice.toString());
+    setEditValue(currentPrice != null ? currentPrice.toString() : '');
   };
 
   const cancelEdit = () => {
