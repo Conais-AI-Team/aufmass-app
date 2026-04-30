@@ -46,6 +46,11 @@ const STATUS_OPTIONS = [
   { value: 'reklamation_eingegangen', label: 'Reklamation Eingegangen', color: '#ef4444' },
   { value: 'reklamation_bestellt', label: 'Reklamation Bestellt', color: '#dc2626' },
   { value: 'reklamation_abgelehnt', label: 'Reklamation Abgelehnt', color: '#b91c1c' },
+  // Virtual filters — these don't map to a status, they filter on the
+  // email_sent_at / post_sent_at flags. Filter and counter logic below
+  // recognise these special values and short-circuit the status check.
+  { value: '__email_sent', label: 'E-Mail versendet', color: '#16a34a' },
+  { value: '__post_sent', label: 'Per Post versendet', color: '#2563eb' },
   { value: 'papierkorb', label: 'Papierkorb', color: '#71717a' },
 ];
 
@@ -1373,19 +1378,32 @@ Aylux Team`;
         form.kundenlokation?.toLowerCase().includes(term) ||
         form.category?.toLowerCase().includes(term) ||
         form.productType?.toLowerCase().includes(term);
-      const matchesFilter = filterStatus === 'alle'
-        ? form.status !== 'papierkorb'
-        : form.status === filterStatus;
+      // Virtual filters use the email_sent_at / post_sent_at flags rather
+      // than the status column; they also exclude the trash bin.
+      let matchesFilter: boolean;
+      if (filterStatus === '__email_sent') {
+        matchesFilter = !!form.email_sent_at && form.status !== 'papierkorb';
+      } else if (filterStatus === '__post_sent') {
+        matchesFilter = !!form.post_sent_at && form.status !== 'papierkorb';
+      } else if (filterStatus === 'alle') {
+        matchesFilter = form.status !== 'papierkorb';
+      } else {
+        matchesFilter = form.status === filterStatus;
+      }
       return matchesSearch && matchesFilter;
     });
   }, [forms, searchTerm, filterStatus]);
 
   const statusCounts = useMemo(() => {
-    const counts: Record<string, number> = { alle: 0 };
+    const counts: Record<string, number> = { alle: 0, __email_sent: 0, __post_sent: 0 };
     for (const form of forms) {
       if (form.status !== 'papierkorb') counts.alle++;
       const s = form.status || 'neu';
       counts[s] = (counts[s] || 0) + 1;
+      // Virtual flag-based counters — exclude trash so they line up with
+      // the cards rendered when the chip is selected.
+      if (form.email_sent_at && form.status !== 'papierkorb') counts.__email_sent++;
+      if (form.post_sent_at && form.status !== 'papierkorb') counts.__post_sent++;
     }
     return counts;
   }, [forms]);
@@ -1608,7 +1626,7 @@ Aylux Team`;
                                 exit={{ opacity: 0, y: -10 }}
                                 onClick={(e) => e.stopPropagation()}
                               >
-                                {STATUS_OPTIONS.filter(o => o.value !== 'alle').map((option) => (
+                                {STATUS_OPTIONS.filter(o => o.value !== 'alle' && !o.value.startsWith('__')).map((option) => (
                                   <button
                                     key={option.value}
                                     className={`status-option ${getFormStatus(form) === option.value ? 'selected' : ''}`}
