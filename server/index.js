@@ -4876,18 +4876,16 @@ app.get('/api/boldsign/callback-log', (req, res) => {
 // Get all lead products (price matrix)
 app.get('/api/lead-products', authenticateToken, async (req, res) => {
   try {
-    let query, params;
-    if (req.branchId) {
-      query = `SELECT * FROM aufmass_lead_products
-               WHERE branch_id = $1
-               ORDER BY product_name, breite, tiefe`;
-      params = [req.branchId];
-    } else {
-      query = `SELECT * FROM aufmass_lead_products ORDER BY product_name, breite, tiefe`;
-      params = [];
-    }
-
-    const result = await pool.query(query, params);
+    // MODÜL B v3: Admin domain'inden gelen istekte de tek branch göster.
+    // Aksi halde ProductPricing matrix farkli branch'lerin satirlarini karistirir
+    // ve save yanlis ID'ye yazar.
+    const branchSlug = req.branchId || 'koblenz';
+    const result = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1
+       ORDER BY product_name, breite, tiefe`,
+      [branchSlug]
+    );
     res.json(result.rows);
   } catch (err) {
     console.error('Get lead products error:', err);
@@ -4998,15 +4996,10 @@ app.put('/api/lead-products/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { product_name, breite, tiefe, price, pricing_type, unit_label } = req.body;
 
-    // Verify product belongs to this branch
-    let checkQuery, checkParams;
-    if (req.branchId) {
-      checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1 AND branch_id = $2';
-      checkParams = [id, req.branchId];
-    } else {
-      checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1';
-      checkParams = [id];
-    }
+    // Verify product belongs to this branch (admin domain falls back to koblenz)
+    const branchSlug = req.branchId || 'koblenz';
+    const checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1 AND branch_id = $2';
+    const checkParams = [id, branchSlug];
 
     const existing = await pool.query(checkQuery, checkParams);
 
@@ -5125,18 +5118,13 @@ app.delete('/api/lead-products/:id', authenticateToken, async (req, res) => {
 // Get unique product names
 app.get('/api/lead-products/names', authenticateToken, async (req, res) => {
   try {
-    let query, params;
-    if (req.branchId) {
-      query = `SELECT DISTINCT product_name FROM aufmass_lead_products
-               WHERE branch_id = $1
-               ORDER BY product_name`;
-      params = [req.branchId];
-    } else {
-      query = `SELECT DISTINCT product_name FROM aufmass_lead_products ORDER BY product_name`;
-      params = [];
-    }
-
-    const result = await pool.query(query, params);
+    const branchSlug = req.branchId || 'koblenz';
+    const result = await pool.query(
+      `SELECT DISTINCT product_name FROM aufmass_lead_products
+       WHERE branch_id = $1
+       ORDER BY product_name`,
+      [branchSlug]
+    );
     res.json(result.rows.map(r => r.product_name));
   } catch (err) {
     console.error('Get product names error:', err);
@@ -5282,21 +5270,12 @@ app.get('/api/lead-products/:productName/dimensions', authenticateToken, async (
   try {
     const { productName } = req.params;
 
-    let query, params;
-    if (req.branchId) {
-      query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
-               FROM aufmass_lead_products
-               WHERE product_name = $1
-               AND (branch_id = $2 OR (branch_id IS NULL AND product_name LIKE '%PREMIUMLINE%'))
-               ORDER BY breite, tiefe`;
-      params = [productName, req.branchId];
-    } else {
-      query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
-               FROM aufmass_lead_products
-               WHERE product_name = $1
-               ORDER BY breite, tiefe`;
-      params = [productName];
-    }
+    const branchSlug = req.branchId || 'koblenz';
+    const query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
+             FROM aufmass_lead_products
+             WHERE product_name = $1 AND branch_id = $2
+             ORDER BY breite, tiefe`;
+    const params = [productName, branchSlug];
 
     const result = await pool.query(query, params);
 
