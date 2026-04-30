@@ -6182,6 +6182,39 @@ app.post('/api/leads/:id/angebote/:angebotId/pdf', authenticateToken, upload.sin
 
     const pdfPath = path.join(LEAD_PDF_DIR, `${id}_${angebotId}.pdf`);
     fs.writeFileSync(pdfPath, req.file.buffer);
+
+    // MODÜL B v3: mirror to form_pdf_snapshots so the Aufmaß dropdown sees it
+    try {
+      const linkRes = await pool.query('SELECT id FROM aufmass_forms WHERE lead_id = $1 LIMIT 1', [id]);
+      const formId = linkRes.rows[0]?.id;
+      if (formId) {
+        const snapDir = path.join(PDF_DIR, 'snapshots');
+        if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+        const snapFilename = `form${formId}_angebot_${Date.now()}.pdf`;
+        fs.writeFileSync(path.join(snapDir, snapFilename), req.file.buffer);
+
+        const old = await pool.query(
+          `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'angebot'`,
+          [formId]
+        );
+        if (old.rows.length > 0) {
+          const oldPath = path.join(snapDir, old.rows[0].file_path);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          await pool.query(
+            `UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = 'angebot'`,
+            [snapFilename, formId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, 'angebot', $2)`,
+            [formId, snapFilename]
+          );
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Form snapshot mirror failed (angebote):', snapErr.message);
+    }
+
     res.json({ message: 'Angebot PDF saved successfully' });
   } catch (err) {
     console.error('Error saving angebot PDF:', err);
@@ -6247,6 +6280,40 @@ app.post('/api/leads/:id/pdf', authenticateToken, upload.single('pdf'), async (r
 
     const pdfPath = path.join(LEAD_PDF_DIR, `${id}.pdf`);
     fs.writeFileSync(pdfPath, req.file.buffer);
+
+    // MODÜL B v3: also write a form snapshot (Angebot-PDF) so the Aufmaß
+    // dropdown's "PDF Vorschau → Angebot-PDF" finds the right document.
+    // Bridges Modul B (lead-based) with Modul F2 (form snapshot system).
+    try {
+      const linkRes = await pool.query('SELECT id FROM aufmass_forms WHERE lead_id = $1 LIMIT 1', [id]);
+      const formId = linkRes.rows[0]?.id;
+      if (formId) {
+        const snapDir = path.join(PDF_DIR, 'snapshots');
+        if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+        const snapFilename = `form${formId}_angebot_${Date.now()}.pdf`;
+        fs.writeFileSync(path.join(snapDir, snapFilename), req.file.buffer);
+
+        const old = await pool.query(
+          `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'angebot'`,
+          [formId]
+        );
+        if (old.rows.length > 0) {
+          const oldPath = path.join(snapDir, old.rows[0].file_path);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          await pool.query(
+            `UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = 'angebot'`,
+            [snapFilename, formId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, 'angebot', $2)`,
+            [formId, snapFilename]
+          );
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Form snapshot mirror failed:', snapErr.message);
+    }
 
     res.json({ message: 'Lead PDF saved successfully' });
   } catch (err) {
