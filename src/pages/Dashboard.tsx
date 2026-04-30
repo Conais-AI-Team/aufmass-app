@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getPdfUrl, getPdfStatus, getForm, savePdf, getBranchFeatures, sendAesSignature, sendAbnahmeAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl, markLeadAngebotAsSent } from '../services/api';
+import { api, getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getPdfUrl, getPdfStatus, getForm, savePdf, getBranchFeatures, sendAesSignature, sendAbnahmeAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl, markLeadAngebotAsSent, markFormPostSent } from '../services/api';
 import type { BranchFeatures, EsignatureStatus, EsignatureRequest, AngebotItem, SignatureNotification, FormPdfDocType, FormPdfSnapshot } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import type { AbnahmeImage } from '../services/api';
@@ -21,6 +21,9 @@ const isAdminOrOffice = () => {
   const user = getStoredUser();
   return user?.role === 'admin' || user?.role === 'office';
 };
+
+// Used by the "mark sent by post" flow — only admins can flip the flag.
+const isAdmin = () => getStoredUser()?.role === 'admin';
 
 // Status options for forms - ordered workflow
 const STATUS_OPTIONS = [
@@ -43,6 +46,11 @@ const STATUS_OPTIONS = [
   { value: 'reklamation_eingegangen', label: 'Reklamation Eingegangen', color: '#ef4444' },
   { value: 'reklamation_bestellt', label: 'Reklamation Bestellt', color: '#dc2626' },
   { value: 'reklamation_abgelehnt', label: 'Reklamation Abgelehnt', color: '#b91c1c' },
+  // Virtual filters — these don't map to a status, they filter on the
+  // email_sent_at / post_sent_at flags. Filter and counter logic below
+  // recognise these special values and short-circuit the status check.
+  { value: '__email_sent', label: 'E-Mail versendet', color: '#16a34a' },
+  { value: '__post_sent', label: 'Per Post versendet', color: '#2563eb' },
   { value: 'papierkorb', label: 'Papierkorb', color: '#71717a' },
 ];
 
@@ -89,11 +97,20 @@ const Dashboard = () => {
   const [forms, setForms] = useState<FormData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  // Pre-seed the status filter from the URL (?status=...) so the Dashboard
+  // stat cards can deep-link into a filtered Aufmaße view. Falls back to
+  // 'alle' when the param is missing or malformed.
+  const [searchParams] = useSearchParams();
+  const initialStatus = searchParams.get('status') || 'alle';
   const [searchTerm, setSearchTerm] = useState('');
-  const [filterStatus, setFilterStatus] = useState<string>('alle');
+  const [filterStatus, setFilterStatus] = useState<string>(initialStatus);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [formToDelete, setFormToDelete] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  // Sort order for the Aufmaß list. Default mirrors the existing backend
+  // ordering ("Neueste zuerst" / created_at DESC). Persisted only in this
+  // session — fresh navigation resets to default.
+  const [sortOrder, setSortOrder] = useState<'desc' | 'asc'>('desc');
   const [, setMontageteamStats] = useState<MontageteamStats[]>([]);
   const [montageteams, setMontageteams] = useState<Montageteam[]>([]);
 
@@ -104,6 +121,8 @@ const Dashboard = () => {
   const [leadModalOpen, setLeadModalOpen] = useState(false);
   const [leadModalEditData, setLeadModalEditData] = useState<unknown>(null);
   const [leadModalFromAufmassId, setLeadModalFromAufmassId] = useState<number | null>(null);
+  // Confirm dialog id for the admin-only "mark sent by post" flow.
+  const [postSentConfirmId, setPostSentConfirmId] = useState<number | null>(null);
   // Rechnung / Anzahlung modal state (Modul C)
   const [rechnungModalOpen, setRechnungModalOpen] = useState(false);
   const [rechnungFormId, setRechnungFormId] = useState<number | null>(null);
@@ -367,6 +386,22 @@ const Dashboard = () => {
   const getStatusColor = (status: string): string => {
     const option = STATUS_OPTIONS.find(o => o.value === status);
     return option?.color || '#7fa93d';
+  };
+
+  // Confirm + execute the admin-only postal mail mark. Refreshes the form
+  // list so the badge + button overlay update without a manual reload.
+  const handleConfirmMarkPostSent = async (formId: number) => {
+    try {
+      await markFormPostSent(formId);
+      setPostSentConfirmId(null);
+      const fresh = await getForms();
+      setForms(fresh);
+      toast.success('Per Post markiert', `Aufmaß #${formId} wurde als per Post versendet markiert.`);
+    } catch (err) {
+      console.error('Mark post-sent failed:', err);
+      toast.error('Fehler', 'Konnte nicht als per Post versendet markiert werden.');
+      setPostSentConfirmId(null);
+    }
   };
 
   const handleStatusChange = async (formId: number, newStatus: string) => {
@@ -1409,26 +1444,45 @@ Aylux Team`;
 
   const filteredForms = useMemo(() => {
     const term = searchTerm.toLowerCase();
-    return forms.filter(form => {
+    const filtered = forms.filter(form => {
       const matchesSearch = !term ||
         form.kundeVorname?.toLowerCase().includes(term) ||
         form.kundeNachname?.toLowerCase().includes(term) ||
         form.kundenlokation?.toLowerCase().includes(term) ||
         form.category?.toLowerCase().includes(term) ||
         form.productType?.toLowerCase().includes(term);
-      const matchesFilter = filterStatus === 'alle'
-        ? form.status !== 'papierkorb'
-        : form.status === filterStatus;
+      // Virtual filters use the email_sent_at / post_sent_at flags rather
+      // than the status column; they also exclude the trash bin.
+      let matchesFilter: boolean;
+      if (filterStatus === '__email_sent') {
+        matchesFilter = !!form.email_sent_at && form.status !== 'papierkorb';
+      } else if (filterStatus === '__post_sent') {
+        matchesFilter = !!form.post_sent_at && form.status !== 'papierkorb';
+      } else if (filterStatus === 'alle') {
+        matchesFilter = form.status !== 'papierkorb';
+      } else {
+        matchesFilter = form.status === filterStatus;
+      }
       return matchesSearch && matchesFilter;
     });
-  }, [forms, searchTerm, filterStatus]);
+    // Sort by created_at — falls back to updated_at then 0 so missing
+    // timestamps don't poison the comparison.
+    const ts = (f: FormData) => new Date(f.created_at || f.updated_at || 0).getTime();
+    return [...filtered].sort((a, b) =>
+      sortOrder === 'asc' ? ts(a) - ts(b) : ts(b) - ts(a)
+    );
+  }, [forms, searchTerm, filterStatus, sortOrder]);
 
   const statusCounts = useMemo(() => {
-    const counts: Record<string, number> = { alle: 0 };
+    const counts: Record<string, number> = { alle: 0, __email_sent: 0, __post_sent: 0 };
     for (const form of forms) {
       if (form.status !== 'papierkorb') counts.alle++;
       const s = form.status || 'neu';
       counts[s] = (counts[s] || 0) + 1;
+      // Virtual flag-based counters — exclude trash so they line up with
+      // the cards rendered when the chip is selected.
+      if (form.email_sent_at && form.status !== 'papierkorb') counts.__email_sent++;
+      if (form.post_sent_at && form.status !== 'papierkorb') counts.__post_sent++;
     }
     return counts;
   }, [forms]);
@@ -1488,6 +1542,25 @@ Aylux Team`;
             <input type="text" placeholder="Suchen..." value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
             {searchTerm && <button className="clear-search" onClick={() => setSearchTerm('')}><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg></button>}
           </div>
+          {/* Sort dropdown — admin & office only (back-office tooling).
+              Regular users keep the default newest-first ordering. */}
+          {isAdminOrOffice() && (
+            <div className="sort-container">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                <path d="M3 6h13M3 12h9M3 18h5" />
+                <path d="M17 8l4-4 4 4M21 4v16" />
+              </svg>
+              <select
+                className="sort-select"
+                value={sortOrder}
+                onChange={(e) => setSortOrder(e.target.value as 'desc' | 'asc')}
+                aria-label="Sortierung"
+              >
+                <option value="desc">Neueste zuerst</option>
+                <option value="asc">Älteste zuerst</option>
+              </select>
+            </div>
+          )}
           <div className="view-toggle">
             <button className={`view-btn ${viewMode === 'grid' ? 'active' : ''}`} onClick={() => setViewMode('grid')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
@@ -1584,6 +1657,41 @@ Aylux Team`;
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" /></svg>
                           {form.kundenlokation || 'Keine Adresse'}
                         </p>
+                        {/* E-Mail status badge: green when an Aufmaß PDF was
+                            sent (form's "E-Mail senden" or Dashboard icon),
+                            yellow "ausstehend" otherwise. */}
+                        {form.email_sent_at ? (
+                          <span
+                            className="email-sent-badge"
+                            title={`E-Mail versendet: ${new Date(form.email_sent_at).toLocaleString('de-DE')}`}
+                          >
+                            ✓ E-Mail versendet
+                          </span>
+                        ) : (
+                          <span
+                            className="email-pending-badge"
+                            title="Es wurde noch keine E-Mail versendet"
+                          >
+                            📧 E-Mail ausstehend
+                          </span>
+                        )}
+                        {/* Postal status — admin-only manual flag. Same UX
+                            as the e-mail badge but a separate channel. */}
+                        {form.post_sent_at ? (
+                          <span
+                            className="post-sent-badge"
+                            title={`Per Post versendet: ${new Date(form.post_sent_at).toLocaleString('de-DE')}`}
+                          >
+                            ✓ Per Post versendet
+                          </span>
+                        ) : (
+                          <span
+                            className="post-pending-badge"
+                            title="Es wurde noch keine Postsendung markiert"
+                          >
+                            📬 Post ausstehend
+                          </span>
+                        )}
                       </div>
                       {isAdminOrOffice() ? (
                         <div className="status-selector">
@@ -1616,7 +1724,7 @@ Aylux Team`;
                                 exit={{ opacity: 0, y: -10 }}
                                 onClick={(e) => e.stopPropagation()}
                               >
-                                {STATUS_OPTIONS.filter(o => o.value !== 'alle').map((option) => (
+                                {STATUS_OPTIONS.filter(o => o.value !== 'alle' && !o.value.startsWith('__')).map((option) => (
                                   <button
                                     key={option.value}
                                     className={`status-option ${getFormStatus(form) === option.value ? 'selected' : ''}`}
@@ -2090,8 +2198,10 @@ Aylux Team`;
                     )}
                     {form.kundeEmail && (
                       <button
-                        className="action-btn email"
-                        title={`E-Mail an ${form.kundeEmail}`}
+                        className={`action-btn email ${form.email_sent_at ? 'sent' : ''}`}
+                        title={form.email_sent_at
+                          ? `E-Mail an ${form.kundeEmail} (versendet: ${new Date(form.email_sent_at).toLocaleString('de-DE')})`
+                          : `E-Mail an ${form.kundeEmail}`}
                         onClick={(e) => {
                           e.stopPropagation();
                           const template = getEmailTemplate(form);
@@ -2105,6 +2215,42 @@ Aylux Team`;
                         }}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" /><polyline points="22,6 12,13 2,6" /></svg>
+                        {form.email_sent_at && (
+                          <span className="email-sent-check" aria-hidden="true">✓</span>
+                        )}
+                      </button>
+                    )}
+                    {/* Admin-only postal "mark sent" button. Hidden once the
+                        flag is set so the action surface stays clean (the
+                        badge + button overlay still reflect the state).
+                        Truck icon to clearly distinguish from the e-mail
+                        envelope right next to it. */}
+                    {isAdmin() && !form.post_sent_at && (
+                      <button
+                        className="action-btn post"
+                        title="Als per Post versendet markieren"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setPostSentConfirmId(form.id!);
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M22 2L11 13" />
+                          <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+                        </svg>
+                      </button>
+                    )}
+                    {form.post_sent_at && (
+                      <button
+                        className="action-btn post sent"
+                        title={`Per Post versendet: ${new Date(form.post_sent_at).toLocaleString('de-DE')}`}
+                        disabled
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                          <path d="M22 2L11 13" />
+                          <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+                        </svg>
+                        <span className="email-sent-check" aria-hidden="true">✓</span>
                       </button>
                     )}
                     {/* E-Signature button - only show if feature is enabled */}
@@ -2981,6 +3127,39 @@ Aylux Team`;
             onClose={() => setEmailComposer(null)}
             onSent={() => loadData()}
           />
+        )}
+      </AnimatePresence>
+
+      {/* Mark-sent-by-post confirm dialog (admin only). Mirrors the lead
+          manual-versendet modal from Modül B for visual consistency. */}
+      <AnimatePresence>
+        {postSentConfirmId !== null && (
+          <motion.div
+            className="modal-overlay-modern"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setPostSentConfirmId(null)}
+          >
+            <motion.div
+              className="modal-modern"
+              initial={{ scale: 0.9 }}
+              animate={{ scale: 1 }}
+              exit={{ scale: 0.9 }}
+              onClick={(e) => e.stopPropagation()}
+            >
+              <h3>Aufmaß per Post versendet?</h3>
+              <p>Bestätigen Sie, dass dieses Aufmaß per Post an den Kunden versendet wurde. Diese Markierung kann nicht rückgängig gemacht werden.</p>
+              <div className="modal-actions-modern">
+                <button className="modal-btn secondary" onClick={() => setPostSentConfirmId(null)}>
+                  Abbrechen
+                </button>
+                <button className="modal-btn primary" onClick={() => handleConfirmMarkPostSent(postSentConfirmId)}>
+                  Als versendet markieren
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
         )}
       </AnimatePresence>
 

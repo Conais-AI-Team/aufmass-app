@@ -100,6 +100,15 @@ async function initializeTables() {
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS lead_id INT`);
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS created_by INT`);
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS branch_id VARCHAR(50)`);
+    // Marks the first time an Aufmaß PDF was sent by e-mail (either from
+    // the form's "E-Mail senden" button after save, or from the Dashboard
+    // card's e-mail icon). Used by the Aufmaße list to show a sent / pending
+    // badge. NULL means no e-mail has been dispatched yet.
+    await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS email_sent_at TIMESTAMP NULL`);
+    // Marks the first time an Aufmaß was sent by physical mail (admin-only
+    // manual override on the Dashboard card / Aus Aufmaß card). NULL means
+    // no postal copy has gone out yet. Mirrors email_sent_at semantics.
+    await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS post_sent_at TIMESTAMP NULL`);
 
     // Abnahme columns
     await pool.query(`ALTER TABLE aufmass_abnahme ADD COLUMN IF NOT EXISTS maengel_liste TEXT`);
@@ -1367,7 +1376,7 @@ app.get('/api/forms', authenticateToken, async (req, res) => {
           f.id, f.datum, f.aufmasser, f.kunde_vorname, f.kunde_nachname, f.kunde_email, f.kunde_telefon,
           f.kundenlokation, f.category, f.product_type, f.model, f.specifications,
           f.markise_data, f.bemerkungen, f.status, f.created_by, f.created_at, f.updated_at,
-          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id,
+          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at,
           EXISTS(
             SELECT 1
             FROM aufmass_abnahme_sign_requests sr
@@ -1388,7 +1397,7 @@ app.get('/api/forms', authenticateToken, async (req, res) => {
           f.id, f.datum, f.aufmasser, f.kunde_vorname, f.kunde_nachname, f.kunde_email, f.kunde_telefon,
           f.kundenlokation, f.category, f.product_type, f.model, f.specifications,
           f.markise_data, f.bemerkungen, f.status, f.created_by, f.created_at, f.updated_at,
-          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id,
+          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at,
           EXISTS(
             SELECT 1
             FROM aufmass_abnahme_sign_requests sr
@@ -1467,14 +1476,14 @@ app.get('/api/forms/:id', authenticateToken, async (req, res) => {
       query = `SELECT id, datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon,
                kundenlokation, category, product_type, model, specifications,
                markise_data, bemerkungen, status, created_by, created_at, updated_at,
-               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name
+               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id
                FROM aufmass_forms WHERE id = $1 AND branch_id = $2`;
       params = [id, req.branchId];
     } else {
       query = `SELECT id, datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon,
                kundenlokation, category, product_type, model, specifications,
                markise_data, bemerkungen, status, created_by, created_at, updated_at,
-               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name
+               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id
                FROM aufmass_forms WHERE id = $1`;
       params = [id];
     }
@@ -2349,6 +2358,37 @@ app.get('/api/public/abnahme-sign/:token/pdf', async (req, res) => {
   } catch (err) {
     console.error('Error serving public abnahme PDF:', err);
     res.status(500).json({ error: 'Failed to serve PDF' });
+  }
+});
+
+// Mark Aufmaß as sent by physical mail (admin-only). Mirrors the email
+// flow but represents an offline action — there is no SMTP integration,
+// the admin clicks a button after dropping the package at the post office.
+// Idempotent — first stamp wins (COALESCE keeps the original timestamp).
+app.post('/api/forms/:id/mark-post-sent', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let result;
+    if (req.branchId) {
+      result = await pool.query(
+        `UPDATE aufmass_forms SET post_sent_at = COALESCE(post_sent_at, NOW())
+         WHERE id = $1 AND branch_id = $2 RETURNING id, post_sent_at`,
+        [id, req.branchId]
+      );
+    } else {
+      result = await pool.query(
+        `UPDATE aufmass_forms SET post_sent_at = COALESCE(post_sent_at, NOW())
+         WHERE id = $1 RETURNING id, post_sent_at`,
+        [id]
+      );
+    }
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    res.json({ message: 'Form marked as sent by post', post_sent_at: result.rows[0].post_sent_at });
+  } catch (err) {
+    console.error('Mark post sent error:', err);
+    res.status(500).json({ error: 'Failed to mark form as sent by post' });
   }
 });
 
@@ -6930,6 +6970,17 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
        VALUES ($1, $2, $3, $4, $5, $6, 'sent', $7)`,
       [form_id || (rechnungRow ? rechnungRow.form_id : null), lead_id || null, branchSlug, email_type || 'manual', to, subject, req.user.id]
     );
+
+    // Stamp the form's email_sent_at the first time any form-bound mail goes
+    // out (Dashboard card email icon, FormPage "E-Mail senden", or any future
+    // form-related send flow). Idempotent — COALESCE preserves the original
+    // timestamp on retries. Lead-only sends (form_id null) don't touch this.
+    if (form_id) {
+      await pool.query(
+        `UPDATE aufmass_forms SET email_sent_at = COALESCE(email_sent_at, NOW()) WHERE id = $1`,
+        [form_id]
+      );
+    }
 
     res.json({ success: true, message: 'E-Mail erfolgreich gesendet' });
   } catch (err) {
