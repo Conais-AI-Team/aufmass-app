@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, saveLeadPdf, saveAngebotPdf } from '../services/api';
+import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl } from '../services/api';
+import type { FormData as AufmassFormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
 import './LeadFormModal.css';
 
@@ -49,10 +50,15 @@ interface EditLeadData {
 interface LeadFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSuccess: () => void;
+  // MODÜL B: onSuccess optionally receives the saved lead id and whether the
+  // user ticked "send by e-mail", so the parent can chain the EmailComposer.
+  onSuccess: (leadId?: number, sendEmail?: boolean) => void;
   editData?: EditLeadData | null;
   editAngebotId?: number | null;
   newAngebotForLeadId?: number | null;
+  // MODÜL B: When set, the modal seeds itself from this Aufmaß form
+  // (customer + product + measurements + photos read-only).
+  fromAufmassFormId?: number | null;
 }
 
 interface ProductDimensions {
@@ -85,6 +91,10 @@ interface ProductRow {
   // For rounding display
   roundedBreite?: number;
   roundedTiefe?: number;
+  // MODÜL B: when seeded from an Aufmaß, remember the original measurements
+  // so we can restore them after the product picker resets the row.
+  aufmassBreite?: number;
+  aufmassTiefe?: number;
 }
 
 // Rounding functions for price calculation
@@ -115,7 +125,7 @@ interface LeadExtra {
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
-export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, editAngebotId, newAngebotForLeadId }: LeadFormModalProps) {
+export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, editAngebotId, newAngebotForLeadId, fromAufmassFormId }: LeadFormModalProps) {
   // Customer info
   const [firstname, setFirstname] = useState('');
   const [lastname, setLastname] = useState('');
@@ -139,14 +149,32 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // MODÜL B — fromAufmass mode state
+  const [aufmassData, setAufmassData] = useState<(AufmassFormData & { bilder?: { id: number; file_name: string; file_type: string }[] }) | null>(null);
+  const [sendEmailAfterSave, setSendEmailAfterSave] = useState(false);
+
   const isEditMode = !!editData && !newAngebotForLeadId;
   const isNewAngebotMode = !!newAngebotForLeadId;
+  // MODÜL B: fromAufmass features (banner + photos) are available whenever
+  // a source Aufmaß id is provided, even in edit mode. The status-bar
+  // intercept always passes fromAufmassFormId so the user sees the Aufmaß
+  // context regardless of whether the lead already existed.
+  const isFromAufmassMode = !isNewAngebotMode && !!fromAufmassFormId;
+  // Auto-fill of customer/products/notes only happens when there is NO
+  // editData yet — edit mode keeps its own fields.
+  const isFromAufmassAutoFill = isFromAufmassMode && !isEditMode;
 
   // Initialize form
   useEffect(() => {
     if (isOpen) {
       loadProductNames();
-      if (isNewAngebotMode && editData) {
+      if (isFromAufmassAutoFill && fromAufmassFormId) {
+        // MODÜL B fromAufmass mode: pull customer + product hint + photos from
+        // the source Aufmaß. Customer fields stay editable. Product picker is
+        // left to the user (lead-products taxonomy ≠ Aufmaß category/model)
+        // but breite/tiefe and bemerkungen are seeded for convenience.
+        loadFromAufmass(fromAufmassFormId);
+      } else if (isNewAngebotMode && editData) {
         // New angebot mode: pre-fill customer info (readonly), clear products
         setFirstname(editData.customer_firstname || '');
         setLastname(editData.customer_lastname || '');
@@ -158,6 +186,14 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         setProductRows([createEmptyRow()]);
         setExtras([]);
       } else if (editData) {
+        // MODÜL B: edit mode opened from the status-bar intercept also gets
+        // the source Aufmaß loaded so the banner + photos still render.
+        // Doesn't touch firstname/lastname/products — that comes from editData.
+        if (fromAufmassFormId) {
+          getForm(fromAufmassFormId)
+            .then(setAufmassData)
+            .catch(err => console.error('Failed to load Aufmaß metadata for edit mode:', err));
+        }
         // Populate form with existing data
         setFirstname(editData.customer_firstname || '');
         setLastname(editData.customer_lastname || '');
@@ -231,7 +267,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         setProductRows([createEmptyRow()]);
       }
     }
-  }, [isOpen, editData, editAngebotId, newAngebotForLeadId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editData, editAngebotId, newAngebotForLeadId, fromAufmassFormId]);
 
   const createEmptyRow = (): ProductRow => ({
     id: generateId(),
@@ -244,6 +281,65 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
     pricing_type: 'dimension',
     dimensions: {}
   });
+
+  // MODÜL B — Seed the form from a source Aufmaß. Customer fields, notes,
+  // and breite/tiefe are copied; product_name and price are left for the user
+  // to pick from the lead-products dropdown (different taxonomy upstream).
+  const loadFromAufmass = async (formId: number) => {
+    try {
+      const data = await getForm(formId);
+      setAufmassData(data);
+      setFirstname(data.kundeVorname || '');
+      setLastname(data.kundeNachname || '');
+      setEmail(data.kundeEmail || '');
+      setPhone(data.kundeTelefon || '');
+      setAddress(data.kundenlokation || '');
+      setNotes(data.bemerkungen || '');
+      setTotalDiscount(0);
+      setExtras([]);
+      setSendEmailAfterSave(false);
+
+      // Build one row per product in the Aufmaß (main + weitereProdukte) so
+      // the user only needs to pick the matching lead-product entry and the
+      // dimensions are already there.
+      const aufmassProducts: { breite?: number; tiefe?: number }[] = [];
+      const mainSpecs = (data.specifications || {}) as Record<string, unknown>;
+      aufmassProducts.push({
+        breite: typeof mainSpecs.breite === 'number' ? mainSpecs.breite : undefined,
+        tiefe: typeof mainSpecs.tiefe === 'number' ? mainSpecs.tiefe : undefined,
+      });
+      if (Array.isArray(data.weitereProdukte)) {
+        for (const wp of data.weitereProdukte) {
+          const specs = (wp.specifications || {}) as Record<string, unknown>;
+          aufmassProducts.push({
+            breite: typeof specs.breite === 'number' ? specs.breite : undefined,
+            tiefe: typeof specs.tiefe === 'number' ? specs.tiefe : undefined,
+          });
+        }
+      }
+      const rows = aufmassProducts.map(p => {
+        const r = createEmptyRow();
+        if (p.breite) {
+          r.breite = p.breite;
+          r.aufmassBreite = p.breite;
+        }
+        if (p.tiefe) {
+          r.tiefe = p.tiefe;
+          r.aufmassTiefe = p.tiefe;
+        }
+        return r;
+      });
+      setProductRows(rows.length > 0 ? rows : [createEmptyRow()]);
+    } catch (err) {
+      console.error('Failed to load Aufmaß for auto-fill:', err);
+      setError('Aufmaß-Daten konnten nicht geladen werden.');
+    }
+  };
+
+  // MODÜL B — Photos from the source Aufmaß, image-typed only (PDFs filtered)
+  const aufmassImages = (aufmassData?.bilder || []).filter(b =>
+    (b.file_type || '').startsWith('image/')
+  );
 
   const loadProductNames = async () => {
     try {
@@ -292,7 +388,25 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
               if (result.pricing_type === 'unit') {
                 return { ...r, pricing_type: 'unit', unit_label: result.unit_label, price: result.unit_price || 0, dimensions: {}, description: result.description, custom_fields: result.custom_fields, custom_field_values: {} };
               }
-              return { ...r, pricing_type: 'dimension', dimensions: result.dimensions || {}, description: result.description, custom_fields: result.custom_fields, custom_field_values: {} };
+              const dims = result.dimensions || {};
+              const next: ProductRow = { ...r, pricing_type: 'dimension', dimensions: dims, description: result.description, custom_fields: result.custom_fields, custom_field_values: {} };
+              // MODÜL B: if this row was seeded from an Aufmaß, restore the
+              // original measurements after the product picker reset and
+              // compute the price from the freshly loaded dimension matrix.
+              if (r.aufmassBreite && r.aufmassTiefe && Object.keys(dims).length > 0) {
+                next.breite = r.aufmassBreite;
+                next.tiefe = r.aufmassTiefe;
+                const rb = roundBreiteToGrid(r.aufmassBreite);
+                const rt = roundTiefeToGrid(r.aufmassTiefe);
+                next.roundedBreite = rb;
+                next.roundedTiefe = rt;
+                const breiteKey = Object.keys(dims).find(b => Number(b) === rb);
+                if (breiteKey) {
+                  const found = dims[Number(breiteKey)].find(d => d.tiefe === rt);
+                  next.price = found?.price || 0;
+                }
+              }
+              return next;
             }));
           });
         }
@@ -441,6 +555,10 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
     setLoading(true);
     setError('');
 
+    // MODÜL B: id of the lead we just created/updated, used so the parent
+    // can chain the EmailComposer when sendEmailAfterSave is true.
+    let savedLeadId: number | undefined;
+
     // Helper to build item payload for a single product row
     const buildItemPayload = (r: ProductRow) => ({
       product_name: r.product_name,
@@ -529,7 +647,11 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
             console.error('Einzelangebot PDF failed:', pdfErr);
           }
         }
+        // einzelAngebote may have created several leads; we don't pick a
+        // single id to chain the EmailComposer in this mode (would be
+        // ambiguous). savedLeadId stays undefined → no auto-send.
       } else if (isNewAngebotMode && newAngebotForLeadId) {
+        savedLeadId = newAngebotForLeadId;
         // === NEW ANGEBOT MODE: Add angebot to existing lead ===
         const angebotPayload = {
           items: validItems.map(buildItemPayload),
@@ -578,13 +700,17 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           total_discount: totalDiscount || 0,
           subtotal: calculateSubtotal(),
           total_price: calculateTotal(),
-          ...(editAngebotId ? { angebot_id: editAngebotId } : {})
+          ...(editAngebotId ? { angebot_id: editAngebotId } : {}),
+          // MODÜL B: link the new lead back to the source Aufmaß so the
+          // bidirectional sync (status / angebot_sent_at) can reach it.
+          ...(isFromAufmassMode && fromAufmassFormId ? { aufmass_form_id: fromAufmassFormId } : {})
         };
 
         const result = isEditMode
           ? await api.put<{ id: number; angebot_nummer?: string; kunden_nummer?: string }>(`/leads/${editData!.id}`, payload)
           : await api.post<{ id: number; angebot_nummer?: string; kunden_nummer?: string }>('/leads', payload);
         const leadId = isEditMode ? editData!.id : result.id;
+        savedLeadId = leadId;
         const resAngebotNummer = (result as { angebot_nummer?: string }).angebot_nummer || editData?.angebot_nummer;
         const resKundenNummer = (result as { kunden_nummer?: string }).kunden_nummer || editData?.kunden_nummer;
 
@@ -606,7 +732,10 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
             item_discounts: itemDiscountsTotal,
             total_discount: totalDiscount || 0,
             total_discount_percent: getTotalDiscountPercent(),
-            total_price: calculateTotal()
+            total_price: calculateTotal(),
+            // MODÜL B: forward Aufmaß photos so the generator can embed them.
+            // Empty for non-fromAufmass modes — keeps prior behavior intact.
+            bilder: isFromAufmassMode ? aufmassImages : undefined
           }, { returnBlob: true });
 
           if (pdfResult?.blob) {
@@ -622,7 +751,9 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         }
       }
 
-      onSuccess();
+      // MODÜL B: pass savedLeadId + sendEmailAfterSave so the parent can
+      // auto-open EmailComposer for the freshly saved lead.
+      onSuccess(savedLeadId, sendEmailAfterSave);
       resetForm();
       onClose();
     } catch (err) {
@@ -645,6 +776,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
     setTotalDiscount(0);
     setEinzelAngebote(false);
     setError('');
+    setAufmassData(null);
+    setSendEmailAfterSave(false);
   };
 
   const formatPrice = (price: number) => {
@@ -670,7 +803,15 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           onClick={e => e.stopPropagation()}
         >
           <div className="lead-modal-header">
-            <h2>{isNewAngebotMode ? 'Weiteres Angebot hinzufügen' : isEditMode ? 'Angebot bearbeiten' : 'Neues Angebot erstellen'}</h2>
+            <h2>
+              {isFromAufmassMode
+                ? `Angebot aus Aufmaß #${fromAufmassFormId}`
+                : isNewAngebotMode
+                  ? 'Weiteres Angebot hinzufügen'
+                  : isEditMode
+                    ? 'Angebot bearbeiten'
+                    : 'Neues Angebot erstellen'}
+            </h2>
             <button className="close-btn" onClick={onClose}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M18 6L6 18M6 6l12 12" />
@@ -680,6 +821,17 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
           <div className="lead-modal-body">
             {error && <div className="lead-error">{error}</div>}
+
+            {isFromAufmassMode && aufmassData && (
+              <div className="from-aufmass-banner">
+                <strong>Aus Aufmaß #{fromAufmassFormId}:</strong>{' '}
+                {[aufmassData.category, aufmassData.productType, aufmassData.model].filter(Boolean).join(' / ')}
+                {aufmassData.kundenlokation ? ` — ${aufmassData.kundenlokation}` : ''}
+                <div className="from-aufmass-banner-hint">
+                  Kunde, Maße und Bilder wurden vorausgefüllt. Bitte das passende Produkt aus der Liste wählen und den Preis erfassen.
+                </div>
+              </div>
+            )}
 
             {/* Customer Info Section */}
             <section className="lead-section">
@@ -1022,6 +1174,33 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
               />
             </section>
 
+            {/* MODÜL B — Photos pulled in from the source Aufmaß. Read-only:
+                no upload/remove because the Aufmaß remains the system of
+                record for these images. They get embedded in the Angebot PDF
+                automatically by the generator. */}
+            {isFromAufmassMode && aufmassImages.length > 0 && (
+              <section className="lead-section">
+                <h3>Fotos vom Aufmaß ({aufmassImages.length})</h3>
+                <p className="aufmass-photos-hint">
+                  Diese Fotos stammen vom verknüpften Aufmaß und werden im Angebot-PDF eingebettet.
+                </p>
+                <div className="aufmass-photos-grid">
+                  {aufmassImages.map(img => (
+                    <a
+                      key={img.id}
+                      href={getImageUrl(img.id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="aufmass-photo-thumb"
+                      title={img.file_name}
+                    >
+                      <img src={getImageUrl(img.id)} alt={img.file_name} loading="lazy" />
+                    </a>
+                  ))}
+                </div>
+              </section>
+            )}
+
             {/* Pricing Summary */}
             <div className="lead-pricing-summary">
               {/* Subtotal */}
@@ -1075,6 +1254,20 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           </div>
 
           <div className="lead-modal-footer">
+            {/* MODÜL B Soru-3 (a): when ticked, the parent auto-opens the
+                EmailComposer right after save and the eventual e-mail send
+                triggers markLeadAngebotAsSent on the lead. Hidden in
+                Einzelangebote mode because it can produce multiple leads. */}
+            {!einzelAngebote && (
+              <label className="send-email-toggle">
+                <input
+                  type="checkbox"
+                  checked={sendEmailAfterSave}
+                  onChange={e => setSendEmailAfterSave(e.target.checked)}
+                />
+                <span>Angebot direkt per E-Mail senden</span>
+              </label>
+            )}
             <button className="btn-cancel" onClick={onClose}>Abbrechen</button>
             <button className="btn-save" onClick={handleSubmit} disabled={loading}>
               {loading ? 'Speichern...' : (isEditMode ? 'Angebot aktualisieren' : 'Angebot speichern')}

@@ -374,6 +374,14 @@ async function initializeTables() {
       console.log('Default admin created: admin@aylux.de / admin123');
     }
 
+    // ============ MODÜL B — Aufmaß ↔ Angebote sync marker ============
+    // Marks that an Angebot has been sent for this lead (auto via e-mail or
+    // manual admin override). Used by Angebote list to show "Versendet" badge
+    // and by the bidirectional sync between aufmass_forms.status='angebot_versendet'
+    // and the lead's sent state.
+    await pool.query(`ALTER TABLE aufmass_leads ADD COLUMN IF NOT EXISTS angebot_sent_at TIMESTAMP NULL`);
+    console.log('aufmass_leads.angebot_sent_at column ready');
+
     // ============ EMAIL SMTP SETTINGS ============
     await pool.query(`ALTER TABLE aufmass_branch_settings ADD COLUMN IF NOT EXISTS smtp_host VARCHAR(255)`);
     await pool.query(`ALTER TABLE aufmass_branch_settings ADD COLUMN IF NOT EXISTS smtp_port INT DEFAULT 587`);
@@ -548,6 +556,79 @@ const requireAdminOrOffice = (req, res, next) => {
   }
   next();
 };
+
+// ============ MODÜL B — Aufmaß ↔ Angebote cross-sync helpers ============
+// Mirrors the frontend STATUS_ORDER in src/pages/Dashboard.tsx so that
+// syncing only moves a form forward in the workflow, never backward.
+const FORM_STATUS_ORDER = [
+  'entwurf',
+  'auftrag_abgelehnt',
+  'neu',
+  'angebot_versendet',
+  'auftrag_erteilt',
+  'bauantrag',
+  'anzahlung',
+  'bestellt',
+  'montage_geplant',
+  'montage_gestartet',
+  'abnahme',
+  'reklamation_eingegangen',
+  'reklamation_bestellt',
+  'reklamation_abgelehnt',
+];
+
+// Keep the linked lead's "Versendet" flag in sync with the form's status:
+// - status >= angebot_versendet  → angebot_sent_at = NOW() (idempotent)
+// - status <  angebot_versendet  → angebot_sent_at = NULL  (badge clears)
+// Unknown statuses are ignored. Forms with no linked lead are no-ops.
+async function syncLeadFromForm(formId, newStatus) {
+  const linkRes = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [formId]);
+  const leadId = linkRes.rows[0]?.lead_id;
+  if (!leadId) return;
+
+  const targetIdx = FORM_STATUS_ORDER.indexOf('angebot_versendet');
+  const newIdx = FORM_STATUS_ORDER.indexOf(newStatus);
+  if (newIdx === -1) return;
+
+  if (newIdx >= targetIdx) {
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = COALESCE(angebot_sent_at, NOW()), updated_at = NOW()
+       WHERE id = $1`,
+      [leadId]
+    );
+  } else {
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = NULL, updated_at = NOW() WHERE id = $1`,
+      [leadId]
+    );
+  }
+}
+
+// When an Angebot is marked as sent for a lead, push every linked form forward
+// to 'angebot_versendet' (only if its current status sits before that step) and
+// record the change in status history.
+async function syncFormsFromLead(leadId, userId) {
+  const targetIdx = FORM_STATUS_ORDER.indexOf('angebot_versendet');
+  const formsRes = await pool.query(
+    'SELECT id, status FROM aufmass_forms WHERE lead_id = $1',
+    [leadId]
+  );
+  for (const form of formsRes.rows) {
+    const currentIdx = FORM_STATUS_ORDER.indexOf(form.status);
+    if (currentIdx >= 0 && currentIdx < targetIdx) {
+      const today = new Date().toISOString().split('T')[0];
+      await pool.query(
+        `UPDATE aufmass_forms SET status = 'angebot_versendet', status_date = $2, updated_at = NOW() WHERE id = $1`,
+        [form.id, today]
+      );
+      await pool.query(
+        `INSERT INTO aufmass_status_history (form_id, status, changed_by, status_date, notes)
+         VALUES ($1, 'angebot_versendet', $2, $3, $4)`,
+        [form.id, userId || null, today, 'Auto-sync: Angebot wurde versendet']
+      );
+    }
+  }
+}
 
 // ============ BRANCH DETECTION MIDDLEWARE ============
 // Detects branch from subdomain (e.g., koblenz.cnsform.com -> branchId = 'koblenz')
@@ -1412,6 +1493,8 @@ app.put('/api/forms/:id', authenticateToken, async (req, res) => {
            VALUES ($1, $2, $3, $4, $5)`,
           [id, updates.status, req.user?.id || null, updates.statusDate || null, updates.statusNotes || null]
         );
+        // MODÜL B: Reflect angebot_versendet onto the linked lead
+        await syncLeadFromForm(id, updates.status);
       }
     }
 
@@ -4537,7 +4620,7 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
   console.log('=== CREATE LEAD START ===');
   console.log('Body:', JSON.stringify(req.body, null, 2));
   try {
-    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price } = req.body;
+    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price, aufmass_form_id } = req.body;
 
     // Use provided total_price or calculate fallback
     let finalTotal = total_price;
@@ -4600,6 +4683,22 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
       }
     }
 
+    // MODÜL B: If created from an existing Aufmaß, link the form to this lead.
+    // Branch-scoped UPDATE so callers cannot link forms outside their branch.
+    if (aufmass_form_id) {
+      if (req.branchId) {
+        await pool.query(
+          'UPDATE aufmass_forms SET lead_id = $1 WHERE id = $2 AND branch_id = $3',
+          [leadId, aufmass_form_id, req.branchId]
+        );
+      } else {
+        await pool.query(
+          'UPDATE aufmass_forms SET lead_id = $1 WHERE id = $2',
+          [leadId, aufmass_form_id]
+        );
+      }
+    }
+
     res.status(201).json({ id: leadId, angebot_nummer: angebotNummer, kunden_nummer: kundenNummer, message: 'Lead created successfully' });
   } catch (err) {
     console.error('=== CREATE LEAD ERROR ===');
@@ -4614,9 +4713,14 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
 app.get('/api/leads', authenticateToken, async (req, res) => {
   try {
     let query, params;
+    // MODÜL B: aufmass_form_id surfaced via subquery so the Schnellangebot
+    // tab can filter out leads that originated from an Aufmaß (those live
+    // in the Aus Aufmaß tab as their source form's "Lead #N" badge).
     if (req.branchId) {
       query = `SELECT l.*, u.name as created_by_name,
-               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count
+               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count,
+               (SELECT MIN(id) FROM aufmass_forms WHERE lead_id = l.id) as aufmass_form_id,
+               (SELECT status FROM aufmass_forms WHERE lead_id = l.id ORDER BY id ASC LIMIT 1) as aufmass_form_status
                FROM aufmass_leads l
                LEFT JOIN aufmass_users u ON l.created_by = u.id
                WHERE l.branch_id = $1
@@ -4624,7 +4728,9 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       params = [req.branchId];
     } else {
       query = `SELECT l.*, u.name as created_by_name,
-               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count
+               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count,
+               (SELECT MIN(id) FROM aufmass_forms WHERE lead_id = l.id) as aufmass_form_id,
+               (SELECT status FROM aufmass_forms WHERE lead_id = l.id ORDER BY id ASC LIMIT 1) as aufmass_form_status
                FROM aufmass_leads l
                LEFT JOIN aufmass_users u ON l.created_by = u.id
                ORDER BY l.created_at DESC`;
@@ -4806,8 +4912,18 @@ app.get('/api/leads/:id', authenticateToken, async (req, res) => {
       angebote.push({ ...ang, items: enrichedAngItems, extras: angExtras.rows });
     }
 
+    // MODÜL B: include the linked source Aufmaß id so the frontend can fetch
+    // its photos (aufmass_bilder) when regenerating the Angebot PDF outside
+    // the LeadFormModal save path (e.g. lead-list PDF preview / e-mail send).
+    const aufmassFormRes = await pool.query(
+      'SELECT id FROM aufmass_forms WHERE lead_id = $1 ORDER BY id ASC LIMIT 1',
+      [id]
+    );
+    const aufmass_form_id = aufmassFormRes.rows[0]?.id || null;
+
     res.json({
       ...lead,
+      aufmass_form_id,
       items: enrichedLeadItems,
       extras: extrasResult.rows,
       angebote
@@ -4987,6 +5103,54 @@ app.put('/api/leads/:id/status', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Update lead status error:', err);
     res.status(500).json({ error: 'Failed to update lead status' });
+  }
+});
+
+// MODÜL B: Mark a lead's angebot as sent (auto-triggered by e-mail flows).
+// Sets aufmass_leads.angebot_sent_at and pushes every linked Aufmaß forward
+// to status 'angebot_versendet'. Idempotent — repeated calls are safe.
+app.post('/api/leads/:id/mark-angebot-sent', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const ownership = req.branchId
+      ? await pool.query('SELECT id FROM aufmass_leads WHERE id = $1 AND branch_id = $2', [id, req.branchId])
+      : await pool.query('SELECT id FROM aufmass_leads WHERE id = $1', [id]);
+    if (ownership.rowCount === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = COALESCE(angebot_sent_at, NOW()), updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
+    await syncFormsFromLead(id, req.user?.id);
+    res.json({ message: 'Angebot marked as sent' });
+  } catch (err) {
+    console.error('Mark angebot sent error:', err);
+    res.status(500).json({ error: 'Failed to mark angebot as sent' });
+  }
+});
+
+// MODÜL B: Manual override for the "Versendet" marker — admin only, used when
+// the offer was sent by physical mail (German postal route) and no e-mail flow
+// fired the auto-sync. Office role is intentionally rejected per spec.
+app.post('/api/leads/:id/mark-angebot-sent-manual', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const ownership = req.branchId
+      ? await pool.query('SELECT id FROM aufmass_leads WHERE id = $1 AND branch_id = $2', [id, req.branchId])
+      : await pool.query('SELECT id FROM aufmass_leads WHERE id = $1', [id]);
+    if (ownership.rowCount === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = COALESCE(angebot_sent_at, NOW()), updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
+    await syncFormsFromLead(id, req.user?.id);
+    res.json({ message: 'Angebot marked as sent (manual)' });
+  } catch (err) {
+    console.error('Manual mark angebot sent error:', err);
+    res.status(500).json({ error: 'Failed to mark angebot as sent' });
   }
 });
 

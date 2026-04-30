@@ -1194,6 +1194,17 @@
   color: var(--bg-primary);
 }
 
+/* MODÜL B — "Angebot aus Aufmaß erstellen" action button */
+.action-btn.angebot {
+  color: var(--primary-color, #7fa93d);
+}
+
+.action-btn.angebot:hover {
+  background: var(--primary-color, #7fa93d);
+  border-color: var(--primary-color, #7fa93d);
+  color: var(--bg-primary);
+}
+
 .action-btn.attachment {
   color: #06b6d4;
   flex: 1;

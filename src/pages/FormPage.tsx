@@ -4,9 +4,10 @@ import { AnimatePresence } from 'framer-motion';
 import { AufmassForm } from '../App';
 import { FormData } from '../types';
 import { DynamicFormData } from '../types/productConfig';
-import { getForm, createForm, updateForm, uploadImages, savePdf, updateLeadStatus, getAbnahme, getAbnahmeImages, FormData as ApiFormData } from '../services/api';
+import { api, getForm, createForm, updateForm, uploadImages, savePdf, updateLeadStatus, getAbnahme, getAbnahmeImages, markLeadAngebotAsSent, FormData as ApiFormData } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import EmailComposer from '../components/EmailComposer';
+import LeadFormModal from '../components/LeadFormModal';
 import { useToast } from '../components/Toast';
 
 interface LeadItem {
@@ -52,11 +53,50 @@ const FormPage = () => {
   const [error, setError] = useState<string | null>(null);
   const [formStatus, setFormStatus] = useState<string>('neu');
 
+  // MODÜL B — LeadFormModal state for the unified Angebot Versendet flow
+  // (fired from the form's status bar). When form.lead_id exists we open the
+  // modal in edit mode, otherwise in fromAufmass mode for a new lead.
+  const [leadModalOpen, setLeadModalOpen] = useState(false);
+  const [leadModalEditData, setLeadModalEditData] = useState<unknown>(null);
+  const [leadModalFromAufmassId, setLeadModalFromAufmassId] = useState<number | null>(null);
+
   // Get lead data from navigation state
   const leadState = location.state as LocationState | null;
 
   const handleStatusChange = async (newStatus: string) => {
     if (!id || id === 'new') return;
+
+    // MODÜL B — Intercept "angebot_versendet" so the user lands in
+    // LeadFormModal (Aus Aufmaß flow) instead of just flipping the status.
+    // The modal save will trigger backend cross-sync (markLeadAngebotAsSent
+    // → syncFormsFromLead) which sets the form status, so we don't update
+    // the status here. If the user cancels the modal nothing changes —
+    // mirroring the Dashboard card dropdown behaviour.
+    const baseStatus = newStatus.includes(':') ? newStatus.split(':')[0] : newStatus;
+    if (baseStatus === 'angebot_versendet') {
+      try {
+        const formId = parseInt(id);
+        const fresh = await getForm(formId);
+        const linkedLeadId = fresh.lead_id;
+        // Always pass the source Aufmaß id so the modal can render the
+        // "Aus Aufmaß" banner + photos in both fresh and edit modes.
+        setLeadModalFromAufmassId(formId);
+        if (linkedLeadId) {
+          // Edit mode — load the linked lead and open the modal on it.
+          const leadDetail = await api.get<unknown>(`/leads/${linkedLeadId}`);
+          setLeadModalEditData(leadDetail);
+        } else {
+          // No lead yet — fromAufmass mode for a new lead.
+          setLeadModalEditData(null);
+        }
+        setLeadModalOpen(true);
+      } catch (err) {
+        console.error('Failed to open Angebot modal from status bar:', err);
+        toast.error('Fehler', 'Angebot-Formular konnte nicht geöffnet werden.');
+      }
+      return;
+    }
+
     try {
       // Check if status includes date (format: status_value:2025-12-15)
       if (newStatus.includes(':')) {
@@ -486,6 +526,45 @@ const FormPage = () => {
           />
         )}
       </AnimatePresence>
+      {/* MODÜL B — LeadFormModal opened from the form's status bar when the
+          user picks "Angebot Versendet". editData wins over fromAufmassId per
+          the LeadFormModal mode-precedence rules. */}
+      <LeadFormModal
+        isOpen={leadModalOpen}
+        onClose={() => {
+          setLeadModalOpen(false);
+          setLeadModalEditData(null);
+          setLeadModalFromAufmassId(null);
+        }}
+        onSuccess={async (savedLeadId) => {
+          setLeadModalOpen(false);
+          setLeadModalEditData(null);
+          setLeadModalFromAufmassId(null);
+          // MODÜL B: When the modal is opened from the status bar's "Angebot
+          // Versendet" intercept, the user's intent is already "send the
+          // offer", so flag the lead as sent immediately. Backend cross-sync
+          // (syncFormsFromLead) then flips this Aufmaß to angebot_versendet.
+          if (savedLeadId) {
+            try {
+              await markLeadAngebotAsSent(savedLeadId);
+            } catch (err) {
+              console.error('mark-angebot-sent after save failed:', err);
+            }
+          }
+          // Reload the form so the new status (set by backend cross-sync)
+          // shows up in the status bar without a manual refresh.
+          if (id && id !== 'new') {
+            try {
+              const fresh = await getForm(parseInt(id));
+              if (fresh.status) setFormStatus(fresh.status);
+            } catch (err) {
+              console.error('Reload after Angebot save failed:', err);
+            }
+          }
+        }}
+        editData={leadModalEditData as React.ComponentProps<typeof LeadFormModal>['editData']}
+        fromAufmassFormId={leadModalFromAufmassId}
+      />
     </>
   );
 };

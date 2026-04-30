@@ -12,7 +12,7 @@ import { fetchBranchPdfBytes } from '../services/api';
 const productConfig = productConfigData as ProductConfig;
 
 // Type for server image objects
-interface ServerImage {
+export interface ServerImage {
   id: number;
   file_name: string;
   file_type: string;
@@ -115,7 +115,7 @@ const fixImageOrientation = (base64: string, orientation: number): Promise<strin
 };
 
 // Helper to get image dimensions
-const getImageDimensions = (base64: string): Promise<{ width: number; height: number }> => {
+export const getImageDimensions = (base64: string): Promise<{ width: number; height: number }> => {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve({ width: img.width, height: img.height });
@@ -195,7 +195,7 @@ const getExifOrientationFromBase64 = (base64: string): number => {
 };
 
 // Helper to automatically fix image orientation from base64
-const fixImageOrientationAuto = async (base64: string): Promise<string> => {
+export const fixImageOrientationAuto = async (base64: string): Promise<string> => {
   const orientation = getExifOrientationFromBase64(base64);
   if (orientation <= 1) {
     return base64;
@@ -204,7 +204,7 @@ const fixImageOrientationAuto = async (base64: string): Promise<string> => {
 };
 
 // Helper to fetch server image and convert to base64 (with retry)
-const fetchServerImageAsBase64 = async (imageId: number, retries = 2): Promise<string> => {
+export const fetchServerImageAsBase64 = async (imageId: number, retries = 2): Promise<string> => {
   const url = getImageUrl(imageId);
   const token = getStoredToken();
 

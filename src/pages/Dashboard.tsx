@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getPdfUrl, getPdfStatus, getForm, savePdf, getBranchFeatures, sendAesSignature, sendAbnahmeAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl } from '../services/api';
+import { api, getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getPdfUrl, getPdfStatus, getForm, savePdf, getBranchFeatures, sendAesSignature, sendAbnahmeAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl, markLeadAngebotAsSent } from '../services/api';
 import type { BranchFeatures, EsignatureStatus, EsignatureRequest, AngebotItem, SignatureNotification, FormPdfDocType, FormPdfSnapshot } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import type { AbnahmeImage } from '../services/api';
@@ -9,6 +9,7 @@ import type { FormData, MontageteamStats, Montageteam, StatusHistoryEntry, Abnah
 import { useStats } from '../AppWrapper';
 import { useToast } from '../components/Toast';
 import EmailComposer from '../components/EmailComposer';
+import LeadFormModal from '../components/LeadFormModal';
 import './Dashboard.css';
 
 // Check if current user is admin or office (both have elevated permissions)
@@ -86,6 +87,11 @@ const Dashboard = () => {
 
   // Email composer state
   const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; formId?: number; emailType?: string } | null>(null);
+  // MODÜL B — LeadFormModal triggered from the status dropdown when picking
+  // "Angebot Versendet" (replaces the legacy AngebotItems modal flow).
+  const [leadModalOpen, setLeadModalOpen] = useState(false);
+  const [leadModalEditData, setLeadModalEditData] = useState<unknown>(null);
+  const [leadModalFromAufmassId, setLeadModalFromAufmassId] = useState<number | null>(null);
   const [teamDropdownOpen, setTeamDropdownOpen] = useState<number | null>(null);
   const [statusDropdownOpen, setStatusDropdownOpen] = useState<number | null>(null);
   const [filterDropdownOpen, setFilterDropdownOpen] = useState(false);
@@ -128,7 +134,10 @@ const Dashboard = () => {
   const [angebotBemerkungen, setAngebotBemerkungen] = useState<string>('');
   const [angebotSaving, setAngebotSaving] = useState(false);
   const [angebotConfirmOpen, setAngebotConfirmOpen] = useState(false);
-  const [angebotEditMode, setAngebotEditMode] = useState(false);
+  // angebotEditMode is now always false because the legacy AngebotItems modal
+  // is no longer triggered (MODÜL B unified flow). Kept as a read-only state so
+  // the legacy modal markup compiles without changes.
+  const [angebotEditMode] = useState(false);
 
   // Document/Video upload state
   const [uploadingDocFormId, setUploadingDocFormId] = useState<number | null>(null);
@@ -343,38 +352,28 @@ const Dashboard = () => {
       return;
     }
 
-    // If selecting angebot_versendet status, open angebot modal
+    // MODÜL B — Unified flow: when the user picks "angebot_versendet" from
+    // the status dropdown, open the LeadFormModal (Aus Aufmaß or edit mode
+    // based on form.lead_id) instead of the legacy AngebotItems modal. The
+    // modal save chain (markLeadAngebotAsSent → syncFormsFromLead) flips the
+    // form status, so we don't write it here. Cancelling the modal leaves
+    // the form unchanged.
     if (newStatus === 'angebot_versendet') {
-      setAngebotFormId(formId);
-      setAngebotEditMode(false);
-      // Load existing angebot data
       try {
-        const [existingAngebot, sigStatus] = await Promise.all([
-          getAngebot(formId),
-          getEsignatureStatus(formId).catch(() => null)
-        ]);
-        if (existingAngebot?.items && existingAngebot.items.length > 0) {
-          setAngebotItems(existingAngebot.items);
-          setAngebotEditMode(true); // If data exists, we're editing
+        // Always carry the source Aufmaß id so the modal can render the
+        // "Aus Aufmaß" banner + photos in both fresh and edit modes.
+        setLeadModalFromAufmassId(formId);
+        if (form?.lead_id) {
+          const leadDetail = await api.get<unknown>(`/leads/${form.lead_id}`);
+          setLeadModalEditData(leadDetail);
         } else {
-          setAngebotItems([{ bezeichnung: '', menge: 1, einzelpreis: 0, gesamtpreis: 0 }]);
+          setLeadModalEditData(null);
         }
-        if (existingAngebot?.summary) {
-          setAngebotDate(existingAngebot.summary.angebot_datum?.split('T')[0] || new Date().toISOString().split('T')[0]);
-          setAngebotBemerkungen(existingAngebot.summary.bemerkungen || '');
-        } else {
-          setAngebotDate(new Date().toISOString().split('T')[0]);
-          setAngebotBemerkungen('');
-        }
-        if (sigStatus) {
-          setEsignatureStatuses(prev => ({ ...prev, [formId]: sigStatus }));
-        }
-      } catch {
-        setAngebotItems([{ bezeichnung: '', menge: 1, einzelpreis: 0, gesamtpreis: 0 }]);
-        setAngebotDate(new Date().toISOString().split('T')[0]);
-        setAngebotBemerkungen('');
+        setLeadModalOpen(true);
+      } catch (err) {
+        console.error('Failed to open Angebot modal:', err);
+        toast.error('Fehler', 'Angebot-Formular konnte nicht geöffnet werden.');
       }
-      setAngebotModalOpen(true);
       setStatusDropdownOpen(null);
       return;
     }
@@ -1859,6 +1858,20 @@ Aylux Team`;
                         <span>Anhang</span>
                       </button>
                     )}
+                    {/* MODÜL B — "Angebot erstellen" button: kunde + ürün dolu olan
+                        Aufmaß'larda görünür. Tıklayınca Angebote sayfasını "Aus Aufmaß"
+                        tab'ında açar ve ?from_aufmass=<id> ile auto-fill akışını tetikler. */}
+                    {Boolean(((form.kundeVorname || '').trim() || (form.kundeNachname || '').trim()) &&
+                             ((form.category || '').trim() && (form.productType || '').trim())) && (
+                      <button
+                        className="action-btn angebot"
+                        title="Angebot aus diesem Aufmaß erstellen"
+                        onClick={() => navigate(`/angebote?tab=aus_aufmass&from_aufmass=${form.id}`)}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14,2 14,8 20,8" /><path d="M12 18v-6" /><path d="M9 15h6" /></svg>
+                        <span>Angebot</span>
+                      </button>
+                    )}
                     {/* Restore button - only for forms in Papierkorb */}
                     {getFormStatus(form) === 'papierkorb' && (
                       <button className="action-btn restore" onClick={() => handleRestore(form.id!)} title="Wiederherstellen">
@@ -2616,6 +2629,35 @@ Aylux Team`;
           />
         )}
       </AnimatePresence>
+
+      {/* MODÜL B — LeadFormModal opened by the status-dropdown
+          "Angebot Versendet" intercept (replaces legacy AngebotItems modal). */}
+      <LeadFormModal
+        isOpen={leadModalOpen}
+        onClose={() => {
+          setLeadModalOpen(false);
+          setLeadModalEditData(null);
+          setLeadModalFromAufmassId(null);
+        }}
+        onSuccess={async (savedLeadId) => {
+          setLeadModalOpen(false);
+          setLeadModalEditData(null);
+          setLeadModalFromAufmassId(null);
+          // MODÜL B: status-dropdown intent is "send" — flag the lead so
+          // backend cross-sync flips the linked Aufmaß to angebot_versendet.
+          if (savedLeadId) {
+            try {
+              await markLeadAngebotAsSent(savedLeadId);
+            } catch (err) {
+              console.error('mark-angebot-sent after save failed:', err);
+            }
+          }
+          // Refresh forms so the new status is reflected on the cards.
+          getForms().then(setForms).catch(err => console.error('Reload failed:', err));
+        }}
+        editData={leadModalEditData as React.ComponentProps<typeof LeadFormModal>['editData']}
+        fromAufmassFormId={leadModalFromAufmassId}
+      />
 
     </>
   );
