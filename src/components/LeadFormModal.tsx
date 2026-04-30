@@ -1,8 +1,9 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl } from '../services/api';
+import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl, lookupLeadProductBySize } from '../services/api';
 import type { FormData as AufmassFormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
+import { getSizeProfileForType, PROFILE_AXES, AXIS_LABELS, extractSizeValues, parseModelList, type SizeProfile } from '../utils/sizeProfile';
 import './LeadFormModal.css';
 
 interface AngebotData {
@@ -95,6 +96,17 @@ interface ProductRow {
   // so we can restore them after the product picker resets the row.
   aufmassBreite?: number;
   aufmassTiefe?: number;
+  // MODÜL B v3: N-axis support for non-2D profiles (Markise UNTERGLAS, Keil, etc.)
+  // When set, the row uses these instead of breite/tiefe for the lookup call.
+  size_profile?: SizeProfile | null;
+  size_axes?: string[];
+  size_values?: Record<string, number>;
+  // Source category/product_type — needed for re-running profile detection
+  source_category?: string;
+  source_product_type?: string;
+  // Last lookup status (drives the "Preis fehlt" / "auf X×Y aufgerundet" badge)
+  lookup_status?: 'matched' | 'rounded' | 'price_missing' | 'no_match';
+  rounded_to?: Record<string, number>;
 }
 
 // MODÜL B v3: All dimensions are in mm (productConfig.json reference).
@@ -308,90 +320,145 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
       setExtras([]);
       setSendEmailAfterSave(false);
 
-      // Build one row per product in the Aufmaß (main + weitereProdukte) so
-      // the user only needs to pick the matching lead-product entry and the
-      // dimensions are already there.
-      const aufmassProducts: { breite?: number; tiefe?: number }[] = [];
+      // MODÜL B v3: Build one row per (product × model) — main product can be
+      // multi-select (N models on same dims), weitereProdukte are single-select
+      // (each has its own dims/model).
+      type AufmassEntry = {
+        category?: string;
+        productType?: string;
+        modelName: string;
+        specifications: Record<string, unknown>;
+      };
+      const entries: AufmassEntry[] = [];
+
       const mainSpecs = (data.specifications || {}) as Record<string, unknown>;
-      aufmassProducts.push({
-        breite: typeof mainSpecs.breite === 'number' ? mainSpecs.breite : undefined,
-        tiefe: typeof mainSpecs.tiefe === 'number' ? mainSpecs.tiefe : undefined,
-      });
-      if (Array.isArray(data.weitereProdukte)) {
-        for (const wp of data.weitereProdukte) {
-          const specs = (wp.specifications || {}) as Record<string, unknown>;
-          aufmassProducts.push({
-            breite: typeof specs.breite === 'number' ? specs.breite : undefined,
-            tiefe: typeof specs.tiefe === 'number' ? specs.tiefe : undefined,
+      const mainModels = parseModelList(data.model);
+      if (mainModels.length === 0) {
+        // No model selected — push a single empty row so the user can pick manually
+        entries.push({
+          category: data.category,
+          productType: data.productType,
+          modelName: '',
+          specifications: mainSpecs,
+        });
+      } else {
+        for (const m of mainModels) {
+          entries.push({
+            category: data.category,
+            productType: data.productType,
+            modelName: m,
+            specifications: mainSpecs,
           });
         }
       }
-      // MODÜL B v3: Aufmaß formundaki model adlarını da topla — auto-select için.
-      // data.model JSON string ('["Skyline"]') veya plain string ("Skyline,Topline")
-      // formatlarinda gelebilir. Ikisini de handle eden helper:
-      const parseModelString = (raw: unknown): string => {
-        if (!raw) return '';
-        const s = String(raw).trim();
-        if (s.startsWith('[')) {
-          try {
-            const arr = JSON.parse(s);
-            if (Array.isArray(arr) && arr.length > 0) return String(arr[0]).trim();
-          } catch { /* fall through to comma split */ }
-        }
-        return s.split(',')[0].trim();
-      };
 
-      const mainModel = parseModelString(data.model);
-      const aufmassProductsWithModel = aufmassProducts.map((p, idx) => {
-        if (idx === 0) return { ...p, modelName: mainModel };
-        const wp = data.weitereProdukte?.[idx - 1];
-        return { ...p, modelName: parseModelString(wp?.model) };
-      });
-
-      // Get the available product names so we only auto-select models that exist
-      // in this branch's lead_products table
-      const availableNames = await api.get<string[]>('/lead-products/names').catch(() => [] as string[]);
-
-      const enrichedRows = await Promise.all(aufmassProductsWithModel.map(async (p) => {
-        const r = createEmptyRow();
-        if (p.breite) { r.breite = p.breite; r.aufmassBreite = p.breite; }
-        if (p.tiefe)  { r.tiefe  = p.tiefe;  r.aufmassTiefe  = p.tiefe;  }
-
-        // Only auto-fill if Aufmaß model exists in lead_products (eager-seeded earlier)
-        if (p.modelName && availableNames.includes(p.modelName)) {
-          r.product_name = p.modelName;
-          try {
-            const dims = await loadDimensions(p.modelName);
-            if (dims.pricing_type === 'unit') {
-              r.pricing_type = 'unit';
-              r.unit_label = dims.unit_label;
-              r.price = dims.unit_price || 0;
-              r.dimensions = {};
-              r.description = dims.description;
-              r.custom_fields = dims.custom_fields;
-            } else {
-              const dimensions = dims.dimensions || {};
-              r.pricing_type = 'dimension';
-              r.dimensions = dimensions;
-              r.description = dims.description;
-              r.custom_fields = dims.custom_fields;
-              // Round-up against actual grid keys (handles any custom step bayi added)
-              if (p.breite && p.tiefe && Object.keys(dimensions).length > 0) {
-                const rb = findClosestBreiteInGrid(dimensions, p.breite);
-                if (rb !== null) {
-                  const rtMatch = findClosestTiefeInGrid(dimensions[rb], p.tiefe);
-                  if (rtMatch) {
-                    r.roundedBreite = rb;
-                    r.roundedTiefe = rtMatch.tiefe;
-                    r.price = rtMatch.price;
-                  }
-                }
-              }
+      // weitereProdukte — single-select model each, own specifications
+      if (Array.isArray(data.weitereProdukte)) {
+        for (const wp of data.weitereProdukte) {
+          const wpSpecs = (wp.specifications || {}) as Record<string, unknown>;
+          const wpModelList = parseModelList(wp.model);
+          if (wpModelList.length === 0) {
+            entries.push({
+              category: wp.category,
+              productType: wp.productType,
+              modelName: '',
+              specifications: wpSpecs,
+            });
+          } else {
+            // Defensive: even if WeitereProdukte UI is single-select today, support multi
+            for (const m of wpModelList) {
+              entries.push({
+                category: wp.category,
+                productType: wp.productType,
+                modelName: m,
+                specifications: wpSpecs,
+              });
             }
-          } catch (e) {
-            console.warn('Auto-fill loadDimensions failed for', p.modelName, e);
           }
         }
+      }
+
+      // Get available product names — auto-fill skipped if model not in this branch's catalog
+      const availableNames = await api.get<string[]>('/lead-products/names').catch(() => [] as string[]);
+
+      const enrichedRows = await Promise.all(entries.map(async (entry) => {
+        const r = createEmptyRow();
+
+        // Determine size profile from category/product_type
+        const profile = getSizeProfileForType(entry.category, entry.productType);
+        const axes = profile ? PROFILE_AXES[profile] : [];
+        const sizeValues = profile ? extractSizeValues(entry.specifications, profile) : {};
+
+        r.size_profile = profile;
+        r.size_axes = axes;
+        r.size_values = sizeValues;
+        r.source_category = entry.category;
+        r.source_product_type = entry.productType;
+
+        // Legacy 2D fields kept in sync for the existing UI
+        // (axes[0] → breite slot, axes[1] → tiefe slot — generic mapping for display)
+        if (axes[0] && sizeValues[axes[0]] != null) {
+          r.breite = sizeValues[axes[0]];
+          r.aufmassBreite = sizeValues[axes[0]];
+        }
+        if (axes[1] && sizeValues[axes[1]] != null) {
+          r.tiefe = sizeValues[axes[1]];
+          r.aufmassTiefe = sizeValues[axes[1]];
+        }
+
+        if (!entry.modelName || !availableNames.includes(entry.modelName)) {
+          // Mark as "no_match" so the badge says "Modell nicht im Katalog"
+          if (entry.modelName) r.lookup_status = 'no_match';
+          return r;
+        }
+
+        r.product_name = entry.modelName;
+
+        // Generic N-axis lookup via the new endpoint (handles all 8 profiles)
+        if (Object.keys(sizeValues).length > 0) {
+          try {
+            const result = await lookupLeadProductBySize(entry.modelName, sizeValues);
+            if (result.matched && result.lead_product) {
+              const lp = result.lead_product;
+              if (lp.price != null && lp.price > 0) {
+                r.price = lp.price;
+                r.lookup_status = result.exact ? 'matched' : 'rounded';
+                if (!result.exact && result.rounded_to) {
+                  r.rounded_to = result.rounded_to;
+                  // Reflect rounded values in legacy display fields too
+                  if (axes[0] && result.rounded_to[axes[0]] != null) r.roundedBreite = result.rounded_to[axes[0]];
+                  if (axes[1] && result.rounded_to[axes[1]] != null) r.roundedTiefe = result.rounded_to[axes[1]];
+                }
+              } else {
+                r.lookup_status = 'price_missing';
+              }
+              // Hydrate description/custom_fields from the legacy /dimensions response
+              // (lookup endpoint doesn't return them yet — fetch separately, non-blocking)
+              loadDimensions(entry.modelName).then(dims => {
+                if (dims.description) r.description = dims.description;
+                if (dims.custom_fields) r.custom_fields = dims.custom_fields;
+              }).catch(() => { /* ignore */ });
+              // Also fill .dimensions for the existing edit UI
+              try {
+                const dims = await loadDimensions(entry.modelName);
+                r.dimensions = dims.dimensions || {};
+                r.pricing_type = dims.pricing_type;
+                if (dims.pricing_type === 'unit') {
+                  r.unit_label = dims.unit_label;
+                  if (!r.price && dims.unit_price) r.price = dims.unit_price;
+                }
+                r.description = dims.description;
+                r.custom_fields = dims.custom_fields;
+              } catch { /* ignore */ }
+            } else {
+              r.lookup_status = 'no_match';
+            }
+          } catch (e) {
+            console.warn('Generic lookup failed for', entry.modelName, e);
+            r.lookup_status = 'no_match';
+          }
+        }
+
         return r;
       }));
 
