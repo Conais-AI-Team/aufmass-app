@@ -317,13 +317,26 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           });
         }
       }
-      // MODÜL B v3: Aufmaß formundaki model adlarını da topla — auto-select için
-      const mainModel = (data.model || '').split(',')[0]?.trim() || '';
+      // MODÜL B v3: Aufmaß formundaki model adlarını da topla — auto-select için.
+      // data.model JSON string ('["Skyline"]') veya plain string ("Skyline,Topline")
+      // formatlarinda gelebilir. Ikisini de handle eden helper:
+      const parseModelString = (raw: unknown): string => {
+        if (!raw) return '';
+        const s = String(raw).trim();
+        if (s.startsWith('[')) {
+          try {
+            const arr = JSON.parse(s);
+            if (Array.isArray(arr) && arr.length > 0) return String(arr[0]).trim();
+          } catch { /* fall through to comma split */ }
+        }
+        return s.split(',')[0].trim();
+      };
+
+      const mainModel = parseModelString(data.model);
       const aufmassProductsWithModel = aufmassProducts.map((p, idx) => {
         if (idx === 0) return { ...p, modelName: mainModel };
         const wp = data.weitereProdukte?.[idx - 1];
-        const wpModel = (wp?.model || '').split(',')[0]?.trim() || '';
-        return { ...p, modelName: wpModel };
+        return { ...p, modelName: parseModelString(wp?.model) };
       });
 
       // Get the available product names so we only auto-select models that exist
