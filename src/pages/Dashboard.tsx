@@ -1247,39 +1247,97 @@ Aylux Team`;
   const captureSnapshot = async (formId: number, docType: FormPdfDocType): Promise<void> => {
     if (docType === 'rechnung') {
       // Rechnung-PDF generator yet to be built (handled by separate branch).
-      // Status transition still completes; snapshot can be taken later.
       return;
     }
     try {
-      const [formData, abnahmeData, abnahmeImages] = await Promise.all([
-        getForm(formId),
-        getAbnahme(formId).catch(() => null),
-        getAbnahmeImages(formId).catch(() => [])
-      ]);
+      let pdfBlob: Blob | undefined;
 
-      const pdfFormData = {
-        ...formData,
-        id: String(formData.id),
-        productSelection: {
-          category: formData.category,
-          productType: formData.productType,
-          model: formData.model ? formData.model.split(',') : []
-        },
-        specifications: formData.specifications as Record<string, string | number | boolean | string[]>,
-        bilder: formData.bilder || [],
-        customerSignature: formData.customerSignature || null,
-        signatureName: formData.signatureName || null,
-        abnahme: abnahmeData ? { ...abnahmeData, maengelBilder: abnahmeImages || [] } : undefined
-      };
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const result = await generatePDF(pdfFormData as any, {
-        returnBlob: true,
-        abnahmeOnly: docType === 'abnahme'
-      });
-      if (result?.blob) {
-        await saveFormPdfSnapshot(formId, docType, result.blob);
-        // Refresh the cached list so the dropdown immediately reflects the new snapshot
-        setFormSnapshots((prev) => ({ ...prev, [formId]: [...(prev[formId] || []).filter(s => s.document_type !== docType), { document_type: docType, created_at: new Date().toISOString() }] }));
+      if (docType === 'angebot') {
+        // MODÜL B v3: Angebot snapshots must use generateAngebotPDF, not the
+        // Aufmaß generator. Find the linked lead → fetch its angebote → render.
+        const formData = await getForm(formId);
+        if (!formData.lead_id) {
+          // No lead linked yet — nothing to snapshot
+          return;
+        }
+        const { generateAngebotPDF } = await import('../utils/angebotPdfGenerator');
+        const leadDetail = await api.get<{
+          customer_firstname?: string; customer_lastname?: string; customer_email?: string;
+          customer_phone?: string; customer_address?: string; notes?: string;
+          kunden_nummer?: string; angebot_nummer?: string;
+          subtotal?: number; total_discount?: number; total_price: number;
+          items: { product_name: string; breite: number; tiefe: number; quantity: number; unit_price: number; discount?: number; pricing_type?: 'dimension' | 'unit'; unit_label?: string; description?: string; custom_fields?: { id: string; label: string; type: string; unit?: string }[]; custom_field_values?: Record<string, string> }[];
+          extras: { description: string; price: number }[];
+        }>(`/leads/${formData.lead_id}`);
+
+        const itemDiscounts = (leadDetail.items || []).reduce((s, i) => s + (i.discount || 0), 0);
+        const result = await generateAngebotPDF({
+          customer_firstname: leadDetail.customer_firstname || '',
+          customer_lastname: leadDetail.customer_lastname || '',
+          customer_email: leadDetail.customer_email || '',
+          customer_phone: leadDetail.customer_phone,
+          customer_address: leadDetail.customer_address,
+          notes: leadDetail.notes,
+          kunden_nummer: leadDetail.kunden_nummer,
+          angebot_nummer: leadDetail.angebot_nummer,
+          items: (leadDetail.items || []).map(i => ({
+            product_name: i.product_name,
+            breite: i.breite,
+            tiefe: i.tiefe,
+            quantity: i.quantity,
+            unit_price: i.unit_price,
+            total_price: (i.unit_price * i.quantity) - (i.discount || 0),
+            discount: i.discount,
+            pricing_type: i.pricing_type,
+            unit_label: i.unit_label,
+            description: i.description,
+            custom_fields: i.custom_fields,
+            custom_field_values: i.custom_field_values,
+          })),
+          extras: leadDetail.extras || [],
+          subtotal: leadDetail.subtotal,
+          item_discounts: itemDiscounts,
+          total_discount: leadDetail.total_discount,
+          total_price: leadDetail.total_price,
+        }, { returnBlob: true });
+        pdfBlob = result?.blob;
+      } else {
+        // aufmass / abnahme — Aufmaß generator (existing behavior)
+        const [formData, abnahmeData, abnahmeImages] = await Promise.all([
+          getForm(formId),
+          getAbnahme(formId).catch(() => null),
+          getAbnahmeImages(formId).catch(() => [])
+        ]);
+
+        const pdfFormData = {
+          ...formData,
+          id: String(formData.id),
+          productSelection: {
+            category: formData.category,
+            productType: formData.productType,
+            model: formData.model ? formData.model.split(',') : []
+          },
+          specifications: formData.specifications as Record<string, string | number | boolean | string[]>,
+          bilder: formData.bilder || [],
+          customerSignature: formData.customerSignature || null,
+          signatureName: formData.signatureName || null,
+          abnahme: abnahmeData ? { ...abnahmeData, maengelBilder: abnahmeImages || [] } : undefined
+        };
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const result = await generatePDF(pdfFormData as any, {
+          returnBlob: true,
+          abnahmeOnly: docType === 'abnahme'
+        });
+        pdfBlob = result?.blob;
+      }
+
+      if (pdfBlob) {
+        await saveFormPdfSnapshot(formId, docType, pdfBlob);
+        setFormSnapshots((prev) => ({
+          ...prev,
+          [formId]: [...(prev[formId] || []).filter(s => s.document_type !== docType),
+                     { document_type: docType, created_at: new Date().toISOString() }]
+        }));
       }
     } catch (err) {
       console.warn(`Snapshot capture failed (${docType}):`, err);
@@ -2924,7 +2982,7 @@ Aylux Team`;
           setLeadModalEditData(null);
           setLeadModalFromAufmassId(null);
         }}
-        onSuccess={async (savedLeadId) => {
+        onSuccess={async (savedLeadId, sendEmail) => {
           // Capture chain state before clearing, so we can resume into
           // the Rechnung modal when the user came here via "Rechnung Entwurf"
           // status pick on a form that didn't have an Angebot yet.
@@ -2933,24 +2991,28 @@ Aylux Team`;
           setLeadModalOpen(false);
           setLeadModalEditData(null);
           setLeadModalFromAufmassId(null);
-          // MODÜL B: status-dropdown intent is "send" — flag the lead so
-          // backend cross-sync flips the linked Aufmaß to angebot_versendet.
-          if (savedLeadId) {
+          // MODÜL B v3: Save alone is NOT "versendet". Only mark as sent if
+          // the user ticked "Angebot direkt per E-Mail senden" — otherwise
+          // the form stays in "neu" / "aufmass_genommen" until manual send.
+          if (savedLeadId && sendEmail) {
             try {
               await markLeadAngebotAsSent(savedLeadId);
+              // Optimistic local update only when the status actually flipped
+              if (fromFormId) {
+                setForms(prev => prev.map(f =>
+                  f.id === fromFormId
+                    ? { ...f, status: 'angebot_versendet', statusDate: new Date().toISOString().split('T')[0] }
+                    : f
+                ));
+              }
             } catch (err) {
               console.error('mark-angebot-sent after save failed:', err);
             }
           }
-          // Optimistic update: backend cross-sync flips this form to
-          // 'angebot_versendet'. Mirror it in local state instead of
-          // reloading all 508 forms (admin sees all branches → ~MB payload).
+          // MODÜL B v3: After every Angebot save (regardless of send-flag),
+          // capture an Angebot-PDF snapshot so the dropdown shows the right doc.
           if (fromFormId) {
-            setForms(prev => prev.map(f =>
-              f.id === fromFormId
-                ? { ...f, status: 'angebot_versendet', statusDate: new Date().toISOString().split('T')[0] }
-                : f
-            ));
+            void captureSnapshot(fromFormId, 'angebot');
           }
 
           // Modul C chain: if we were on the way to creating a Rechnung,
