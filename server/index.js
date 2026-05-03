@@ -867,6 +867,26 @@ const detectBranch = (req, res, next) => {
 // Apply branch detection to all API routes
 app.use('/api', detectBranch);
 
+// Resolve the branch slug for a request that needs branch-scoped data.
+// Order:
+//   1. Subdomain (req.branchId set by detectBranch middleware)
+//   2. Explicit ?branch=<slug> query param (admin/dev convenience)
+//   3. Otherwise: send 400 — the previous behaviour was a silent fallback to
+//      'koblenz', which corrupted that branch's data whenever an admin used
+//      the main domain or localhost. Koblenz is a real branch, NOT a default.
+//
+// Returns the slug string on success, or null after sending a 400 response
+// (caller MUST `return` immediately when null).
+function resolveBranchSlug(req, res, action = 'access') {
+  if (req.branchId) return req.branchId;
+  const q = req.query && (req.query.branch || req.query.branchSlug);
+  if (q && typeof q === 'string') return q.toLowerCase();
+  res.status(400).json({
+    error: `Branch context required. Bitte über die Filiale-Subdomain (z.B. koblenz.cnsform.com) ${action === 'write' ? 'speichern' : 'aufrufen'} oder ?branch=<slug> Parameter angeben.`
+  });
+  return null;
+}
+
 // Helper: verify a form belongs to the requesting branch (returns form or null)
 async function verifyFormBranch(formId, branchId) {
   if (!branchId) return true; // admin/dev sees all
@@ -5180,7 +5200,8 @@ app.get('/api/lead-products', authenticateToken, async (req, res) => {
     // MODÜL B v3: Admin domain'inden gelen istekte de tek branch göster.
     // Aksi halde ProductPricing matrix farkli branch'lerin satirlarini karistirir
     // ve save yanlis ID'ye yazar.
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const result = await pool.query(
       `SELECT * FROM aufmass_lead_products
        WHERE branch_id = $1
@@ -5298,7 +5319,8 @@ app.put('/api/lead-products/:id', authenticateToken, async (req, res) => {
     const { product_name, breite, tiefe, price, pricing_type, unit_label } = req.body;
 
     // Verify product belongs to this branch (admin domain falls back to koblenz)
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1 AND branch_id = $2';
     const checkParams = [id, branchSlug];
 
@@ -5419,7 +5441,8 @@ app.delete('/api/lead-products/:id', authenticateToken, async (req, res) => {
 // Get unique product names
 app.get('/api/lead-products/names', authenticateToken, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const result = await pool.query(
       `SELECT DISTINCT product_name FROM aufmass_lead_products
        WHERE branch_id = $1
@@ -5443,7 +5466,8 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
   try {
     const { productName } = req.params;
     const { size_values } = req.body || {};
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
 
     if (!size_values || typeof size_values !== 'object') {
       return res.status(400).json({ error: 'size_values object required in body' });
@@ -5524,7 +5548,8 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
 app.post('/api/lead-products/upsert-from-angebot', authenticateToken, async (req, res) => {
   try {
     const { product_name, size_values, price, category, product_type, size_profile } = req.body || {};
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
 
     if (!product_name || !size_values || price == null) {
       return res.status(400).json({ error: 'product_name, size_values, price required' });
@@ -5571,7 +5596,8 @@ app.get('/api/lead-products/:productName/dimensions', authenticateToken, async (
   try {
     const { productName } = req.params;
 
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
              FROM aufmass_lead_products
              WHERE product_name = $1 AND branch_id = $2
@@ -6723,7 +6749,8 @@ app.put('/api/email/my-settings', authenticateToken, async (req, res) => {
 // GET /api/email/status - Check which SMTP is active for current user (any user)
 app.get('/api/email/status', authenticateToken, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const config = await getSmtpConfig(req.user.id, branchSlug);
     if (!config) {
       return res.json({ configured: false, source: null, from_email: null });
@@ -6738,7 +6765,8 @@ app.get('/api/email/status', authenticateToken, async (req, res) => {
 // GET /api/email/settings - Get SMTP settings for current branch (admin only)
 app.get('/api/email/settings', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const result = await pool.query(
       `SELECT smtp_host, smtp_port, smtp_user, smtp_from_name, smtp_from_email, smtp_secure, smtp_enabled
        FROM aufmass_branch_settings WHERE branch_slug = $1`,
@@ -6758,7 +6786,8 @@ app.get('/api/email/settings', authenticateToken, requireAdmin, async (req, res)
 // PUT /api/email/settings - Save SMTP settings for current branch (admin only)
 app.put('/api/email/settings', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const { smtp_host, smtp_port, smtp_user, smtp_pass, smtp_from_name, smtp_from_email, smtp_secure, smtp_enabled } = req.body;
 
     // Ensure branch_settings row exists
@@ -6848,7 +6877,8 @@ app.post('/api/email/test', authenticateToken, requireAdmin, async (req, res) =>
 // POST /api/email/send - Send email with optional PDF attachment
 app.post('/api/email/send', authenticateToken, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const { to, subject, body, body_html, form_id, lead_id, angebot_ids, rechnung_id, email_type, attachment_name, attach_agb, extra_pdfs, suppress_main_pdf } = req.body;
 
     if (!to || !subject || !body) {
@@ -7091,7 +7121,8 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
     console.error('Email send error:', err);
 
     // Log failure
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const { to, subject, form_id, lead_id, email_type } = req.body;
     await pool.query(
       `INSERT INTO aufmass_email_log (form_id, lead_id, branch_id, email_type, recipient_email, subject, status, error_message, sent_by)
@@ -7106,7 +7137,8 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
 // GET /api/email/log - Get email log for branch (admin only)
 app.get('/api/email/log', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const result = await pool.query(
       `SELECT el.*, u.name as sent_by_name
        FROM aufmass_email_log el
@@ -7127,7 +7159,8 @@ app.get('/api/email/log', authenticateToken, requireAdmin, async (req, res) => {
 // GET /api/branch/company-info — get company info for current branch (admin only)
 app.get('/api/branch/company-info', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const result = await pool.query(
       `SELECT company_name, company_strasse, company_plz, company_ort, company_telefon,
               company_email, company_ust_id, company_web, company_steuernr, company_iban,
@@ -7153,7 +7186,8 @@ app.get('/api/branch/company-info', authenticateToken, requireAdmin, async (req,
 // PUT /api/branch/company-info — save company info for current branch (admin only)
 app.put('/api/branch/company-info', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res, 'write');
+    if (!branchSlug) return;
     const {
       company_name, company_strasse, company_plz, company_ort, company_telefon,
       company_email, company_ust_id, company_web, company_steuernr, company_iban,
@@ -7210,7 +7244,8 @@ app.put('/api/branch/company-info', authenticateToken, requireAdmin, async (req,
 // GET /api/branch/company-info-public — public read for PDF generation (any authenticated user)
 app.get('/api/branch/company-info-public', authenticateToken, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const result = await pool.query(
       `SELECT company_name, company_strasse, company_plz, company_ort, company_telefon,
               company_email, company_ust_id, company_web, company_steuernr, company_iban,
@@ -7253,7 +7288,8 @@ const productImageUpload = multer({
 // GET — list product images
 app.get('/api/products/:productId/images', authenticateToken, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const productId = parseInt(req.params.productId);
     const result = await pool.query(
       `SELECT id, image_path, image_order, show_on_cover, uploaded_at
@@ -7276,7 +7312,8 @@ app.post('/api/products/:productId/images', authenticateToken, requireAdmin, (re
     if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
     try {
-      const branchSlug = req.branchId || 'koblenz';
+      const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
       const productId = parseInt(req.params.productId);
 
       const countResult = await pool.query(
@@ -7313,7 +7350,8 @@ app.post('/api/products/:productId/images', authenticateToken, requireAdmin, (re
 // DELETE — remove a product image
 app.delete('/api/products/:productId/images/:imageId', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const imageId = parseInt(req.params.imageId);
 
     const result = await pool.query(
@@ -7336,7 +7374,8 @@ app.delete('/api/products/:productId/images/:imageId', authenticateToken, requir
 // PUT — toggle cover flag (max 2 cover images per product)
 app.put('/api/products/:productId/images/:imageId/cover-flag', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const imageId = parseInt(req.params.imageId);
     const productId = parseInt(req.params.productId);
     const { show_on_cover } = req.body;
@@ -7378,7 +7417,8 @@ app.get('/api/product-image/:filename', (req, res) => {
 
 app.get('/api/branch/terms', authenticateToken, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const result = await pool.query(
       `SELECT content, show_on_aufmass, show_on_angebot, show_on_abnahme, show_on_rechnung,
               agb_pdf_path, agb_pdf_pages, attach_separately
@@ -7406,7 +7446,8 @@ app.get('/api/branch/terms', authenticateToken, async (req, res) => {
 
 app.put('/api/branch/terms', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const { content, show_on_aufmass, show_on_angebot, show_on_abnahme, show_on_rechnung, attach_separately } = req.body;
 
     const existing = await pool.query(
@@ -7443,7 +7484,8 @@ app.put('/api/branch/terms', authenticateToken, requireAdmin, async (req, res) =
 const branchPdfUpload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
-      const branchSlug = req.branchId || 'koblenz';
+      const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
       const dir = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       cb(null, dir);
@@ -7485,7 +7527,8 @@ async function getPdfPageCount(filePath) {
 
 app.get('/api/products/:productId/cover-pdf', authenticateToken, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const productId = parseInt(req.params.productId);
     const result = await pool.query(
       `SELECT id, file_path, selected_pages, page_count, uploaded_at
@@ -7524,7 +7567,8 @@ app.post('/api/products/:productId/cover-pdf', authenticateToken, requireAdmin, 
     }
 
     try {
-      const branchSlug = req.branchId || 'koblenz';
+      const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
       const productId = parseInt(req.params.productId);
 
       // Delete old PDF if exists
@@ -7560,7 +7604,8 @@ app.post('/api/products/:productId/cover-pdf', authenticateToken, requireAdmin, 
 
 app.put('/api/products/:productId/cover-pdf/pages', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const productId = parseInt(req.params.productId);
     const { selected_pages } = req.body;
 
@@ -7582,7 +7627,8 @@ app.put('/api/products/:productId/cover-pdf/pages', authenticateToken, requireAd
 
 app.delete('/api/products/:productId/cover-pdf', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const productId = parseInt(req.params.productId);
 
     const existing = await pool.query(
@@ -7629,7 +7675,8 @@ app.post('/api/branch/agb-pdf', authenticateToken, requireAdmin, (req, res) => {
     }
 
     try {
-      const branchSlug = req.branchId || 'koblenz';
+      const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
 
       // Delete old AGB PDF if exists
       const old = await pool.query(
@@ -7672,7 +7719,8 @@ app.post('/api/branch/agb-pdf', authenticateToken, requireAdmin, (req, res) => {
 
 app.put('/api/branch/agb-pdf/pages', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const { selected_pages } = req.body;
     if (!Array.isArray(selected_pages) || selected_pages.some(p => typeof p !== 'number' || p < 1)) {
       return res.status(400).json({ error: 'Ungültige Seitenauswahl' });
@@ -7691,7 +7739,8 @@ app.put('/api/branch/agb-pdf/pages', authenticateToken, requireAdmin, async (req
 
 app.delete('/api/branch/agb-pdf', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
     const existing = await pool.query(
       'SELECT agb_pdf_path FROM aufmass_branch_terms WHERE branch_slug = $1',
       [branchSlug]
@@ -7718,7 +7767,8 @@ app.get('/api/branch-pdf/:filename', authenticateToken, (req, res) => {
   if (!/^[\w\-.]+\.pdf$/i.test(filename)) {
     return res.status(400).json({ error: 'Invalid filename' });
   }
-  const branchSlug = req.branchId || 'koblenz';
+  const branchSlug = resolveBranchSlug(req, res);
+  if (!branchSlug) return;
   const filePath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, filename);
   if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
   res.sendFile(filePath);
