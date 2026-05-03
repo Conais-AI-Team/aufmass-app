@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getPdfUrl, getPdfStatus, getForm, savePdf, getBranchFeatures, sendAesSignature, sendAbnahmeAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl, markLeadAngebotAsSent, markFormPostSent } from '../services/api';
+import { api, getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getForm, savePdf, getBranchFeatures, sendAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl, markLeadAngebotAsSent, markFormPostSent } from '../services/api';
 import type { BranchFeatures, EsignatureStatus, EsignatureRequest, AngebotItem, SignatureNotification, FormPdfDocType, FormPdfSnapshot } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import type { AbnahmeImage } from '../services/api';
@@ -198,7 +198,6 @@ const Dashboard = () => {
   const [branchFeatures, setBranchFeatures] = useState<BranchFeatures | null>(null);
   const [esignatureStatuses, setEsignatureStatuses] = useState<Record<number, EsignatureStatus>>({});
   const [esignatureLoading, setEsignatureLoading] = useState<number | null>(null);
-  const [abnahmeSignatureLoading, setAbnahmeSignatureLoading] = useState(false);
   const [refreshingSignatures, setRefreshingSignatures] = useState<Set<number>>(new Set());
 
 
@@ -1016,27 +1015,6 @@ Aylux Team`;
   };
 
   // Send Abnahme signature
-  const handleSendAbnahmeSignature = async () => {
-    if (!abnahmeFormId) return;
-
-    setAbnahmeSignatureLoading(true);
-    try {
-      // First ensure PDF exists
-      await ensurePdfExists(abnahmeFormId, true);
-
-      await sendAbnahmeAesSignature(abnahmeFormId);
-      toast.success('Signatur gesendet', 'Abnahme E-Signatur wurde an den Kunden gesendet.');
-
-      // Refresh signature status
-      loadEsignatureStatus(abnahmeFormId);
-    } catch (err) {
-      console.error('Error sending Abnahme signature:', err);
-      toast.error('Fehler', err instanceof Error ? err.message : 'Fehler beim Senden der Abnahme Signatur');
-    } finally {
-      setAbnahmeSignatureLoading(false);
-    }
-  };
-
   // ============ ANGEBOT HANDLERS ============
 
   // Update angebot item
@@ -1172,35 +1150,6 @@ Aylux Team`;
   };
 
   // Get signature status label and color
-  const getSignatureStatusDisplay = (status: string): { label: string; color: string } => {
-    switch (status) {
-      case 'signed': return { label: 'Unterschrieben', color: '#10b981' };
-      case 'pending': return { label: 'Ausstehend', color: '#f59e0b' };
-      case 'viewed': return { label: 'Angesehen', color: '#3b82f6' };
-      case 'signing': return { label: 'Wird unterschrieben', color: '#8b5cf6' };
-      case 'declined': return { label: 'Abgelehnt', color: '#ef4444' };
-      case 'expired': return { label: 'Abgelaufen', color: '#6b7280' };
-      case 'failed': return { label: 'Fehlgeschlagen', color: '#ef4444' };
-      default: return { label: status, color: '#6b7280' };
-    }
-  };
-
-  // Download signed document
-  const handleDownloadSignedDocument = async (documentId: string, docType: string) => {
-    try {
-      const blob = await downloadBoldSignDocument(documentId);
-      const url = URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `signed-${docType}-${documentId}.pdf`;
-      a.click();
-      URL.revokeObjectURL(url);
-    } catch (err) {
-      console.error('Error downloading signed document:', err);
-      toast.error('Fehler', 'Signiertes Dokument konnte nicht heruntergeladen werden.');
-    }
-  };
-
   // E-signature available for these statuses (BoldSign AES only)
   const canSendEsignature = (status: string): boolean => {
     return ['neu', 'angebot_versendet', 'abnahme'].includes(status);
@@ -1222,6 +1171,9 @@ Aylux Team`;
   // Open stored PDF in new tab - regenerate if outdated
   const [, setPdfGenerating] = useState<number | null>(null);
 
+  // DEAD CODE — kept commented out for reference. Replaced by handlePdfTypeClick
+  // (snapshot-aware) below. Restore if the old "regenerate-on-open" flow is needed.
+  /*
   const handleOpenPDF = async (formId: number, docType?: FormPdfDocType) => {
     // If a specific snapshot is requested, open it directly (frozen historical PDF)
     if (docType) {
@@ -1292,6 +1244,7 @@ Aylux Team`;
       window.open(cacheBustUrl, '_blank');
     }
   };
+  */
 
   // Map a status transition to the document type whose snapshot should be captured.
   // Only transitions that *change* what the PDF would contain trigger a snapshot.

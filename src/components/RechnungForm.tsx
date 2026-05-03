@@ -41,9 +41,12 @@ const RechnungForm = ({ formId, type, onClose, onSaved }: RechnungFormProps) => 
   const [sendEmailFlag, setSendEmailFlag] = useState<boolean>(true);
 
   const [items, setItems] = useState<RechnungItem[]>([]);
-  const [netto, setNetto] = useState<number>(0);
+  // netto / mwstBetrag are setter-only: the displayed values are derived from
+  // `displayBrutto` (anzahlung-aware). Setters still feed local state in case
+  // a future flow needs the raw Angebot numbers.
+  const [, setNetto] = useState<number>(0);
   const [mwstSatz, setMwstSatz] = useState<number>(19);
-  const [mwstBetrag, setMwstBetrag] = useState<number>(0);
+  const [, setMwstBetrag] = useState<number>(0);
   const [brutto, setBrutto] = useState<number>(0);
   const [anzahlungen, setAnzahlungen] = useState<Anzahlung[]>([]);
   // Anzahlungsbetrag (deposit-only invoice): the user picks how much of the
