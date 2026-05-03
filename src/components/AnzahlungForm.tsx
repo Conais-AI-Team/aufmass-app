@@ -10,6 +10,7 @@ import {
   getRechnungPdfUrl,
   saveRechnungPdf,
   parseRechnungItems,
+  markRechnungPaid,
   uploadTempFile,
   num,
   type Anzahlung,
@@ -65,6 +66,52 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
       });
     } catch (err) {
       toast.error('Fehler', err instanceof Error ? err.message : 'Rechnung konnte nicht geladen werden.');
+    }
+  };
+
+  // User confirms the customer paid the Anzahlungsrechnung. Backend flips
+  // status='bezahlt' and auto-creates an Anzahlung receipt — we just refresh
+  // local state so the totals update without a full page reload.
+  const handleMarkRechnungPaid = async (rechnung: Rechnung) => {
+    if (!confirm(`Anzahlung über ${formatPrice(num(rechnung.brutto_betrag))} EUR als erhalten markieren?`)) return;
+    try {
+      await markRechnungPaid(rechnung.id);
+      const [freshAnz, freshRech] = await Promise.all([
+        getAnzahlungenByForm(formId),
+        getRechnungenByForm(formId),
+      ]);
+      setList(freshAnz);
+      setAnzahlungsRechnungen(freshRech.filter(r => r.type === 'anzahlungsrechnung'));
+      toast.success('Markiert', `${formatPrice(num(rechnung.brutto_betrag))} EUR als erhalten verbucht.`);
+      onSaved?.();
+    } catch (err) {
+      toast.error('Fehler', err instanceof Error ? err.message : 'Konnte nicht als bezahlt markiert werden.');
+    }
+  };
+
+  // "Nicht erhalten" → if Zahlungsziel passed, open a Mahnung email modal so
+  // the user can dispatch a friendly reminder. Before the due date, we just
+  // toast — no need to push a reminder yet.
+  const handleRemindRechnung = async (rechnung: Rechnung) => {
+    const todayDate = new Date(); todayDate.setHours(0, 0, 0, 0);
+    const ziel = new Date(rechnung.zahlungsziel); ziel.setHours(0, 0, 0, 0);
+    if (todayDate <= ziel) {
+      const tageOffen = Math.ceil((ziel.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24));
+      toast.info('Zahlungsziel noch offen', `Noch ${tageOffen} Tag(e) bis zum Zahlungsziel (${ziel.toLocaleDateString('de-DE')}).`);
+      return;
+    }
+    try {
+      const r = await getRechnung(rechnung.id);
+      const tageUeberfaellig = Math.floor((todayDate.getTime() - ziel.getTime()) / (1000 * 60 * 60 * 24));
+      setEmailComposer({
+        to: r.kunde_email || '',
+        subject: `Zahlungserinnerung: Anzahlungsrechnung ${r.rechnung_nr}`,
+        body: `Sehr geehrte/r ${r.kunde_vorname || ''} ${r.kunde_nachname || ''},\n\nin unserem System ist Ihre Zahlung zu folgender Rechnung noch nicht eingegangen:\n\n  Rechnungsnummer: ${r.rechnung_nr}\n  Rechnungsdatum: ${new Date(r.rechnungsdatum).toLocaleDateString('de-DE')}\n  Zahlungsziel: ${ziel.toLocaleDateString('de-DE')} (${tageUeberfaellig} Tag(e) überfällig)\n  Offener Betrag: ${formatPrice(num(r.brutto_betrag))} EUR\n\nWir bitten Sie, den ausstehenden Betrag in den nächsten Tagen zu überweisen. Sollten Sie die Zahlung bereits veranlasst haben, betrachten Sie dieses Schreiben bitte als gegenstandslos.\n\nBei Fragen stehen wir Ihnen jederzeit gerne zur Verfügung.\n\nMit freundlichen Grüßen`,
+        rechnungId: r.id,
+        rechnungNr: r.rechnung_nr,
+      });
+    } catch (err) {
+      toast.error('Fehler', err instanceof Error ? err.message : 'Erinnerung konnte nicht vorbereitet werden.');
     }
   };
 
@@ -253,7 +300,9 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
           {/* Issued Anzahlungsrechnungen — what we've billed the customer for.
               Distinct from received payments below: an invoice exists once it's
               been created in the Rechnung-Modal, regardless of whether the
-              customer has paid yet. */}
+              customer has paid yet. Two row-actions:
+                ✓ confirm payment received → flips status + auto-creates receipt
+                🔔 send Mahnung → only if Zahlungsziel passed; toast otherwise */}
           {anzahlungsRechnungen.length > 0 && (
             <>
               <div style={sectionTitle}>Anzahlungsrechnungen (ausgestellt)</div>
@@ -264,10 +313,11 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
                     : r.status === 'gesendet'
                       ? { label: 'Gesendet', color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' }
                       : { label: 'Entwurf', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' };
+                  const isPaid = r.status === 'bezahlt';
                   return (
                     <div key={r.id} style={{
-                      display: 'grid', gridTemplateColumns: '110px 1fr 90px 130px 32px',
-                      gap: '8px', alignItems: 'center', padding: '8px 12px',
+                      display: 'grid', gridTemplateColumns: '110px 1fr 90px 110px 28px 28px 28px',
+                      gap: '6px', alignItems: 'center', padding: '8px 12px',
                       background: i % 2 ? 'var(--bg-secondary)' : 'transparent',
                       fontSize: '13px',
                     }}>
@@ -279,14 +329,51 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
                         fontSize: '11px', fontWeight: 600,
                         color: statusInfo.color, background: statusInfo.bg,
                       }}>{statusInfo.label}</span>
+                      {/* Action: mark paid */}
+                      <button
+                        onClick={() => handleMarkRechnungPaid(r)}
+                        disabled={isPaid}
+                        title={isPaid ? 'Bereits als bezahlt markiert' : 'Zahlung erhalten — als bezahlt markieren'}
+                        style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          width: '28px', height: '28px', borderRadius: '6px',
+                          background: isPaid ? 'transparent' : 'rgba(16,185,129,0.1)',
+                          border: `1px solid ${isPaid ? 'var(--border-primary)' : 'rgba(16,185,129,0.3)'}`,
+                          color: isPaid ? 'var(--text-tertiary)' : '#10b981',
+                          cursor: isPaid ? 'not-allowed' : 'pointer',
+                          opacity: isPaid ? 0.4 : 1,
+                          padding: 0,
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" width="14" height="14"><polyline points="20 6 9 17 4 12" /></svg>
+                      </button>
+                      {/* Action: remind / Mahnung */}
+                      <button
+                        onClick={() => handleRemindRechnung(r)}
+                        disabled={isPaid}
+                        title={isPaid ? 'Bereits bezahlt — keine Erinnerung nötig' : 'Zahlung nicht erhalten — Erinnerung senden'}
+                        style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          width: '28px', height: '28px', borderRadius: '6px',
+                          background: isPaid ? 'transparent' : 'rgba(245,158,11,0.1)',
+                          border: `1px solid ${isPaid ? 'var(--border-primary)' : 'rgba(245,158,11,0.3)'}`,
+                          color: isPaid ? 'var(--text-tertiary)' : '#f59e0b',
+                          cursor: isPaid ? 'not-allowed' : 'pointer',
+                          opacity: isPaid ? 0.4 : 1,
+                          padding: 0,
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" /></svg>
+                      </button>
+                      {/* PDF link */}
                       <a
                         href={getRechnungPdfUrl(r.id)}
                         target="_blank"
                         rel="noopener noreferrer"
                         title="Rechnung-PDF öffnen"
-                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)', textDecoration: 'none' }}
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', color: 'var(--text-tertiary)', textDecoration: 'none', border: '1px solid var(--border-primary)' }}
                       >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
                       </a>
                     </div>
                   );

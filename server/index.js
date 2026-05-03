@@ -2994,6 +2994,56 @@ app.put('/api/rechnungen/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// POST /api/rechnungen/:id/mark-paid — user confirms the customer has paid
+// this Anzahlungsrechnung. Flips the invoice to status='bezahlt' AND auto-
+// creates a matching Anzahlung receipt so the running totals on the
+// Anzahlungen-Modal update without a second manual entry. Idempotent: if
+// status is already 'bezahlt' or a receipt already exists, the duplicate
+// is skipped instead of erroring.
+app.post('/api/rechnungen/:id/mark-paid', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await verifyRechnungBranch(id, req.branchId);
+    if (!existing) return res.status(404).json({ error: 'Rechnung not found' });
+
+    const r = await pool.query(
+      `SELECT id, type, status, brutto_betrag, form_id, branch_id
+         FROM aufmass_rechnungen WHERE id = $1`, [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Rechnung not found' });
+    const rechnung = r.rows[0];
+    if (rechnung.type !== 'anzahlungsrechnung') {
+      return res.status(400).json({ error: 'Only Anzahlungsrechnungen can be marked paid here' });
+    }
+
+    if (rechnung.status !== 'bezahlt') {
+      await pool.query(
+        `UPDATE aufmass_rechnungen
+           SET status = 'bezahlt', paid_at = COALESCE(paid_at, NOW())
+         WHERE id = $1`, [id]);
+    }
+
+    // Mirror the payment into aufmass_anzahlungen so the totals reflect the
+    // received cash. Skip if a receipt for this rechnung already exists
+    // (user clicked twice, or admin pre-recorded the receipt).
+    const dup = await pool.query(
+      'SELECT id FROM aufmass_anzahlungen WHERE rechnung_id = $1', [id]);
+    if (dup.rows.length === 0) {
+      await pool.query(
+        `INSERT INTO aufmass_anzahlungen
+           (form_id, rechnung_id, betrag, zahlungsdatum, zahlungsmethode, notiz, branch_id, created_by)
+         VALUES ($1, $2, $3, CURRENT_DATE, 'überweisung', $4, $5, $6)`,
+        [rechnung.form_id, id, rechnung.brutto_betrag,
+         `Bestätigt aus Anzahlungsrechnung`, rechnung.branch_id, req.user.id]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error marking Rechnung paid:', err);
+    res.status(500).json({ error: 'Failed to mark as paid' });
+  }
+});
+
 // POST /api/rechnungen/:id/mark-sent — admin manually marks paper-mailed invoice as sent
 app.post('/api/rechnungen/:id/mark-sent', authenticateToken, requireAdmin, async (req, res) => {
   try {

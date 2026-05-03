@@ -1761,6 +1761,12 @@ export const updateRechnung = (id: number, payload: UpdateRechnungPayload): Prom
 export const markRechnungSent = (id: number): Promise<{ success: boolean; form_status: string }> =>
   api.post(`/rechnungen/${id}/mark-sent`);
 
+// Confirm customer paid this Anzahlungsrechnung. Backend flips status to
+// 'bezahlt' and auto-creates a matching Anzahlung receipt — no second
+// manual entry needed.
+export const markRechnungPaid = (id: number): Promise<{ success: boolean }> =>
+  api.post(`/rechnungen/${id}/mark-paid`);
+
 export async function saveRechnungPdf(id: number, pdfBlob: Blob): Promise<{ success: boolean; size: number }> {
   const token = getStoredToken();
   const response = await fetch(`${API_BASE_URL}/rechnungen/${id}/pdf`, {
