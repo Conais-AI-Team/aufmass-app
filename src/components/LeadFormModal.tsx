@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl, lookupLeadProductBySize } from '../services/api';
 import type { FormData as AufmassFormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
-import { getSizeProfileForType, PROFILE_AXES, AXIS_LABELS, extractSizeValues, parseModelList, type SizeProfile } from '../utils/sizeProfile';
+import { getSizeProfileForType, PROFILE_AXES, extractSizeValues, parseModelList, type SizeProfile } from '../utils/sizeProfile';
 import { MARKETING_SOURCES } from '../utils/marketingSources';
 import './LeadFormModal.css';
 
