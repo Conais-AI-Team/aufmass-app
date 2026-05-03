@@ -6,12 +6,14 @@ import {
   deleteAnzahlung,
   getAngebot,
   getRechnung,
+  getRechnungenByForm,
   getRechnungPdfUrl,
   saveRechnungPdf,
   parseRechnungItems,
   uploadTempFile,
   num,
   type Anzahlung,
+  type Rechnung,
 } from '../services/api';
 import { generateRechnungPDF } from '../utils/rechnungPdfGenerator';
 import { useToast } from './Toast';
@@ -30,6 +32,9 @@ const formatPrice = (n: number) =>
 const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
   const toast = useToast();
   const [list, setList] = useState<Anzahlung[]>([]);
+  // All Anzahlungsrechnungen issued for this form — surfaced here so the
+  // back-office can see what has been billed vs what has actually arrived.
+  const [anzahlungsRechnungen, setAnzahlungsRechnungen] = useState<Rechnung[]>([]);
   const [bruttoSumme, setBruttoSumme] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -67,13 +72,15 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
     let cancelled = false;
     (async () => {
       try {
-        const [angebot, anzahlungen] = await Promise.all([
+        const [angebot, anzahlungen, rechnungen] = await Promise.all([
           getAngebot(formId).catch(() => null),
           getAnzahlungenByForm(formId).catch(() => []),
+          getRechnungenByForm(formId).catch(() => []),
         ]);
         if (cancelled) return;
         setBruttoSumme(angebot?.summary ? num(angebot.summary.brutto_summe) : 0);
         setList(anzahlungen);
+        setAnzahlungsRechnungen(rechnungen.filter(r => r.type === 'anzahlungsrechnung'));
       } catch (err) {
         console.error('Error loading Anzahlungen:', err);
       } finally {
@@ -84,6 +91,10 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
   }, [formId]);
 
   const totalReceived = list.reduce((sum, a) => sum + num(a.betrag), 0);
+  // Sum of issued Anzahlungsrechnungen (regardless of payment status) — this is
+  // what the customer has been asked to pay so far. Distinct from totalReceived
+  // which only counts cash actually arrived.
+  const totalAusgestellt = anzahlungsRechnungen.reduce((sum, r) => sum + num(r.brutto_betrag), 0);
   const remaining = Math.max(0, bruttoSumme - totalReceived);
 
   const reset = () => {
@@ -217,11 +228,15 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
           <div style={{
             padding: '12px 14px', borderRadius: '10px', marginBottom: '14px',
             background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
-            display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px',
+            display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px',
           }}>
             <div>
               <div style={summaryLabel}>Gesamtsumme (Brutto)</div>
               <div style={summaryValue}>{formatPrice(bruttoSumme)} EUR</div>
+            </div>
+            <div>
+              <div style={summaryLabel}>In Rechnung gestellt</div>
+              <div style={{ ...summaryValue, color: '#a78bfa' }}>{formatPrice(totalAusgestellt)} EUR</div>
             </div>
             <div>
               <div style={summaryLabel}>Bisher erhalten</div>
@@ -235,12 +250,57 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
             </div>
           </div>
 
-          <div style={sectionTitle}>Erfasste Anzahlungen</div>
+          {/* Issued Anzahlungsrechnungen — what we've billed the customer for.
+              Distinct from received payments below: an invoice exists once it's
+              been created in the Rechnung-Modal, regardless of whether the
+              customer has paid yet. */}
+          {anzahlungsRechnungen.length > 0 && (
+            <>
+              <div style={sectionTitle}>Anzahlungsrechnungen (ausgestellt)</div>
+              <div style={{ marginBottom: '14px', border: '1px solid var(--border-primary)', borderRadius: '8px', overflow: 'hidden' }}>
+                {anzahlungsRechnungen.map((r, i) => {
+                  const statusInfo = r.status === 'bezahlt'
+                    ? { label: 'Bezahlt', color: '#10b981', bg: 'rgba(16,185,129,0.12)' }
+                    : r.status === 'gesendet'
+                      ? { label: 'Gesendet', color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' }
+                      : { label: 'Entwurf', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' };
+                  return (
+                    <div key={r.id} style={{
+                      display: 'grid', gridTemplateColumns: '110px 1fr 90px 130px 32px',
+                      gap: '8px', alignItems: 'center', padding: '8px 12px',
+                      background: i % 2 ? 'var(--bg-secondary)' : 'transparent',
+                      fontSize: '13px',
+                    }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>{new Date(r.rechnungsdatum).toLocaleDateString('de-DE')}</span>
+                      <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{r.rechnung_nr}</span>
+                      <span style={{ fontWeight: 600, color: 'var(--text-primary)', textAlign: 'right' }}>{formatPrice(num(r.brutto_betrag))} EUR</span>
+                      <span style={{
+                        textAlign: 'center', padding: '3px 8px', borderRadius: '999px',
+                        fontSize: '11px', fontWeight: 600,
+                        color: statusInfo.color, background: statusInfo.bg,
+                      }}>{statusInfo.label}</span>
+                      <a
+                        href={getRechnungPdfUrl(r.id)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Rechnung-PDF öffnen"
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', color: 'var(--text-tertiary)', textDecoration: 'none' }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="16" height="16"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                      </a>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          <div style={sectionTitle}>Erhaltene Zahlungen</div>
           {loading ? (
             <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px' }}>Wird geladen...</div>
           ) : list.length === 0 ? (
             <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px', border: '1px dashed var(--border-primary)', borderRadius: '8px', marginBottom: '14px' }}>
-              Noch keine Anzahlungen erfasst.
+              Noch keine Zahlung vom Kunden eingegangen.
             </div>
           ) : (
             <div style={{ marginBottom: '14px', border: '1px solid var(--border-primary)', borderRadius: '8px', overflow: 'hidden' }}>
@@ -289,7 +349,7 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
             </div>
           )}
 
-          <div style={sectionTitle}>Neue Anzahlung erfassen</div>
+          <div style={sectionTitle}>Eingang einer Zahlung erfassen</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
             <div>
               <label style={labelStyle}>Betrag (EUR)</label>
