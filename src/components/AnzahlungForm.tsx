@@ -196,13 +196,18 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
         }}
       >
         <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
           padding: '16px 20px', borderBottom: '1px solid var(--border-primary)',
           background: 'var(--bg-secondary)',
         }}>
-          <span style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>
-            Anzahlungen verwalten
-          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <span style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>
+              Anzahlungen verwalten
+            </span>
+            <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.4 }}>
+              Hier erfassen Sie eingegangene Zahlungen vom Kunden. Die Schlussrechnung über den Restbetrag wird später im Status „Abnahme" erstellt.
+            </span>
+          </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-tertiary)', borderRadius: '6px' }}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18"><path d="M18 6L6 18M6 6l12 12" /></svg>
           </button>

@@ -4,6 +4,7 @@ import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl, lookupLeadProdu
 import type { FormData as AufmassFormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
 import { getSizeProfileForType, PROFILE_AXES, AXIS_LABELS, extractSizeValues, parseModelList, type SizeProfile } from '../utils/sizeProfile';
+import { MARKETING_SOURCES } from '../utils/marketingSources';
 import './LeadFormModal.css';
 
 interface AngebotData {
@@ -37,6 +38,7 @@ interface EditLeadData {
   customer_email: string;
   customer_phone?: string;
   customer_address?: string;
+  marketing_source?: string | null;
   notes?: string;
   subtotal?: number;
   total_discount?: number;
@@ -153,6 +155,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
+  const [marketingSource, setMarketingSource] = useState('');
   const [notes, setNotes] = useState('');
 
   // Products
@@ -202,6 +205,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         setEmail(editData.customer_email || '');
         setPhone(editData.customer_phone || '');
         setAddress(editData.customer_address || '');
+        setMarketingSource(editData.marketing_source || '');
         setNotes('');
         setTotalDiscount(0);
         setProductRows([createEmptyRow()]);
@@ -221,6 +225,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         setEmail(editData.customer_email || '');
         setPhone(editData.customer_phone || '');
         setAddress(editData.customer_address || '');
+        setMarketingSource(editData.marketing_source || '');
         // If editing a specific angebot, use that angebot's data
         const targetAngebot = editAngebotId && editData.angebote
           ? editData.angebote.find(a => a.id === editAngebotId)
@@ -732,6 +737,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
       customer_email: email.trim(),
       customer_phone: phone.trim() || null,
       customer_address: address.trim() || null,
+      marketing_source: marketingSource || null,
       notes: notes.trim() || null,
     };
 
@@ -1035,6 +1041,20 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                     readOnly={isNewAngebotMode}
                     style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
                   />
+                </div>
+                <div className="form-group full-width">
+                  <label>Wie sind Sie auf uns aufmerksam geworden?</label>
+                  <select
+                    value={marketingSource}
+                    onChange={e => setMarketingSource(e.target.value)}
+                    disabled={isNewAngebotMode}
+                    style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
+                  >
+                    <option value="">Bitte auswählen...</option>
+                    {MARKETING_SOURCES.map((s) => (
+                      <option key={s.value} value={s.value}>{s.label}</option>
+                    ))}
+                  </select>
                 </div>
               </div>
             </section>

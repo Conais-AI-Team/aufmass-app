@@ -3,6 +3,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { ServerImage } from '../types';
 import { deleteImage, getImageUrl } from '../services/api';
 import { useToast } from './Toast';
+import { compressImages } from '../utils/imageCompress';
 import SignatureCanvas from './SignatureCanvas';
 import './FinalSection.css';
 import './SectionStyles.css';
@@ -118,12 +119,15 @@ const FinalSection = ({
     }
   };
 
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files ? Array.from(e.target.files) : [];
-    const newFiles = [...bilder, ...files].slice(0, 10); // Max 10 files
-    updateBilder(newFiles);
-    // Reset input so same file can be selected again
+  const handleFileSelect = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const picked = e.target.files ? Array.from(e.target.files) : [];
+    // Reset input immediately so the same file can be re-selected after a removal.
     e.target.value = '';
+    // Compress images client-side before they enter form state — drops phone
+    // photos from 3-8 MB to ~500 KB. Non-image files (PDFs) pass through.
+    const processed = await compressImages(picked);
+    const newFiles = [...bilder, ...processed].slice(0, 10); // Max 10 files
+    updateBilder(newFiles);
   };
 
   const removeImage = async (index: number) => {
