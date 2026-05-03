@@ -7127,7 +7127,16 @@ app.get('/api/email/log', authenticateToken, requireAdmin, async (req, res) => {
 // GET /api/branch/company-info — get company info for current branch (admin only)
 app.get('/api/branch/company-info', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    // No branch context = admin domain access. Refuse rather than fall back to
+    // 'koblenz' — that fallback caused admin edits on the main domain to silently
+    // overwrite the Koblenz branch's data, surfacing as "my data appears in
+    // someone else's branch".
+    const branchSlug = req.branchId;
+    if (!branchSlug) {
+      return res.status(400).json({
+        error: 'Branch context required. Bitte über die Filiale-Subdomain (z.B. koblenz.cnsform.com) auf die Firmenangaben zugreifen.'
+      });
+    }
     const result = await pool.query(
       `SELECT company_name, company_strasse, company_plz, company_ort, company_telefon,
               company_email, company_ust_id, company_web, company_steuernr, company_iban,
@@ -7153,7 +7162,14 @@ app.get('/api/branch/company-info', authenticateToken, requireAdmin, async (req,
 // PUT /api/branch/company-info — save company info for current branch (admin only)
 app.put('/api/branch/company-info', authenticateToken, requireAdmin, async (req, res) => {
   try {
-    const branchSlug = req.branchId || 'koblenz';
+    // Same fallback removal as the GET above — silent koblenz writes from the
+    // admin domain were the root cause of cross-branch data bleed.
+    const branchSlug = req.branchId;
+    if (!branchSlug) {
+      return res.status(400).json({
+        error: 'Branch context required. Bitte über die Filiale-Subdomain (z.B. koblenz.cnsform.com) speichern.'
+      });
+    }
     const {
       company_name, company_strasse, company_plz, company_ort, company_telefon,
       company_email, company_ust_id, company_web, company_steuernr, company_iban,
