@@ -70,8 +70,10 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
   };
 
   // User confirms the customer paid the Anzahlungsrechnung. Backend flips
-  // status='bezahlt' and auto-creates an Anzahlung receipt — we just refresh
-  // local state so the totals update without a full page reload.
+  // status='bezahlt' and auto-creates an Anzahlung receipt. We refresh only
+  // this modal's local state — onSaved? is intentionally NOT called here
+  // because the parent's onSaved triggers a 494-form reload via loadData(),
+  // which made the modal flicker / appear to re-open.
   const handleMarkRechnungPaid = async (rechnung: Rechnung) => {
     if (!confirm(`Anzahlung über ${formatPrice(num(rechnung.brutto_betrag))} EUR als erhalten markieren?`)) return;
     try {
@@ -83,7 +85,6 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
       setList(freshAnz);
       setAnzahlungsRechnungen(freshRech.filter(r => r.type === 'anzahlungsrechnung'));
       toast.success('Markiert', `${formatPrice(num(rechnung.brutto_betrag))} EUR als erhalten verbucht.`);
-      onSaved?.();
     } catch (err) {
       toast.error('Fehler', err instanceof Error ? err.message : 'Konnte nicht als bezahlt markiert werden.');
     }

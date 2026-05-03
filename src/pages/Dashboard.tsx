@@ -3364,13 +3364,16 @@ Aylux Team`;
         )}
       </AnimatePresence>
 
-      {/* Anzahlung Modal (Modul C) */}
+      {/* Anzahlung Modal (Modul C) — onSaved intentionally omitted: this
+          modal manages its own state, and Anzahlung receipts don't change
+          the form status that the dashboard cards display. The previous
+          loadData() call refetched all 494 forms on every action, which
+          caused the modal to flicker / appear to re-open. */}
       <AnimatePresence>
         {anzahlungModalOpen && anzahlungFormId !== null && (
           <AnzahlungForm
             formId={anzahlungFormId}
             onClose={() => setAnzahlungModalOpen(false)}
-            onSaved={() => loadData()}
           />
         )}
       </AnimatePresence>
