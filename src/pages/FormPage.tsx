@@ -4,9 +4,13 @@ import { AnimatePresence } from 'framer-motion';
 import { AufmassForm } from '../App';
 import { FormData } from '../types';
 import { DynamicFormData } from '../types/productConfig';
-import { getForm, createForm, updateForm, uploadImages, savePdf, updateLeadStatus, getAbnahme, getAbnahmeImages, FormData as ApiFormData } from '../services/api';
+import { api, getForm, createForm, updateForm, uploadImages, savePdf, updateLeadStatus, getAbnahme, getAbnahmeImages, markLeadAngebotAsSent, FormData as ApiFormData } from '../services/api';
+import type { Rechnung, RechnungType } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import EmailComposer from '../components/EmailComposer';
+import LeadFormModal from '../components/LeadFormModal';
+import RechnungForm from '../components/RechnungForm';
+import AnzahlungForm from '../components/AnzahlungForm';
 import { useToast } from '../components/Toast';
 
 interface LeadItem {
@@ -44,7 +48,11 @@ const FormPage = () => {
   const { id } = useParams<{ id: string }>();
   const toast = useToast();
   const [initialData, setInitialData] = useState<FormData | null>(null);
-  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; formId: number } | null>(null);
+  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; formId?: number; rechnungId?: number; emailType?: string; attachmentName?: string } | null>(null);
+  // Modul C: Rechnung / Anzahlung modals
+  const [rechnungModalOpen, setRechnungModalOpen] = useState(false);
+  const [rechnungType, setRechnungType] = useState<RechnungType>('anzahlungsrechnung');
+  const [anzahlungModalOpen, setAnzahlungModalOpen] = useState(false);
   const [savedFormId, setSavedFormId] = useState<number | null>(null);
   const [savedKundeEmail, setSavedKundeEmail] = useState('');
   const [savedKundeName, setSavedKundeName] = useState('');
@@ -52,11 +60,50 @@ const FormPage = () => {
   const [error, setError] = useState<string | null>(null);
   const [formStatus, setFormStatus] = useState<string>('neu');
 
+  // MODÜL B — LeadFormModal state for the unified Angebot Versendet flow
+  // (fired from the form's status bar). When form.lead_id exists we open the
+  // modal in edit mode, otherwise in fromAufmass mode for a new lead.
+  const [leadModalOpen, setLeadModalOpen] = useState(false);
+  const [leadModalEditData, setLeadModalEditData] = useState<unknown>(null);
+  const [leadModalFromAufmassId, setLeadModalFromAufmassId] = useState<number | null>(null);
+
   // Get lead data from navigation state
   const leadState = location.state as LocationState | null;
 
   const handleStatusChange = async (newStatus: string) => {
     if (!id || id === 'new') return;
+
+    // MODÜL B — Intercept "angebot_versendet" so the user lands in
+    // LeadFormModal (Aus Aufmaß flow) instead of just flipping the status.
+    // The modal save will trigger backend cross-sync (markLeadAngebotAsSent
+    // → syncFormsFromLead) which sets the form status, so we don't update
+    // the status here. If the user cancels the modal nothing changes —
+    // mirroring the Dashboard card dropdown behaviour.
+    const baseStatus = newStatus.includes(':') ? newStatus.split(':')[0] : newStatus;
+    if (baseStatus === 'angebot_versendet') {
+      try {
+        const formId = parseInt(id);
+        const fresh = await getForm(formId);
+        const linkedLeadId = fresh.lead_id;
+        // Always pass the source Aufmaß id so the modal can render the
+        // "Aus Aufmaß" banner + photos in both fresh and edit modes.
+        setLeadModalFromAufmassId(formId);
+        if (linkedLeadId) {
+          // Edit mode — load the linked lead and open the modal on it.
+          const leadDetail = await api.get<unknown>(`/leads/${linkedLeadId}`);
+          setLeadModalEditData(leadDetail);
+        } else {
+          // No lead yet — fromAufmass mode for a new lead.
+          setLeadModalEditData(null);
+        }
+        setLeadModalOpen(true);
+      } catch (err) {
+        console.error('Failed to open Angebot modal from status bar:', err);
+        toast.error('Fehler', 'Angebot-Formular konnte nicht geöffnet werden.');
+      }
+      return;
+    }
+
     try {
       // Check if status includes date (format: status_value:2025-12-15)
       if (newStatus.includes(':')) {
@@ -75,9 +122,40 @@ const FormPage = () => {
         await updateForm(parseInt(id), { status: newStatus });
         setFormStatus(newStatus);
       }
+      // Modul C: when entering anzahlung status, open the payment management modal
+      const plainStatus = newStatus.includes(':') ? newStatus.split(':')[0] : newStatus;
+      if (plainStatus === 'anzahlung') {
+        setAnzahlungModalOpen(true);
+      }
     } catch (err) {
       console.error('Error updating status:', err);
       toast.error('Fehler', 'Status konnte nicht aktualisiert werden.');
+    }
+  };
+
+  // ============ MODUL C: RECHNUNG TRIGGER ============
+  const handleOpenRechnung = (type: RechnungType) => {
+    setRechnungType(type);
+    setRechnungModalOpen(true);
+  };
+
+  const handleRechnungSaved = (rechnung: Rechnung, opts: { sendEmail: boolean }) => {
+    setRechnungModalOpen(false);
+    // Entwurf: form goes to *_erstellt; email/mark-sent later advances to gesendet
+    const draftStatus = rechnung.type === 'schlussrechnung' ? 'schluss_rechnung_erstellt' : 'rechnung_erstellt';
+    setFormStatus(draftStatus);
+    if (opts.sendEmail && rechnung.kunde_email) {
+      const labelDe = rechnung.type === 'schlussrechnung' ? 'Schlussrechnung' : 'Anzahlungsrechnung';
+      setEmailComposer({
+        to: rechnung.kunde_email,
+        subject: `${labelDe} ${rechnung.rechnung_nr}`,
+        body: `Sehr geehrte/r ${rechnung.kunde_vorname || ''} ${rechnung.kunde_nachname || ''},\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.\n\nMit freundlichen Grüßen`,
+        rechnungId: rechnung.id,
+        emailType: rechnung.type === 'schlussrechnung' ? 'rechnung_schluss' : 'rechnung_anzahlung',
+        attachmentName: `Rechnung_${rechnung.rechnung_nr}.pdf`,
+      });
+    } else {
+      toast.success('Rechnung als Entwurf erstellt', `Nr. ${rechnung.rechnung_nr}. Per E-Mail oder manuell als „gesendet" markieren, um abzuschließen.`);
     }
   };
 
@@ -249,7 +327,8 @@ const FormPage = () => {
             createdAt: apiData.created_at,
             updatedAt: apiData.updated_at,
             customerSignature: apiData.customerSignature || null,
-            signatureName: apiData.signatureName || null
+            signatureName: apiData.signatureName || null,
+            marketingSource: apiData.marketingSource ?? null
           };
 
           setInitialData(formData);
@@ -285,6 +364,7 @@ const FormPage = () => {
         markiseData: (data.specifications as Record<string, unknown>)?.markiseData,
         weitereProdukte: data.weitereProdukte || [],
         bemerkungen: data.bemerkungen || '',
+        marketingSource: data.marketingSource ?? null,
       };
 
       // Always include signature fields to preserve them during edits
@@ -375,7 +455,8 @@ const FormPage = () => {
         specifications: data.specifications || {},
         markiseData: (data.specifications as Record<string, unknown>)?.markiseData,
         weitereProdukte: data.weitereProdukte || [],
-        bemerkungen: data.bemerkungen || ''
+        bemerkungen: data.bemerkungen || '',
+        marketingSource: data.marketingSource ?? null
       };
 
       apiData.status = 'entwurf';
@@ -388,7 +469,7 @@ const FormPage = () => {
       }
 
       toast.success('Gespeichert', 'Entwurf wurde gespeichert.');
-      navigate('/');
+      navigate('/aufmasse');
     } catch (err) {
       console.error('Error saving draft:', err);
       toast.error('Fehler', 'Entwurf konnte nicht gespeichert werden.');
@@ -396,7 +477,7 @@ const FormPage = () => {
   };
 
   const handleCancel = () => {
-    navigate('/');
+    navigate('/aufmasse');
   };
 
   if (loading) {
@@ -433,7 +514,7 @@ const FormPage = () => {
       }}>
         <p style={{ color: 'var(--text-primary)' }}>{error}</p>
         <button
-          onClick={() => navigate('/')}
+          onClick={() => navigate('/aufmasse')}
           style={{
             padding: '0.75rem 1.5rem',
             background: 'var(--primary-color)',
@@ -461,8 +542,62 @@ const FormPage = () => {
     });
   };
 
+  const numericFormId = id && id !== 'new' ? parseInt(id) : null;
+
   return (
     <>
+      {/* Modul C: Rechnung action bar — only visible for existing forms in trigger statuses */}
+      {numericFormId && (formStatus === 'auftrag_erteilt' || formStatus === 'abnahme' || formStatus === 'anzahlung') && (
+        <div style={{
+          display: 'flex', justifyContent: 'flex-end', gap: '8px',
+          padding: '10px 20px', borderBottom: '1px solid var(--border-primary)',
+          background: 'var(--bg-secondary)',
+        }}>
+          {formStatus === 'auftrag_erteilt' && (
+            <button
+              onClick={() => handleOpenRechnung('anzahlungsrechnung')}
+              style={{
+                padding: '8px 16px', borderRadius: '8px', border: '1px solid rgba(14,165,233,0.3)',
+                background: 'rgba(14,165,233,0.1)', color: '#0ea5e9',
+                fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+              Anzahlungsrechnung erstellen
+            </button>
+          )}
+          {formStatus === 'abnahme' && (
+            <button
+              onClick={() => handleOpenRechnung('schlussrechnung')}
+              style={{
+                padding: '8px 16px', borderRadius: '8px', border: '1px solid rgba(8,145,178,0.3)',
+                background: 'rgba(8,145,178,0.1)', color: '#0891b2',
+                fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+              Schlussrechnung erstellen
+            </button>
+          )}
+          {formStatus === 'anzahlung' && (
+            <button
+              onClick={() => setAnzahlungModalOpen(true)}
+              style={{
+                padding: '8px 16px', borderRadius: '8px', border: '1px solid rgba(6,182,212,0.3)',
+                background: 'rgba(6,182,212,0.1)', color: '#06b6d4',
+                fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: '6px',
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><circle cx="12" cy="12" r="10" /><line x1="12" y1="6" x2="12" y2="12" /><line x1="12" y1="12" x2="16" y2="14" /></svg>
+              Anzahlungen verwalten
+            </button>
+          )}
+        </div>
+      )}
+
       <AufmassForm
         initialData={initialData}
         onSave={handleSave}
@@ -481,8 +616,71 @@ const FormPage = () => {
             subject={emailComposer.subject}
             body={emailComposer.body}
             formId={emailComposer.formId}
-            emailType="aufmass"
+            rechnungId={emailComposer.rechnungId}
+            emailType={emailComposer.emailType || 'aufmass'}
+            attachmentName={emailComposer.attachmentName}
             onClose={() => setEmailComposer(null)}
+          />
+        )}
+      </AnimatePresence>
+      {/* MODÜL B — LeadFormModal opened from the form's status bar when the
+          user picks "Angebot Versendet". editData wins over fromAufmassId per
+          the LeadFormModal mode-precedence rules. */}
+      <LeadFormModal
+        isOpen={leadModalOpen}
+        onClose={() => {
+          setLeadModalOpen(false);
+          setLeadModalEditData(null);
+          setLeadModalFromAufmassId(null);
+        }}
+        onSuccess={async (savedLeadId) => {
+          setLeadModalOpen(false);
+          setLeadModalEditData(null);
+          setLeadModalFromAufmassId(null);
+          // MODÜL B: When the modal is opened from the status bar's "Angebot
+          // Versendet" intercept, the user's intent is already "send the
+          // offer", so flag the lead as sent immediately. Backend cross-sync
+          // (syncFormsFromLead) then flips this Aufmaß to angebot_versendet.
+          if (savedLeadId) {
+            try {
+              await markLeadAngebotAsSent(savedLeadId);
+            } catch (err) {
+              console.error('mark-angebot-sent after save failed:', err);
+            }
+          }
+          // Reload the form so the new status (set by backend cross-sync)
+          // shows up in the status bar without a manual refresh.
+          if (id && id !== 'new') {
+            try {
+              const fresh = await getForm(parseInt(id));
+              if (fresh.status) setFormStatus(fresh.status);
+            } catch (err) {
+              console.error('Reload after Angebot save failed:', err);
+            }
+          }
+        }}
+        editData={leadModalEditData as React.ComponentProps<typeof LeadFormModal>['editData']}
+        fromAufmassFormId={leadModalFromAufmassId}
+      />
+
+      {/* Modul C: Rechnung modal */}
+      <AnimatePresence>
+        {rechnungModalOpen && numericFormId && (
+          <RechnungForm
+            formId={numericFormId}
+            type={rechnungType}
+            onClose={() => setRechnungModalOpen(false)}
+            onSaved={handleRechnungSaved}
+          />
+        )}
+      </AnimatePresence>
+
+      {/* Modul C: Anzahlung modal */}
+      <AnimatePresence>
+        {anzahlungModalOpen && numericFormId && (
+          <AnzahlungForm
+            formId={numericFormId}
+            onClose={() => setAnzahlungModalOpen(false)}
           />
         )}
       </AnimatePresence>

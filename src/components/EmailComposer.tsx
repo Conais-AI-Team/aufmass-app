@@ -1,8 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion } from 'framer-motion';
-import { sendEmail, getEmailStatus, savePdf, getForm, getAbnahme, getAbnahmeImages } from '../services/api';
+import { sendEmail, getEmailStatus, savePdf, getForm, getAbnahme, getAbnahmeImages, getBranchTerms } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
-import type { EmailStatus } from '../services/api';
+import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
+import type { AngebotPdfData } from '../utils/angebotPdfGenerator';
+import type { EmailStatus, BranchTerms } from '../services/api';
 import { useToast } from './Toast';
 
 export interface AngebotAttachment {
@@ -17,14 +19,18 @@ interface EmailComposerProps {
   body: string;
   formId?: number;
   leadId?: number;
+  rechnungId?: number;
   angebote?: AngebotAttachment[];
   emailType?: string;
   attachmentName?: string;
+  /** When provided, enables the "split PDF per product" option for multi-item Angebote.
+   *  The composer will call generateAngebotPDF once per item and attach each PDF separately. */
+  angebotPdfData?: AngebotPdfData;
   onClose: () => void;
   onSent?: () => void;
 }
 
-const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId, leadId, angebote, emailType, attachmentName, onClose, onSent }: EmailComposerProps) => {
+const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId, leadId, rechnungId, angebote, emailType, attachmentName, angebotPdfData, onClose, onSent }: EmailComposerProps) => {
   const toast = useToast();
   const [subject, setSubject] = useState(initialSubject);
   const [body, setBody] = useState(initialBody);
@@ -37,7 +43,7 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
   const [pdfReady, setPdfReady] = useState(false);
   const [pdfLoading, setPdfLoading] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
-  const [pdfFileName, setPdfFileName] = useState(attachmentName || (formId ? `Aufmass_${formId}.pdf` : leadId ? `Angebot_${leadId}.pdf` : ''));
+  const [pdfFileName, setPdfFileName] = useState(attachmentName || (rechnungId ? `Rechnung_${rechnungId}.pdf` : formId ? `Aufmass_${formId}.pdf` : leadId ? `Angebot_${leadId}.pdf` : ''));
 
   // Multi-angebot selection (for leads with multiple angebote)
   const [selectedAngebote, setSelectedAngebote] = useState<Set<number>>(() => {
@@ -52,11 +58,26 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
   // For leads with pre-saved PDFs
   const isLeadPdfPreSaved = !!leadId && !!(angebote && angebote.some(a => a.ready));
 
+  // AGB attachment state — defaults to ON when branch chose "send AGB separately"
+  const [branchTerms, setBranchTerms] = useState<BranchTerms | null>(null);
+  const [attachAgb, setAttachAgb] = useState(false);
+
+  // Split-per-product state — only meaningful when angebotPdfData has > 1 item
+  const canSplitPerProduct = !!(angebotPdfData && angebotPdfData.items && angebotPdfData.items.length > 1);
+  const [splitPerProduct, setSplitPerProduct] = useState(false);
+
   useEffect(() => {
     getEmailStatus().then(status => {
       setEmailStatus(status);
       setStatusLoaded(true);
     }).catch(() => setStatusLoaded(true));
+
+    // Load branch AGB terms once — used to show toggle and pre-select per branch policy
+    getBranchTerms().then(t => {
+      setBranchTerms(t);
+      // If admin marked "attach separately" AND a PDF is uploaded, pre-select the toggle
+      if (t.attach_separately && t.agb_pdf_path) setAttachAgb(true);
+    }).catch(() => { /* AGB toggle simply hidden if fetch fails */ });
   }, []);
 
   // If lead with pre-saved PDFs, auto-enable attachment
@@ -66,6 +87,14 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
       setPdfReady(true);
     }
   }, [isLeadPdfPreSaved, attachPdf]);
+
+  // Rechnung PDF is generated server-side before EmailComposer opens
+  useEffect(() => {
+    if (rechnungId && attachPdf === null) {
+      setAttachPdf(true);
+      setPdfReady(true);
+    }
+  }, [rechnungId, attachPdf]);
 
   const handleGeneratePdf = useCallback(async () => {
     if (!formId) return;
@@ -109,25 +138,98 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
   // When user selects "Ja" for PDF
   const handleAttachPdfChange = (value: boolean) => {
     setAttachPdf(value);
-    if (value && formId && !pdfReady && !isLeadPdfPreSaved) {
+    if (value && formId && !pdfReady && !isLeadPdfPreSaved && !rechnungId) {
       handleGeneratePdf();
     }
   };
 
+  // Convert a Blob to a base64 string (without data:URL prefix) for JSON transport.
+  const blobToBase64 = (blob: Blob): Promise<string> => new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      const result = reader.result as string;
+      // Strip "data:application/pdf;base64," prefix
+      const idx = result.indexOf(',');
+      resolve(idx >= 0 ? result.slice(idx + 1) : result);
+    };
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(blob);
+  });
+
   const handleSend = async () => {
+    // Postal-only path: open the PDF in a new tab for the user to print, then close.
+    if (postalOnly) {
+      if (rechnungId) {
+        // Lazy import to avoid circular dep
+        const { getRechnungPdfUrl } = await import('../services/api');
+        window.open(getRechnungPdfUrl(rechnungId), '_blank', 'noopener');
+      } else if (formId) {
+        const { getPdfUrl } = await import('../services/api');
+        window.open(getPdfUrl(formId), '_blank', 'noopener');
+      } else if (leadId) {
+        const { getLeadPdfUrl } = await import('../services/api');
+        window.open(getLeadPdfUrl(leadId), '_blank', 'noopener');
+      }
+      toast.success('Per Post', 'PDF zum Drucken geöffnet. Status bleibt unverändert.');
+      onClose();
+      return;
+    }
+
     if (!to) { toast.warning('Keine E-Mail', 'Empfänger-E-Mail fehlt.'); return; }
     if (attachPdf === null) { toast.warning('PDF-Anhang', 'Bitte wählen Sie, ob ein PDF angehängt werden soll.'); return; }
-    if (attachPdf && !pdfReady) { toast.warning('PDF wird erstellt', 'Bitte warten Sie, bis das PDF erstellt wurde.'); return; }
+    if (attachPdf && !splitPerProduct && !pdfReady) {
+      toast.warning('PDF wird erstellt', 'Bitte warten Sie, bis das PDF erstellt wurde.');
+      return;
+    }
 
     setSending(true);
     try {
+      // Per-product split path: generate one PDF per item and attach them all.
+      // Parallelized + AGB embed skipped (AGB ships once as a separate attachment via attach_agb).
+      let extraPdfs: { filename: string; base64: string }[] | undefined;
+      if (attachPdf && splitPerProduct && angebotPdfData) {
+        try {
+          const tasks = angebotPdfData.items.map(async (item, i) => {
+            const itemTotal = item.total_price;
+            const itemDataset: AngebotPdfData = {
+              ...angebotPdfData,
+              items: [item],
+              extras: [],          // extras are not duplicated across split PDFs
+              subtotal: itemTotal,
+              item_discounts: item.discount && item.discount > 0 ? item.discount : 0,
+              total_discount: 0,
+              total_discount_percent: 0,
+              total_price: itemTotal
+            };
+            const result = await generateAngebotPDF(itemDataset, { returnBlob: true, skipAgbMerge: true });
+            if (!result?.blob) return null;
+            const safeProductName = (item.product_name || `Produkt_${i + 1}`).replace(/[^\w\-. ()äöüÄÖÜß]/g, '_').slice(0, 60);
+            const filename = `Angebot_${safeProductName}_${i + 1}.pdf`;
+            return { filename, base64: await blobToBase64(result.blob) };
+          });
+          const results = await Promise.all(tasks);
+          extraPdfs = results.filter((r): r is { filename: string; base64: string } => r !== null);
+        } catch (genErr) {
+          console.error('Split PDF generation failed:', genErr);
+          toast.error('Fehler', 'Pro-Produkt-PDFs konnten nicht erstellt werden.');
+          setSending(false);
+          return;
+        }
+      }
+
       await sendEmail({
         to, subject, body,
-        form_id: attachPdf ? formId : undefined,
+        // When splitting, suppress the consolidated PDF — extra_pdfs already covers the products.
+        // When sending a Rechnung, suppress form_id PDF — rechnung_id PDF replaces it.
+        form_id: attachPdf && !rechnungId ? formId : undefined,
         lead_id: attachPdf ? leadId : undefined,
+        rechnung_id: attachPdf ? rechnungId : undefined,
         angebot_ids: attachPdf && selectedAngebote.size > 0 ? Array.from(selectedAngebote) : undefined,
         email_type: emailType,
-        attachment_name: pdfFileName
+        attachment_name: pdfFileName,
+        attach_agb: attachAgb,
+        extra_pdfs: extraPdfs,
+        suppress_main_pdf: !!extraPdfs && extraPdfs.length > 0
       });
       toast.success('E-Mail gesendet', `E-Mail wurde an ${to} versendet.`);
       onSent?.();
@@ -139,9 +241,12 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
     }
   };
 
-  const hasPdfOption = !!(formId || leadId);
+  const hasPdfOption = !!(formId || leadId || rechnungId);
+  // Postal-only delivery: user prints the PDF and mails it themselves; close
+  // without sending an SMTP email. Only available when there's a PDF attached.
+  const [postalOnly, setPostalOnly] = useState(false);
   const canSend = statusLoaded && emailStatus?.configured && !sending && attachPdf !== null
-    && (!attachPdf || pdfReady || (hasMultiAngebote && selectedAngebote.size > 0));
+    && (!attachPdf || splitPerProduct || pdfReady || (hasMultiAngebote && selectedAngebote.size > 0));
 
   return (
     <motion.div
@@ -228,8 +333,30 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
               style={{ ...inputStyle, resize: 'vertical', lineHeight: '1.6', minHeight: '160px' }} />
           </div>
 
-          {/* PDF Attachment Toggle */}
+          {/* Postal-only delivery checkbox (skips SMTP) */}
           {hasPdfOption && (
+            <label style={{
+              display: 'flex', alignItems: 'center', gap: '8px',
+              padding: '10px 14px', borderRadius: '10px', marginBottom: '10px',
+              background: postalOnly ? 'rgba(127,169,61,0.08)' : 'var(--bg-secondary)',
+              border: `1px solid ${postalOnly ? 'rgba(127,169,61,0.3)' : 'var(--border-primary)'}`,
+              cursor: 'pointer', userSelect: 'none',
+            }}>
+              <input
+                type="checkbox"
+                checked={postalOnly}
+                onChange={(e) => setPostalOnly(e.target.checked)}
+                style={{ width: '15px', height: '15px', accentColor: '#7fa93d' }}
+              />
+              <div>
+                <div style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>Per Post versenden (kein E-Mail)</div>
+                <div style={{ fontSize: '11px', color: 'var(--text-tertiary)', marginTop: '2px' }}>PDF wird zum Ausdrucken geöffnet — keine E-Mail wird gesendet.</div>
+              </div>
+            </label>
+          )}
+
+          {/* PDF Attachment Toggle */}
+          {hasPdfOption && !postalOnly && (
             <div style={{
               padding: '14px 16px', borderRadius: '12px', marginBottom: '4px',
               background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
@@ -318,6 +445,59 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
               )}
             </div>
           )}
+
+          {/* Split-per-product Toggle — only when angebot has > 1 item */}
+          {canSplitPerProduct && attachPdf && (
+            <div style={{
+              padding: '12px 16px', borderRadius: '12px', marginTop: '8px',
+              background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
+            }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={splitPerProduct}
+                  onChange={(e) => setSplitPerProduct(e.target.checked)}
+                  style={{ width: '16px', height: '16px', accentColor: '#7fa93d', cursor: 'pointer' }}
+                />
+                <svg viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" width="16" height="16">
+                  <rect x="3" y="3" width="7" height="7" rx="1" />
+                  <rect x="14" y="3" width="7" height="7" rx="1" />
+                  <rect x="3" y="14" width="7" height="7" rx="1" />
+                  <rect x="14" y="14" width="7" height="7" rx="1" />
+                </svg>
+                <div style={{ display: 'flex', flexDirection: 'column' }}>
+                  <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>Pro Produkt einzelne PDF anhängen</span>
+                  <span style={{ fontSize: '11px', color: 'var(--text-tertiary)' }}>
+                    {angebotPdfData?.items.length} Produkte → {angebotPdfData?.items.length} separate PDFs
+                  </span>
+                </div>
+              </label>
+            </div>
+          )}
+
+          {/* AGB Attachment Toggle — only when branch has uploaded an AGB PDF */}
+          {branchTerms?.agb_pdf_path && (
+            <div style={{
+              padding: '12px 16px', borderRadius: '12px', marginTop: '8px',
+              background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
+            }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '10px', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={attachAgb}
+                  onChange={(e) => setAttachAgb(e.target.checked)}
+                  style={{ width: '16px', height: '16px', accentColor: '#7fa93d', cursor: 'pointer' }}
+                />
+                <svg viewBox="0 0 24 24" fill="none" stroke="var(--text-secondary)" strokeWidth="2" width="16" height="16">
+                  <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                  <polyline points="14 2 14 8 20 8" />
+                  <line x1="9" y1="13" x2="15" y2="13" />
+                  <line x1="9" y1="17" x2="15" y2="17" />
+                </svg>
+                <span style={{ fontSize: '13px', fontWeight: 500, color: 'var(--text-primary)' }}>AGB als separate PDF anhängen</span>
+              </label>
+            </div>
+          )}
         </div>
 
         {/* Footer */}
@@ -330,19 +510,21 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
           </button>
           <button
             onClick={handleSend}
-            disabled={!canSend}
+            disabled={postalOnly ? sending : !canSend}
             style={{
               padding: '8px 20px', borderRadius: '8px', border: 'none',
-              background: canSend ? 'linear-gradient(135deg, #7fa93d, #6a9432)' : 'var(--bg-tertiary)',
-              color: canSend ? '#fff' : 'var(--text-tertiary)',
+              background: (postalOnly || canSend) ? 'linear-gradient(135deg, #7fa93d, #6a9432)' : 'var(--bg-tertiary)',
+              color: (postalOnly || canSend) ? '#fff' : 'var(--text-tertiary)',
               fontSize: '13px', fontWeight: 600,
-              cursor: canSend ? 'pointer' : 'not-allowed',
+              cursor: (postalOnly || canSend) ? 'pointer' : 'not-allowed',
               display: 'flex', alignItems: 'center', gap: '6px',
-              boxShadow: canSend ? '0 2px 8px rgba(127,169,61,0.3)' : 'none',
+              boxShadow: (postalOnly || canSend) ? '0 2px 8px rgba(127,169,61,0.3)' : 'none',
             }}
           >
             {sending ? (
               <><div style={{ width: '14px', height: '14px', border: '2px solid rgba(255,255,255,0.3)', borderTopColor: '#fff', borderRadius: '50%', animation: 'spin 0.6s linear infinite' }} />Senden...</>
+            ) : postalOnly ? (
+              <><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><polyline points="6 9 6 2 18 2 18 9" /><path d="M6 18H4a2 2 0 01-2-2v-5a2 2 0 012-2h16a2 2 0 012 2v5a2 2 0 01-2 2h-2" /><rect x="6" y="14" width="12" height="8" /></svg>PDF zum Drucken öffnen</>
             ) : (
               <><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>Jetzt senden</>
             )}

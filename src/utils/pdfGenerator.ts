@@ -3,11 +3,16 @@ import { FormData } from '../types';
 import productConfigData from '../config/productConfig.json';
 import type { ProductConfig, FieldConfig } from '../types/productConfig';
 import { getImageUrl, getStoredToken, getAbnahmeImageUrl } from '../services/api';
+import { drawGeschaeftsbriefFooter } from './pdfFooter';
+import { drawAgbPages } from './pdf/pdfAgb';
+import { mergePdf } from './pdf/pdfMerger';
+import { getCachedBranchTerms } from './branchTermsCache';
+import { fetchBranchPdfBytes } from '../services/api';
 
 const productConfig = productConfigData as ProductConfig;
 
 // Type for server image objects
-interface ServerImage {
+export interface ServerImage {
   id: number;
   file_name: string;
   file_type: string;
@@ -110,7 +115,7 @@ const fixImageOrientation = (base64: string, orientation: number): Promise<strin
 };
 
 // Helper to get image dimensions
-const getImageDimensions = (base64: string): Promise<{ width: number; height: number }> => {
+export const getImageDimensions = (base64: string): Promise<{ width: number; height: number }> => {
   return new Promise((resolve) => {
     const img = new Image();
     img.onload = () => resolve({ width: img.width, height: img.height });
@@ -190,7 +195,7 @@ const getExifOrientationFromBase64 = (base64: string): number => {
 };
 
 // Helper to automatically fix image orientation from base64
-const fixImageOrientationAuto = async (base64: string): Promise<string> => {
+export const fixImageOrientationAuto = async (base64: string): Promise<string> => {
   const orientation = getExifOrientationFromBase64(base64);
   if (orientation <= 1) {
     return base64;
@@ -199,7 +204,7 @@ const fixImageOrientationAuto = async (base64: string): Promise<string> => {
 };
 
 // Helper to fetch server image and convert to base64 (with retry)
-const fetchServerImageAsBase64 = async (imageId: number, retries = 2): Promise<string> => {
+export const fetchServerImageAsBase64 = async (imageId: number, retries = 2): Promise<string> => {
   const url = getImageUrl(imageId);
   const token = getStoredToken();
 
@@ -245,6 +250,14 @@ export interface BranchCompanyInfoForPdf {
   company_ort?: string;
   company_telefon?: string;
   company_email?: string;
+  company_ust_id?: string;
+  company_web?: string;
+  company_steuernr?: string;
+  company_iban?: string;
+  company_bic?: string;
+  company_bank_name?: string;
+  company_geschaeftsfuehrer?: string;
+  company_handelsregister?: string;
 }
 
 export const generatePDF = async (
@@ -262,9 +275,9 @@ export const generatePDF = async (
   const margin = 20;
   let yPos = 20;
 
-  // Helper function to check if new page is needed
+  // Helper function to check if new page is needed (footer reserves ~35mm at bottom for Geschäftsbrief footer)
   const checkNewPage = (requiredSpace: number = 15) => {
-    if (yPos + requiredSpace > pageHeight - 20) {
+    if (yPos + requiredSpace > pageHeight - 35) {
       pdf.addPage();
       yPos = 20;
       return true;
@@ -272,42 +285,90 @@ export const generatePDF = async (
     return false;
   };
 
-  // Header - AYLUX Logo (sabit, branch'a göre değişmez)
+  // ============ MODERN LETTERHEAD HEADER ============
+  // Logo (sabit) — sağ üst
   pdf.setFillColor(127, 169, 61);
-  pdf.rect(pageWidth - 70, 10, 50, 25, 'F');
+  pdf.rect(pageWidth - 60, 10, 40, 20, 'F');
   pdf.setTextColor(255, 255, 255);
-  pdf.setFontSize(18);
+  pdf.setFontSize(15);
   pdf.setFont('helvetica', 'bold');
-  pdf.text('AYLUX', pageWidth - 60, 22);
-  pdf.setFontSize(7);
-  pdf.text('SONNENSCHUTZSYSTEME', pageWidth - 65, 28);
+  pdf.text('AYLUX', pageWidth - 52, 21);
+  pdf.setFontSize(6);
+  pdf.text('SONNENSCHUTZSYSTEME', pageWidth - 56, 26);
 
-  // Absender line (branch firma bilgileri — küçük tek satır üstte)
+  // Big bold company name — top-left
   if (companyInfo && companyInfo.company_name) {
-    const absenderParts: string[] = [companyInfo.company_name];
-    if (companyInfo.company_strasse) absenderParts.push(companyInfo.company_strasse);
-    if (companyInfo.company_plz || companyInfo.company_ort) {
-      absenderParts.push(`${companyInfo.company_plz || ''} ${companyInfo.company_ort || ''}`.trim());
-    }
-    if (companyInfo.company_telefon) absenderParts.push(`Tel: ${companyInfo.company_telefon}`);
-    pdf.setTextColor(120, 120, 120);
-    pdf.setFontSize(7);
+    pdf.setTextColor(25, 25, 25);
+    pdf.setFontSize(22);
+    pdf.setFont('helvetica', 'bold');
+    pdf.text(companyInfo.company_name.toUpperCase(), margin, 22);
+
+    // Thick green underline — extends from company name
+    pdf.setDrawColor(127, 169, 61);
+    pdf.setLineWidth(1.2);
+    const underlineWidth = Math.min(pdf.getTextWidth(companyInfo.company_name.toUpperCase()) + 8, pageWidth - 75 - margin);
+    pdf.line(margin, 26, margin + underlineWidth, 26);
+
+    // 3-column info row below name: Address | Contact | (logo space)
+    const infoY = 33;
+    const colWidth = (pageWidth - 75 - margin) / 2;
+    const col1X = margin;
+    const col2X = margin + colWidth + 4;
+
     pdf.setFont('helvetica', 'normal');
-    const absenderText = absenderParts.join('  ·  ');
-    const maxAbsenderWidth = pageWidth - 70 - margin - 4;
-    const absenderLines = pdf.splitTextToSize(absenderText, maxAbsenderWidth);
-    pdf.text(absenderLines, margin, 14);
+    pdf.setFontSize(9);
+    pdf.setTextColor(70, 70, 70);
+
+    // Column 1: Address
+    let c1Y = infoY;
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(7);
+    pdf.setTextColor(127, 169, 61);
+    pdf.text('ADRESSE', col1X, c1Y);
+    c1Y += 4;
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(9);
+    pdf.setTextColor(50, 50, 50);
+    if (companyInfo.company_strasse) {
+      pdf.text(companyInfo.company_strasse, col1X, c1Y);
+      c1Y += 4;
+    }
+    if (companyInfo.company_plz || companyInfo.company_ort) {
+      pdf.text(`${companyInfo.company_plz || ''} ${companyInfo.company_ort || ''}`.trim(), col1X, c1Y);
+    }
+
+    // Column 2: Kontakt
+    let c2Y = infoY;
+    pdf.setFont('helvetica', 'bold');
+    pdf.setFontSize(7);
+    pdf.setTextColor(127, 169, 61);
+    pdf.text('KONTAKT', col2X, c2Y);
+    c2Y += 4;
+    pdf.setFont('helvetica', 'normal');
+    pdf.setFontSize(9);
+    pdf.setTextColor(50, 50, 50);
+    if (companyInfo.company_telefon) {
+      pdf.text(`Tel.: ${companyInfo.company_telefon}`, col2X, c2Y);
+      c2Y += 4;
+    }
+    if (companyInfo.company_email) {
+      pdf.text(companyInfo.company_email, col2X, c2Y);
+      c2Y += 4;
+    }
+    if (companyInfo.company_web) {
+      pdf.text(companyInfo.company_web, col2X, c2Y);
+    }
   }
 
-  // Title
+  // Title — positioned below the modern letterhead (~50mm)
   pdf.setTextColor(0, 0, 0);
   pdf.setFontSize(20);
   pdf.setFont('helvetica', 'bold');
-  pdf.text(abnahmeOnly ? 'ABNAHME-PROTOKOLL' : 'AUFMASS - DATENBLATT', margin, 25);
+  pdf.text(abnahmeOnly ? 'ABNAHME-PROTOKOLL' : 'AUFMASS - DATENBLATT', margin, 60);
 
   // Abnahme-only mode: add customer info header
   if (abnahmeOnly) {
-    yPos = 38;
+    yPos = 70;
     pdf.setFontSize(10);
     pdf.setFont('helvetica', 'normal');
     pdf.setCharSpace(0);
@@ -327,7 +388,7 @@ export const generatePDF = async (
     }
     yPos += 5;
   } else {
-    yPos = 45;
+    yPos = 70;
   }
 
   // ============ ABNAHME SECTION - If exists (skip for signature PDF) ============
@@ -465,9 +526,33 @@ export const generatePDF = async (
           yPos += imgHeight + imgGap;
         }
       } else if (hasServerImages && abnahme.maengelBilder) {
-        // Fetch images from server (authenticated)
-        for (let i = 0; i < abnahme.maengelBilder.length; i++) {
-          const img = abnahme.maengelBilder[i];
+        // Parallel fetch all Mängel images, then draw sequentially.
+        // Same network-overlap optimisation as the main bilder loop above.
+        const token = getStoredToken();
+        const fetched = await Promise.all(
+          abnahme.maengelBilder.map(async (img) => {
+            try {
+              const response = await fetch(getAbnahmeImageUrl(img.id), {
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
+              });
+              if (!response.ok) return null;
+              const blob = await response.blob();
+              const base64 = await new Promise<string>((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result as string);
+                reader.readAsDataURL(blob);
+              });
+              const format: 'PNG' | 'JPEG' = img.file_type?.includes('png') ? 'PNG' : 'JPEG';
+              return { base64, format };
+            } catch (err) {
+              console.error('Error loading abnahme image:', err);
+              return null;
+            }
+          }),
+        );
+
+        for (let i = 0; i < fetched.length; i++) {
+          const data = fetched[i];
           const col = i % imagesPerRow;
           const xPos = margin + col * (imgWidth + imgGap);
 
@@ -476,26 +561,12 @@ export const generatePDF = async (
             yPos = margin;
           }
 
-          try {
-            const token = getStoredToken();
-            const imgUrl = getAbnahmeImageUrl(img.id);
-            const response = await fetch(imgUrl, {
-              headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-            });
-
-            if (response.ok) {
-              const blob = await response.blob();
-              const base64 = await new Promise<string>((resolve) => {
-                const reader = new FileReader();
-                reader.onloadend = () => resolve(reader.result as string);
-                reader.readAsDataURL(blob);
-              });
-
-              const format = img.file_type?.includes('png') ? 'PNG' : 'JPEG';
-              pdf.addImage(base64, format, xPos, yPos, imgWidth, imgHeight);
+          if (data) {
+            try {
+              pdf.addImage(data.base64, data.format, xPos, yPos, imgWidth, imgHeight);
+            } catch (err) {
+              console.error('Error adding abnahme image to PDF:', err);
             }
-          } catch (err) {
-            console.error('Error loading abnahme image:', err);
           }
 
           if (col === imagesPerRow - 1) {
@@ -1726,83 +1797,103 @@ export const generatePDF = async (
       pdf.setTextColor(0, 0, 0);
       pdf.setFontSize(10);
 
-      // Process each image (both File and ServerImage)
-      for (let i = 0; i < imageItems.length; i++) {
-        const item = imageItems[i];
-        let base64: string;
-        let fileName: string;
+      // PHASE 1 — fetch + EXIF orient + measure all images in parallel.
+      // Network-bound (server fetches) and CPU-bound (canvas re-encodes) work
+      // overlaps across images, turning N×latency into ~max(latency).
+      // PHASE 2 below draws into the PDF sequentially because jsPDF's cursor /
+      // page state is shared and must advance in deterministic order.
+      type PreparedImage =
+        | { ok: true; base64: string; fileName: string; width: number; height: number }
+        | { ok: false; fileName: string };
 
-        try {
-          if (item instanceof File) {
-            // It's a File object - get EXIF orientation and fix if needed
-            base64 = await fileToBase64(item);
-            try {
-              const orientation = await getExifOrientation(item);
-              base64 = await fixImageOrientation(base64, orientation);
-            } catch {
-              // Use original base64 if orientation fix fails
+      const prepared: PreparedImage[] = await Promise.all(
+        imageItems.map(async (item): Promise<PreparedImage> => {
+          const fileName =
+            item instanceof File
+              ? item.name
+              : isServerImage(item)
+                ? item.file_name
+                : 'Unbekannt';
+          try {
+            let base64: string;
+            if (item instanceof File) {
+              base64 = await fileToBase64(item);
+              try {
+                const orientation = await getExifOrientation(item);
+                base64 = await fixImageOrientation(base64, orientation);
+              } catch {
+                // Use original base64 if orientation fix fails
+              }
+            } else if (isServerImage(item)) {
+              base64 = await fetchServerImageAsBase64(item.id);
+              try {
+                base64 = await fixImageOrientationAuto(base64);
+              } catch {
+                // Use original base64 if orientation fix fails
+              }
+            } else {
+              return { ok: false, fileName };
             }
-            fileName = item.name;
-          } else if (isServerImage(item)) {
-            // It's a server image - fetch from server and fix orientation
-            base64 = await fetchServerImageAsBase64(item.id);
-            // Try to fix orientation for server images too (non-critical)
-            try {
-              base64 = await fixImageOrientationAuto(base64);
-            } catch {
-              // Use original base64 if orientation fix fails
-            }
-            fileName = item.file_name;
-          } else {
-            continue;
+            const dimensions = await getImageDimensions(base64);
+            return {
+              ok: true,
+              base64,
+              fileName,
+              width: dimensions.width,
+              height: dimensions.height,
+            };
+          } catch {
+            return { ok: false, fileName };
           }
+        }),
+      );
 
-          const dimensions = await getImageDimensions(base64);
-
-          // Calculate image size to fit on page
-          const maxWidth = pageWidth - 2 * margin;
-          const maxHeight = 80; // Max height per image
-
-          let imgWidth = dimensions.width;
-          let imgHeight = dimensions.height;
-
-          // Scale to fit
-          if (imgWidth > maxWidth) {
-            const ratio = maxWidth / imgWidth;
-            imgWidth = maxWidth;
-            imgHeight = imgHeight * ratio;
-          }
-
-          if (imgHeight > maxHeight) {
-            const ratio = maxHeight / imgHeight;
-            imgHeight = maxHeight;
-            imgWidth = imgWidth * ratio;
-          }
-
-          // Check if we need a new page
-          if (yPos + imgHeight + 15 > pageHeight - 20) {
-            pdf.addPage();
-            yPos = 20;
-          }
-
-          // Add image label
-          pdf.setFont('helvetica', 'bold');
-          pdf.text(`Bild ${i + 1}: ${fileName}`, margin, yPos);
-          yPos += 5;
-
-          // Add image - center it horizontally
-          const xPos = margin + (maxWidth - imgWidth) / 2;
-          pdf.addImage(base64, 'JPEG', xPos, yPos, imgWidth, imgHeight);
-
-          yPos += imgHeight + 15;
-
-        } catch (error) {
-          // If image fails to load, add a placeholder message
-          const name = item instanceof File ? item.name : (isServerImage(item) ? item.file_name : 'Unbekannt');
+      // PHASE 2 — sequential draw. Identical layout / scaling math to the prior
+      // implementation; only the prep work was parallelised.
+      for (let i = 0; i < prepared.length; i++) {
+        const p = prepared[i];
+        if (!p.ok) {
           pdf.setFont('helvetica', 'italic');
-          pdf.text(`Bild ${i + 1}: ${name} - Konnte nicht geladen werden`, margin, yPos);
+          pdf.text(`Bild ${i + 1}: ${p.fileName} - Konnte nicht geladen werden`, margin, yPos);
           yPos += 10;
+          continue;
         }
+
+        const maxWidth = pageWidth - 2 * margin;
+        const maxHeight = 80;
+        let imgWidth = p.width;
+        let imgHeight = p.height;
+
+        if (imgWidth > maxWidth) {
+          const ratio = maxWidth / imgWidth;
+          imgWidth = maxWidth;
+          imgHeight = imgHeight * ratio;
+        }
+        if (imgHeight > maxHeight) {
+          const ratio = maxHeight / imgHeight;
+          imgHeight = maxHeight;
+          imgWidth = imgWidth * ratio;
+        }
+
+        if (yPos + imgHeight + 15 > pageHeight - 20) {
+          pdf.addPage();
+          yPos = 20;
+        }
+
+        pdf.setFont('helvetica', 'bold');
+        pdf.text(`Bild ${i + 1}: ${p.fileName}`, margin, yPos);
+        yPos += 5;
+
+        const xPos = margin + (maxWidth - imgWidth) / 2;
+        try {
+          pdf.addImage(p.base64, 'JPEG', xPos, yPos, imgWidth, imgHeight);
+        } catch {
+          pdf.setFont('helvetica', 'italic');
+          pdf.text(`Bild ${i + 1}: ${p.fileName} - Konnte nicht geladen werden`, margin, yPos);
+          yPos += 10;
+          continue;
+        }
+        yPos += imgHeight + 15;
       }
     }
 
@@ -1810,30 +1901,28 @@ export const generatePDF = async (
   }
   } // end of !abnahmeOnly block
 
-  // Footer - update page count after all pages are added
+  // ============ MODÜL F: AGB (eğer ilgili PDF tipinde işaretliyse) ============
+  const branchTerms = await getCachedBranchTerms();
+  const showAgb = abnahmeOnly ? branchTerms?.show_on_abnahme : branchTerms?.show_on_aufmass;
+  let agbPdfMergeData: { bytes: Uint8Array; selectedPages: number[] } | null = null;
+  if (showAgb) {
+    if (branchTerms?.agb_pdf_path && branchTerms.agb_pdf_pages && branchTerms.agb_pdf_pages.length > 0) {
+      try {
+        const bytes = await fetchBranchPdfBytes(branchTerms.agb_pdf_path);
+        if (bytes) agbPdfMergeData = { bytes, selectedPages: branchTerms.agb_pdf_pages };
+      } catch (e) {
+        console.warn('Could not load AGB PDF:', e);
+      }
+    } else if (branchTerms?.content?.trim()) {
+      drawAgbPages(pdf, branchTerms.content);
+    }
+  }
+
+  // Footer — Living-Deluxe-style pipe-separated horizontal Geschäftsbrief footer
   const pageCount = (pdf as unknown as { internal: { getNumberOfPages: () => number } }).internal.getNumberOfPages();
   for (let i = 1; i <= pageCount; i++) {
     pdf.setPage(i);
-    pdf.setFontSize(8);
-    pdf.setTextColor(128, 128, 128);
-    pdf.setFont('helvetica', 'normal');
-    pdf.text(
-      `Seite ${i} von ${pageCount}`,
-      pageWidth / 2,
-      pageHeight - 10,
-      { align: 'center' }
-    );
-    pdf.text(
-      `Erstellt am: ${new Date().toLocaleDateString('de-DE')}`,
-      margin,
-      pageHeight - 10
-    );
-    pdf.text(
-      companyName,
-      pageWidth - margin,
-      pageHeight - 10,
-      { align: 'right' }
-    );
+    drawGeschaeftsbriefFooter(pdf, pageWidth, pageHeight, margin, companyInfo, companyName, i, pageCount);
   }
 
   // Generate filename
@@ -1841,11 +1930,27 @@ export const generatePDF = async (
   const date = formData.datum || new Date().toISOString().split('T')[0];
   const fileName = abnahmeOnly ? `Abnahme_${customerName}_${date}.pdf` : `Aufmass_${customerName}_${date}.pdf`;
 
-  // Return blob for preview or save directly
-  if (options?.returnBlob) {
-    const blob = pdf.output('blob');
-    return { blob, fileName };
+  // ============ MERGE: append AGB PDF if any ============
+  let finalBlob: Blob = pdf.output('blob');
+  if (agbPdfMergeData) {
+    try {
+      finalBlob = await mergePdf({ basePdf: finalBlob, agbPdf: agbPdfMergeData, appendAgbAtEnd: true });
+    } catch (e) {
+      console.error('AGB PDF merge failed, falling back to base PDF:', e);
+    }
   }
 
-  pdf.save(fileName);
+  // Return blob for preview or save directly
+  if (options?.returnBlob) {
+    return { blob: finalBlob, fileName };
+  }
+
+  const url = URL.createObjectURL(finalBlob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 };

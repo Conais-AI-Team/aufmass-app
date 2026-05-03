@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<title>AYLUX Aufmaß — Modul C Diagrams (Print)</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: #fff; color: #1a1a1a; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif; }
+  @page { size: A4 landscape; margin: 14mm 14mm 14mm 14mm; }
+
+  .page {
+    width: 100%;
+    min-height: 100vh;
+    padding: 16mm 18mm;
+    page-break-after: always;
+    page-break-inside: avoid;
+    display: flex;
+    flex-direction: column;
+  }
+  .page:last-child { page-break-after: auto; }
+
+  .title-page { justify-content: center; align-items: center; text-align: center; }
+  .title-page .brand {
+    font-size: 14pt; letter-spacing: 4px; color: #7fa93d;
+    text-transform: uppercase; font-weight: 700; margin-bottom: 8mm;
+  }
+  .title-page h1 {
+    font-size: 36pt; margin: 0 0 4mm 0; color: #1a1a1a; letter-spacing: -0.5px;
+  }
+  .title-page .subtitle {
+    font-size: 14pt; color: #6b7280; margin: 0 0 18mm 0; max-width: 180mm;
+  }
+  .title-page .meta {
+    font-size: 10pt; color: #9aa0a6; border-top: 1px solid #e5e7eb;
+    padding-top: 6mm; margin-top: 8mm; max-width: 200mm;
+  }
+  .title-page .toc {
+    margin-top: 12mm; max-width: 220mm; text-align: left;
+    columns: 2; column-gap: 16mm;
+  }
+  .title-page .toc h3 {
+    margin: 0 0 4mm 0; font-size: 11pt; color: #6b7280;
+    text-transform: uppercase; letter-spacing: 1px;
+    column-span: all;
+  }
+  .title-page .toc ol {
+    margin: 0; padding-left: 6mm; font-size: 11pt; line-height: 1.85;
+    color: #374151;
+  }
+  .title-page .toc ol li::marker { color: #7fa93d; font-weight: 700; }
+
+  .page-header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    border-bottom: 2px solid #7fa93d;
+    padding-bottom: 4mm; margin-bottom: 8mm;
+  }
+  .page-header .left {
+    display: flex; align-items: baseline; gap: 6mm;
+  }
+  .page-header .num {
+    display: inline-flex; min-width: 11mm; height: 11mm;
+    align-items: center; justify-content: center;
+    background: #7fa93d; color: #fff; border-radius: 6px;
+    font-size: 14pt; font-weight: 700;
+  }
+  .page-header h2 {
+    font-size: 20pt; margin: 0; font-weight: 600; color: #1a1a1a;
+  }
+  .page-header .right {
+    font-size: 9pt; color: #9aa0a6; letter-spacing: 1px; text-transform: uppercase;
+  }
+  .desc {
+    color: #6b7280; font-size: 10.5pt; line-height: 1.55;
+    margin: 0 0 7mm 0; max-width: 230mm;
+  }
+  .diagram-wrapper {
+    flex: 1;
+    display: flex; align-items: center; justify-content: center;
+    background: #fff;
+    overflow: hidden;
+  }
+  .mermaid {
+    width: 100%;
+    max-height: 165mm;
+    text-align: center;
+  }
+  .mermaid svg {
+    max-width: 100% !important;
+    max-height: 165mm !important;
+    height: auto !important;
+    display: block; margin: 0 auto;
+  }
+  .legend {
+    margin-top: 6mm; padding: 4mm 6mm; background: #f9fafb;
+    border-left: 3px solid #7fa93d;
+    font-size: 9.5pt; color: #4b5563; line-height: 1.5;
+  }
+  .legend code {
+    background: #e5e7eb; padding: 1px 5px; border-radius: 3px;
+    font-family: "SF Mono", Consolas, monospace; font-size: 9pt; color: #1f2937;
+  }
+  .footer {
+    position: fixed; bottom: 6mm; left: 14mm; right: 14mm;
+    display: flex; justify-content: space-between;
+    font-size: 8.5pt; color: #9aa0a6;
+    border-top: 1px solid #e5e7eb; padding-top: 3mm;
+  }
+</style>
+</head>
+<body>
+
+<!-- ===== TITLE PAGE ===== -->
+<div class="page title-page">
+  <div class="brand">AYLUX · Aufmaß-System</div>
+  <h1>Modul C — Rechnung-Sistemi</h1>
+  <p class="subtitle">3-step Rechnung Flow · Anzahlungen · Schlussrechnung · Public Sign-Page</p>
+  <div class="toc">
+    <h3>Inhaltsverzeichnis</h3>
+    <ol>
+      <li>Form Status — Pre-Order Phase</li>
+      <li>Form Status — Invoice & Production Phase</li>
+      <li>Form Status — Acceptance & Final Phase</li>
+      <li>Rechnung Status (Entwurf → Gesendet)</li>
+      <li>Anzahlung Flow — auto-invoice generation</li>
+      <li>Status Chain — Rechnung Erstellt</li>
+      <li>Public Sign Sequence</li>
+      <li>Email Send Sequence (rechnung_id)</li>
+      <li>DB Schema — Modul C tables</li>
+      <li>System Architecture</li>
+      <li>Status Decision Tree</li>
+    </ol>
+  </div>
+  <div class="meta">
+    Commit <code>698c5f5</code> · Branch <code>ezgi</code> · April 2026
+  </div>
+</div>
+
+<!-- ===== 1. FORM STATUS PRE-ORDER ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">1</span><h2>Form Status — Pre-Order Phase</h2></div>
+    <div class="right">State · 1 / 11</div>
+  </div>
+  <p class="desc">Aufmaß'ın oluşturulup Auftrag verilene kadar geçtiği durumlar. Müşteri Angebot'u kabul ederse <strong>auftrag_erteilt</strong>'e, reddederse <strong>auftrag_abgelehnt</strong>'e gider.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  [*] --> entwurf
+  entwurf --> neu : Speichern
+  neu --> angebot_versendet : Angebot kaydet
+  angebot_versendet --> auftrag_erteilt : Kunde akzept
+  angebot_versendet --> auftrag_abgelehnt : Kunde reject
+  auftrag_abgelehnt --> [*]
+  auftrag_erteilt --> [*] : siehe Phase 2
+</pre>
+  </div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>1 / 11</span></div>
+</div>
+
+<!-- ===== 2. FORM STATUS INVOICE+PROD ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">2</span><h2>Form Status — Invoice & Production Phase</h2></div>
+    <div class="right">State · 2 / 11</div>
+  </div>
+  <p class="desc">Auftrag sonrası: önce Anzahlungsrechnung Entwurf'u, sonra gönderim, ardından Bauantrag/Anzahlung tahsilatı, üretim ve montaj adımları. <strong>rechnung_erstellt</strong> ve <strong>gesendet</strong> Modul C ile eklendi.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  [*] --> auftrag_erteilt : Phase 1'den
+  auftrag_erteilt --> rechnung_erstellt : Status seç (Entwurf)
+  rechnung_erstellt --> gesendet : Senden / Mark-sent
+  gesendet --> bauantrag : opsiyonel
+  bauantrag --> anzahlung
+  anzahlung --> anzahlung : + N peşinat
+  anzahlung --> bestellt
+  bestellt --> montage_geplant
+  montage_geplant --> montage_gestartet
+  montage_gestartet --> [*] : siehe Phase 3
+</pre>
+  </div>
+  <div class="legend">YENI (Modul C): <code>rechnung_erstellt</code> = Anzahlungsrechnung Entwurf · <code>gesendet</code> = Anzahlungsrechnung Versendet</div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>2 / 11</span></div>
+</div>
+
+<!-- ===== 3. FORM STATUS ACCEPTANCE+FINAL ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">3</span><h2>Form Status — Acceptance & Final Phase</h2></div>
+    <div class="right">State · 3 / 11</div>
+  </div>
+  <p class="desc">Montaj bittikten sonra Abnahme (kunde imzası), sonra Schlussrechnung Entwurf ve Versendet. Mängel olursa Reklamation döngüsü.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  [*] --> montage_gestartet : Phase 2'den
+  montage_gestartet --> abnahme : Kunde imza
+  montage_gestartet --> reklamation_eingegangen : Mängel
+  abnahme --> schluss_rechnung_erstellt : Status seç (Entwurf)
+  schluss_rechnung_erstellt --> rest_rechnung_erstellt : Senden / Mark-sent
+  rest_rechnung_erstellt --> [*]
+  reklamation_eingegangen --> reklamation_bestellt
+  reklamation_eingegangen --> reklamation_abgelehnt
+  reklamation_bestellt --> abnahme : Tekrar dene
+  reklamation_abgelehnt --> [*]
+</pre>
+  </div>
+  <div class="legend">YENI (Modul C): <code>schluss_rechnung_erstellt</code> = Schlussrechnung Entwurf. Mevcut <code>rest_rechnung_erstellt</code> = Schlussrechnung Versendet (etiket netleşti).</div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>3 / 11</span></div>
+</div>
+
+<!-- ===== 4. RECHNUNG STATUS ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">4</span><h2>Rechnung Status</h2></div>
+    <div class="right">State · 4 / 11</div>
+  </div>
+  <p class="desc">aufmass_rechnungen.status — bireysel fatura row'unun yaşam döngüsü. Anzahlung tahsilatı ile oluşan Rechnung'lar Entwurf'u atlar (otomatik gesendet).</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+stateDiagram-v2
+  direction LR
+  [*] --> entwurf : POST /forms/:id/rechnung
+  entwurf --> entwurf : PUT (Datum/Ziel düzelt)
+  entwurf --> gesendet : email/send VEYA mark-sent
+  [*] --> gesendet : Anzahlung tahsilatı (bypass)
+  gesendet --> bezahlt : paid_at SET
+  bezahlt --> [*]
+  gesendet --> [*]
+</pre>
+  </div>
+  <div class="legend"><code>bezahlt</code> durumu DB'de tanımlı, UI henüz desteklemiyor — sonraki iterasyon.</div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>4 / 11</span></div>
+</div>
+
+<!-- ===== 5. ANZAHLUNG FLOW ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">5</span><h2>Anzahlung Flow — Auto-Invoice Generation</h2></div>
+    <div class="right">Flow · 5 / 11</div>
+  </div>
+  <p class="desc">Her ödeme tahsilatı sunucuda atomik olarak bir Anzahlungsrechnung row'u + PDF üretir. Frontend tahsilatı gönderir, backend faturayı oluşturup linkler.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+flowchart LR
+  A[Status anzahlung<br/>AnzahlungForm açılır] --> B[Form: Betrag<br/>Datum, Notiz, Beleg]
+  B --> C[POST<br/>/forms/:id/anzahlungen]
+  C --> D[BACKEND ATOMIC]
+  D --> E1[1. generateNextRechnungNummer]
+  D --> E2[2. INSERT rechnung<br/>type=anzahlungs<br/>status=gesendet]
+  D --> E3[3. INSERT anzahlung<br/>rechnung_id=new]
+  E1 --> F[Return anzahlung +<br/>rechnung_nr]
+  E2 --> F
+  E3 --> F
+  F --> G[FRONTEND<br/>generateRechnungPDF]
+  G --> H[saveRechnungPdf<br/>blob → DB]
+  H --> I[Liste yenile<br/>Toast OK]
+  I --> J[Satırda 3 ikon:<br/>PDF · Email · Sil]
+  style D fill:#f0f9eb,stroke:#7fa93d,stroke-width:2px
+  style G fill:#e0f2fe,stroke:#38bdf8,stroke-width:2px
+</pre>
+  </div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>5 / 11</span></div>
+</div>
+
+<!-- ===== 6. RECHNUNG ERSTELLT CHAIN ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">6</span><h2>Status Chain — Rechnung Erstellt</h2></div>
+    <div class="right">Flow · 6 / 11</div>
+  </div>
+  <p class="desc">Kullanıcı dropdown'dan "Rechnung Entwurf" seçince ne olur. Angebot yoksa önce onu oluşturma akışına yönlendirir, sonra otomatik devam eder.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+flowchart LR
+  S[Dropdown<br/>rechnung_erstellt seç] --> D[Date Picker]
+  D --> U[updateForm status]
+  U --> Q{getAngebot:<br/>kalem var?}
+  Q -- YES --> R[RechnungForm<br/>modali aç]
+  Q -- NO --> T[Toast:<br/>Angebot fehlt]
+  T --> X[Chain target set<br/>+ Angebot Modal]
+  X --> Y[Angebot save]
+  Y --> Z[status promote<br/>auftrag_erteilt]
+  Z --> R
+  R --> F[User: Datum, Ziel,<br/>Email checkbox]
+  F --> P[POST /forms/:id/rechnung]
+  P --> I[INSERT entwurf row<br/>form.status=*_erstellt]
+  I --> PDF[FE: PDF üret + save]
+  PDF --> EM{Email<br/>checkbox?}
+  EM -- YES --> EC[EmailComposer<br/>aç, rechnungId set]
+  EM -- NO --> EN[Card: Senden<br/>Als gesendet markieren]
+  EC --> SE[POST /email/send]
+  SE --> PR[Backend: rechnung+form<br/>gesendet (atomik)]
+  style R fill:#f0f9eb,stroke:#7fa93d,stroke-width:2px
+  style PR fill:#f0f9eb,stroke:#7fa93d,stroke-width:2px
+</pre>
+  </div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>6 / 11</span></div>
+</div>
+
+<!-- ===== 7. PUBLIC SIGN SEQUENCE ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">7</span><h2>Public Sign Sequence</h2></div>
+    <div class="right">Sequence · 7 / 11</div>
+  </div>
+  <p class="desc">Müşterinin Abnahme imzası için açtığı public link. Restbetrag canlı hesaplanır, gönderilmiş Rechnung'lar PDF olarak listelenir.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+sequenceDiagram
+  participant Admin
+  participant FE as Frontend
+  participant BE as Backend
+  participant DB
+  participant Kunde
+
+  Admin->>FE: Status → abnahme + Speichern
+  FE->>BE: POST /forms/:id/abnahme/sign-request
+  BE->>DB: INSERT sign_request
+  BE-->>FE: signUrl
+  FE->>Admin: Email + Restbetrag
+
+  Note over Kunde: Mail link tıklar
+  Kunde->>BE: GET /public/abnahme-sign/:token
+  BE->>DB: SELECT angebot + sum(anzahlungen)
+  BE->>DB: SELECT rechnungen gesendet
+  BE-->>Kunde: snapshot + restbetrag + rechnungen
+
+  Kunde->>BE: GET /public/.../rechnung/:id/pdf
+  BE-->>Kunde: PDF blob (form_id check)
+
+  Kunde->>BE: POST sign + signature
+  BE->>DB: UPDATE form abnahme + sign signed
+  BE-->>Kunde: Vielen Dank
+</pre>
+  </div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>7 / 11</span></div>
+</div>
+
+<!-- ===== 8. EMAIL SEND ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">8</span><h2>Email Send Sequence (rechnung_id)</h2></div>
+    <div class="right">Sequence · 8 / 11</div>
+  </div>
+  <p class="desc">EmailComposer Send tıklayınca backend rechnung'u branch-check eder, PDF'i ek olarak alır, SMTP'ye gönderir, başarı sonrası rechnung+form status'unu atomik <strong>gesendet</strong>'e geçirir.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+sequenceDiagram
+  participant FE as Frontend
+  participant BE as Backend
+  participant DB
+  participant SMTP
+
+  FE->>BE: POST /email/send {rechnung_id}
+  BE->>DB: SELECT rechnung WHERE id=$1
+  DB-->>BE: row + branch + generated_pdf
+  BE->>BE: branch_id check
+  BE->>BE: attach PDF blob
+  BE->>SMTP: sendMail()
+  SMTP-->>BE: delivered
+
+  alt rechnung.status='entwurf'
+    BE->>DB: UPDATE rechnung gesendet, sent_at
+    BE->>DB: UPDATE form gesendet/rest_rechnung_erstellt
+  end
+
+  BE->>DB: INSERT email_log
+  BE-->>FE: 200 OK
+</pre>
+  </div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>8 / 11</span></div>
+</div>
+
+<!-- ===== 9. DB SCHEMA ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">9</span><h2>DB Schema — Modul C Tables</h2></div>
+    <div class="right">ER · 9 / 11</div>
+  </div>
+  <p class="desc">3 yeni tablo. items_json snapshot olarak immutable — Rechnung kesildikten sonra Angebot değişse de fatura içeriği değişmez (yasal). Counter race-safe UPSERT.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+erDiagram
+  aufmass_forms ||--o{ aufmass_rechnungen : has
+  aufmass_forms ||--o{ aufmass_anzahlungen : has
+  aufmass_rechnungen ||--o| aufmass_anzahlungen : "1:1 auto-link"
+
+  aufmass_rechnungen {
+    serial id PK
+    varchar rechnung_nr UK "KOB-R-2026-00001"
+    varchar type "anzahlungs schluss"
+    int form_id FK
+    varchar branch_id
+    decimal netto_betrag
+    decimal mwst_satz
+    decimal mwst_betrag
+    decimal brutto_betrag
+    date rechnungsdatum
+    date zahlungsziel
+    jsonb items_json "snapshot"
+    varchar status "entwurf gesendet"
+    timestamp sent_at
+    bytea generated_pdf
+  }
+
+  aufmass_anzahlungen {
+    serial id PK
+    int form_id FK
+    int rechnung_id FK "auto"
+    decimal betrag
+    date zahlungsdatum
+    int beleg_file_id
+    text notiz
+  }
+
+  aufmass_rechnung_counters {
+    varchar branch_key PK
+    int year PK
+    int last_num "race-safe"
+  }
+</pre>
+  </div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>9 / 11</span></div>
+</div>
+
+<!-- ===== 10. ARCHITECTURE ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">10</span><h2>System Architecture</h2></div>
+    <div class="right">Diagram · 10 / 11</div>
+  </div>
+  <p class="desc">Browser → Vite proxy → Express → Postgres. Yeşil sınırlı kutular Modul C ile eklendi. SMTP per-branch konfigüre edilir, opsiyonel.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+flowchart LR
+  subgraph BR[Browser - React]
+    DB1[Dashboard]
+    FP[FormPage]
+    M[Modals: RechnungForm,<br/>AnzahlungForm,<br/>EmailComposer]
+    PDF[rechnungPdfGenerator<br/>jsPDF]
+    API[services/api.ts]
+  end
+  subgraph BE[Backend - Express]
+    AUTH[JWT auth +<br/>verifyFormBranch]
+    EP[Endpoints]
+    POOL[pg.Pool]
+  end
+  subgraph PG[(PostgreSQL)]
+    T1[(forms · angebot)]
+    T2[(rechnungen ·<br/>anzahlungen ·<br/>counters)]
+    T3[(sign_requests ·<br/>email_log)]
+  end
+  SMTP[SMTP per branch]
+
+  DB1 --> M
+  FP --> M
+  M --> PDF
+  M --> API
+  API -->|/api proxy<br/>5173 to 5001| AUTH
+  AUTH --> EP
+  EP --> POOL
+  POOL --> T1
+  POOL --> T2
+  POOL --> T3
+  EP -.-> SMTP
+
+  style M fill:#f0f9eb,stroke:#7fa93d,stroke-width:2px
+  style PDF fill:#f0f9eb,stroke:#7fa93d,stroke-width:2px
+  style T2 fill:#f0f9eb,stroke:#7fa93d,stroke-width:2px
+</pre>
+  </div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>10 / 11</span></div>
+</div>
+
+<!-- ===== 11. DECISION TREE ===== -->
+<div class="page">
+  <div class="page-header">
+    <div class="left"><span class="num">11</span><h2>Status Decision Tree</h2></div>
+    <div class="right">Flow · 11 / 11</div>
+  </div>
+  <p class="desc">Status dropdown'dan ne seçilirse hangi modal/akış tetiklenir. Modul C ile eklenen şube'ler yeşil sınırlı.</p>
+  <div class="diagram-wrapper">
+<pre class="mermaid">
+flowchart LR
+  P[Status seç] --> Q{Status?}
+  Q -->|angebot_versendet| AM[Angebot Modal]
+  Q -->|rechnung_erstellt| RD1[Date + chain]
+  Q -->|schluss_rechnung_erstellt| RD2[Date + chain]
+  Q -->|anzahlung| AzM[AnzahlungForm]
+  Q -->|abnahme| AbM[Abnahme Modal<br/>Restbetrag uyarı]
+  Q -->|diğer| DP[Date Picker]
+
+  RD1 --> CA1{Angebot?}
+  RD2 --> CA2{Angebot?}
+  CA1 -->|YES| RM1[RechnungForm<br/>Anzahlungs]
+  CA1 -->|NO| Ang[Angebot Modal<br/>chain]
+  CA2 -->|YES| RM2[RechnungForm<br/>Schluss]
+  CA2 -->|NO| Ang
+  Ang --> RM1
+  RM1 --> CR[POST rechnung]
+  RM2 --> CR
+  CR --> EM{Email?}
+  EM -->|YES| EC[EmailComposer]
+  EM -->|NO| EN[Card: Senden /<br/>Als gesendet markieren]
+
+  style RM1 fill:#f0f9eb,stroke:#7fa93d,stroke-width:2px
+  style RM2 fill:#f0f9eb,stroke:#7fa93d,stroke-width:2px
+  style AzM fill:#f0f9eb,stroke:#7fa93d,stroke-width:2px
+</pre>
+  </div>
+  <div class="footer"><span>AYLUX · Aufmaß · Modul C</span><span>11 / 11</span></div>
+</div>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'default',
+    themeVariables: {
+      primaryColor: '#ffffff',
+      primaryBorderColor: '#374151',
+      primaryTextColor: '#1f2937',
+      lineColor: '#6b7280',
+      secondaryColor: '#f3f4f6',
+      tertiaryColor: '#fafafa',
+      noteBkgColor: '#fefce8',
+      noteTextColor: '#1f2937',
+      noteBorderColor: '#7fa93d',
+      actorBkg: '#f3f4f6',
+      actorBorder: '#7fa93d',
+      actorTextColor: '#1f2937',
+      labelBoxBkgColor: '#f9fafb',
+      labelBoxBorderColor: '#7fa93d',
+      labelTextColor: '#1f2937',
+    },
+    flowchart: { curve: 'basis', padding: 16, htmlLabels: true, useMaxWidth: true },
+    sequence: { showSequenceNumbers: false, mirrorActors: false, useMaxWidth: true, actorMargin: 60, boxMargin: 12 },
+    state: { useMaxWidth: true, padding: 14 },
+    er: { useMaxWidth: true },
+    fontFamily: 'system-ui, -apple-system, sans-serif',
+    fontSize: 14
+  });
+
+  // Signal when all diagrams have been rendered (for headless print)
+  window._renderDone = false;
+  setTimeout(() => { window._renderDone = true; document.title = '__READY__ ' + document.title; }, 4000);
+</script>
+</body>
+</html>

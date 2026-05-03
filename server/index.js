@@ -100,6 +100,15 @@ async function initializeTables() {
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS lead_id INT`);
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS created_by INT`);
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS branch_id VARCHAR(50)`);
+    // Marks the first time an Aufmaß PDF was sent by e-mail (either from
+    // the form's "E-Mail senden" button after save, or from the Dashboard
+    // card's e-mail icon). Used by the Aufmaße list to show a sent / pending
+    // badge. NULL means no e-mail has been dispatched yet.
+    await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS email_sent_at TIMESTAMP NULL`);
+    // Marks the first time an Aufmaß was sent by physical mail (admin-only
+    // manual override on the Dashboard card / Aus Aufmaß card). NULL means
+    // no postal copy has gone out yet. Mirrors email_sent_at semantics.
+    await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS post_sent_at TIMESTAMP NULL`);
 
     // Abnahme columns
     await pool.query(`ALTER TABLE aufmass_abnahme ADD COLUMN IF NOT EXISTS maengel_liste TEXT`);
@@ -374,6 +383,21 @@ async function initializeTables() {
       console.log('Default admin created: admin@aylux.de / admin123');
     }
 
+    // ============ MODÜL B — Aufmaß ↔ Angebote sync marker ============
+    // Marks that an Angebot has been sent for this lead (auto via e-mail or
+    // manual admin override). Used by Angebote list to show "Versendet" badge
+    // and by the bidirectional sync between aufmass_forms.status='angebot_versendet'
+    // and the lead's sent state.
+    await pool.query(`ALTER TABLE aufmass_leads ADD COLUMN IF NOT EXISTS angebot_sent_at TIMESTAMP NULL`);
+    console.log('aufmass_leads.angebot_sent_at column ready');
+
+    // Marketing source ("Wie sind Sie auf uns aufmerksam geworden?") —
+    // captured on the customer-info step of both Aufmaß and Schnellangebot.
+    // Stored as stable slug so historic data survives label tweaks.
+    await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS marketing_source VARCHAR(50)`);
+    await pool.query(`ALTER TABLE aufmass_leads ADD COLUMN IF NOT EXISTS marketing_source VARCHAR(50)`);
+    console.log('marketing_source columns ready (forms + leads)');
+
     // ============ EMAIL SMTP SETTINGS ============
     await pool.query(`ALTER TABLE aufmass_branch_settings ADD COLUMN IF NOT EXISTS smtp_host VARCHAR(255)`);
     await pool.query(`ALTER TABLE aufmass_branch_settings ADD COLUMN IF NOT EXISTS smtp_port INT DEFAULT 587`);
@@ -433,10 +457,270 @@ async function initializeTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS ix_email_log_form ON aufmass_email_log(form_id)`);
     console.log('Email log table ready');
 
+    // === MODÜL F: PDF Şablon Sistemi ===
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_product_images (
+        id SERIAL PRIMARY KEY,
+        branch_slug VARCHAR(50) NOT NULL,
+        product_id INT NOT NULL,
+        image_path VARCHAR(500) NOT NULL,
+        image_order INT DEFAULT 1,
+        show_on_cover BOOLEAN DEFAULT false,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_product_images_lookup ON aufmass_product_images(branch_slug, product_id)`);
+    console.log('Product images table ready');
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_branch_terms (
+        branch_slug VARCHAR(50) PRIMARY KEY,
+        content TEXT,
+        show_on_aufmass BOOLEAN DEFAULT false,
+        show_on_angebot BOOLEAN DEFAULT true,
+        show_on_abnahme BOOLEAN DEFAULT false,
+        show_on_rechnung BOOLEAN DEFAULT false,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      )
+    `);
+    await pool.query(`ALTER TABLE aufmass_branch_terms ADD COLUMN IF NOT EXISTS agb_pdf_path VARCHAR(500)`);
+    await pool.query(`ALTER TABLE aufmass_branch_terms ADD COLUMN IF NOT EXISTS agb_pdf_pages JSONB`);
+    await pool.query(`ALTER TABLE aufmass_branch_terms ADD COLUMN IF NOT EXISTS attach_separately BOOLEAN DEFAULT false`);
+    console.log('Branch terms (AGB) table ready');
+
+    // === MODÜL F2: PDF Cover/AGB Override System ===
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_product_cover_pdfs (
+        id SERIAL PRIMARY KEY,
+        branch_slug VARCHAR(50) NOT NULL,
+        product_id INT NOT NULL,
+        file_path VARCHAR(500) NOT NULL,
+        selected_pages JSONB,
+        page_count INT,
+        uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(branch_slug, product_id)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_product_cover_pdfs_lookup ON aufmass_product_cover_pdfs(branch_slug, product_id)`);
+    console.log('Product cover PDFs table ready');
+
+    // PDF cache table — for legal stability: once a PDF is generated for a lead, it's frozen
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_lead_pdf_cache (
+        id SERIAL PRIMARY KEY,
+        lead_id INT NOT NULL,
+        angebot_id INT,
+        document_type VARCHAR(20) NOT NULL,
+        file_path VARCHAR(500) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(lead_id, angebot_id, document_type)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_pdf_cache_lookup ON aufmass_lead_pdf_cache(lead_id, angebot_id, document_type)`);
+    console.log('Lead PDF cache table ready');
+
+    // Form-level PDF snapshots — frozen per (form_id, document_type) for legal traceability
+    // Status transitions auto-create snapshots so users can re-download a historic PDF after status changes
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_form_pdf_snapshots (
+        id SERIAL PRIMARY KEY,
+        form_id INT NOT NULL,
+        document_type VARCHAR(20) NOT NULL,
+        file_path VARCHAR(500) NOT NULL,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(form_id, document_type)
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_form_pdf_snapshots_lookup ON aufmass_form_pdf_snapshots(form_id, document_type)`);
+    console.log('Form PDF snapshots table ready');
+
+    // ============ RECHNUNG (Modul C) ============
+    // Legal invoices per UStG §14. items_json is an immutable snapshot of the Angebot
+    // items at the time of invoice creation: once issued, the invoice content must not
+    // change even if the underlying Angebot is later edited.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_rechnungen (
+        id SERIAL PRIMARY KEY,
+        rechnung_nr VARCHAR(40) NOT NULL UNIQUE,
+        type VARCHAR(20) NOT NULL,
+        form_id INT REFERENCES aufmass_forms(id) ON DELETE SET NULL,
+        branch_id VARCHAR(50),
+        kunde_vorname VARCHAR(100),
+        kunde_nachname VARCHAR(100),
+        kunde_email VARCHAR(255),
+        kunde_telefon VARCHAR(50),
+        kunde_adresse TEXT,
+        netto_betrag DECIMAL(12,2) NOT NULL,
+        mwst_satz DECIMAL(5,2) NOT NULL DEFAULT 19,
+        mwst_betrag DECIMAL(12,2) NOT NULL,
+        brutto_betrag DECIMAL(12,2) NOT NULL,
+        rechnungsdatum DATE NOT NULL,
+        leistungsdatum DATE,
+        zahlungsziel DATE NOT NULL,
+        items_json JSONB NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'entwurf',
+        sent_at TIMESTAMP NULL,
+        paid_at TIMESTAMP NULL,
+        generated_pdf BYTEA,
+        pdf_generated_at TIMESTAMP NULL,
+        created_at TIMESTAMP DEFAULT NOW(),
+        created_by INT REFERENCES aufmass_users(id) ON DELETE SET NULL
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS ix_aufmass_rechnungen_form_id ON aufmass_rechnungen(form_id)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS ix_aufmass_rechnungen_branch_id ON aufmass_rechnungen(branch_id)`);
+    console.log('aufmass_rechnungen table ready');
+
+    // Cash receipts (down payments). Independent from the legal Anzahlungsrechnung:
+    // a row here is a recorded payment, optionally linked to an invoice via rechnung_id.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_anzahlungen (
+        id SERIAL PRIMARY KEY,
+        form_id INT REFERENCES aufmass_forms(id) ON DELETE CASCADE,
+        rechnung_id INT REFERENCES aufmass_rechnungen(id) ON DELETE SET NULL,
+        betrag DECIMAL(12,2) NOT NULL,
+        zahlungsdatum DATE NOT NULL,
+        zahlungsmethode VARCHAR(20) NOT NULL,
+        beleg_file_id INT NULL,
+        notiz TEXT,
+        branch_id VARCHAR(50),
+        created_at TIMESTAMP DEFAULT NOW(),
+        created_by INT REFERENCES aufmass_users(id) ON DELETE SET NULL
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS ix_aufmass_anzahlungen_form_id ON aufmass_anzahlungen(form_id)`);
+    console.log('aufmass_anzahlungen table ready');
+
+    // Race-safe Rechnung counter (mirrors aufmass_angebot_counters pattern).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_rechnung_counters (
+        branch_key VARCHAR(20) NOT NULL,
+        year INTEGER NOT NULL,
+        last_num INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (branch_key, year)
+      )
+    `);
+    console.log('aufmass_rechnung_counters table ready');
+
+    // ============ MODÜL B v3: Lead-products eager seed ============
+    // Adds size_values JSONB + size_profile so non-2D shapes (Markise, Keil) can be priced.
+    // Makes price NULLABLE so empty placeholder rows can exist.
+    // Existing Köln test data is preserved; we only ADD missing rows from productConfig.json.
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_values JSONB`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_profile VARCHAR(10)`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ALTER COLUMN price DROP NOT NULL`).catch(() => {});
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_products_size_values ON aufmass_lead_products USING GIN (size_values)`);
+    console.log('Modul B v3 columns ready (size_values, size_profile)');
+
+    // Eager seed runs in the background so server startup is not blocked
+    // (~13k idempotent INSERTs across all branches). Errors logged but don't crash startup.
+    seedLeadProductsFromConfig()
+      .then(() => console.log('Lead-products eager seed: done (background)'))
+      .catch((seedErr) => console.error('Lead-products eager seed failed:', seedErr.message));
+
     console.log('Database tables initialized');
   } catch (err) {
     console.error('Table initialization failed:', err.message);
   }
+}
+
+// ============ MODÜL B v3: Eager Seed Helper ============
+// Reads productConfig.json, infers each model's size profile, and inserts placeholder rows
+// (price=NULL) for every active branch. Idempotent: existing rows are never overwritten.
+//
+// Unit handling: productConfig.json fields are mm. The legacy aufmass_lead_products.breite/tiefe
+// columns store cm (Çağlayan's data). To stay backwards compatible we WRITE cm into legacy
+// columns AND mm into size_values JSONB. Lookup queries can use either.
+
+const SIZE_PROFILE_DEFAULTS = {
+  // mm grids — divided by 10 when written to legacy breite/tiefe (cm)
+  P1: { axes: ['breite', 'tiefe'],                                 grid: { breite: [3000,4000,5000,6000,7000], tiefe: [2500,3000,3500,4000,5000] } },
+  P2: { axes: ['markisenbreite', 'markisenlaenge'],                grid: { markisenbreite: [3000,4000,5000,6000], markisenlaenge: [2000,2500,3000,3500] } },
+  P3: { axes: ['markisenbreite', 'markisenlaenge', 'markisenhoehe'], grid: { markisenbreite: [3000,4000,5000], markisenlaenge: [2000,2500,3000], markisenhoehe: [2500,3000] } },
+  P4: { axes: ['markisenbreite', 'markisenhoehe'],                 grid: { markisenbreite: [1500,2000,2500,3000], markisenhoehe: [2000,2500,3000] } },
+  P5: { axes: ['markisenbreite'],                                  grid: { markisenbreite: [3000,4000,5000,6000,7000] } },
+  P6: { axes: ['breite', 'hoehe'],                                 grid: { breite: [1000,1500,2000,2500,3000], hoehe: [2000,2200,2500,2800] } },
+  P7: { axes: ['breite', 'vorneHoehe', 'hintenHoehe'],             grid: { breite: [1000,1500,2000], vorneHoehe: [2000,2200,2500], hintenHoehe: [2500,2800,3000] } },
+  P8: { axes: ['laenge', 'vorneHoehe', 'hintenHoehe'],             grid: { laenge: [500,1000,1500,2000], vorneHoehe: [2000,2500], hintenHoehe: [2500,3000] } }
+};
+
+function inferSizeProfile(fields) {
+  const names = (fields || []).map(f => f.name);
+  if (names.includes('markisenbreite') && names.includes('markisenlaenge') && names.includes('markisenhoehe')) return 'P3';
+  if (names.includes('markisenbreite') && names.includes('markisenlaenge')) return 'P2';
+  if (names.includes('markisenbreite') && names.includes('markisenhoehe')) return 'P4';
+  if (names.includes('markisenbreite')) return 'P5';
+  if (names.includes('breite') && names.includes('vorneHoehe') && names.includes('hintenHoehe')) return 'P7';
+  if (names.includes('laenge') && names.includes('vorneHoehe') && names.includes('hintenHoehe')) return 'P8';
+  if (names.includes('breite') && names.includes('hoehe')) return 'P6';
+  if (names.includes('breite') && names.includes('tiefe')) return 'P1';
+  return null;
+}
+
+function cartesianProduct(arrays) {
+  return arrays.reduce((acc, arr) => acc.flatMap(a => arr.map(b => [...a, b])), [[]]);
+}
+
+async function seedLeadProductsFromConfig() {
+  const fs = await import('fs');
+  const path = await import('path');
+  const configPath = path.join(process.cwd(), '..', 'src', 'config', 'productConfig.json');
+  if (!fs.existsSync(configPath)) {
+    console.warn('productConfig.json not found at', configPath, '- skipping seed');
+    return;
+  }
+  const productConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
+
+  // Active branches: every distinct branch_id ever seen in any data table, plus a default.
+  // We don't have a branches table here so we union from existing user/lead data.
+  const branchesResult = await pool.query(`
+    SELECT DISTINCT branch_id AS slug FROM aufmass_users WHERE branch_id IS NOT NULL
+    UNION SELECT DISTINCT branch_id FROM aufmass_lead_products WHERE branch_id IS NOT NULL
+  `);
+  const branches = branchesResult.rows.map(r => r.slug).filter(Boolean);
+  if (branches.length === 0) branches.push('koblenz');  // safety default
+
+  let totalInserted = 0;
+  for (const [category, types] of Object.entries(productConfig)) {
+    for (const [productType, typeData] of Object.entries(types)) {
+      const profileKey = inferSizeProfile(typeData.fields || []);
+      if (!profileKey) continue;
+      const profile = SIZE_PROFILE_DEFAULTS[profileKey];
+      const grid = profile.grid;
+      const combos = cartesianProduct(profile.axes.map(ax => grid[ax]));
+
+      for (const modelName of (typeData.models || [])) {
+        for (const combo of combos) {
+          const sizeValuesMm = Object.fromEntries(profile.axes.map((ax, i) => [ax, combo[i]]));
+          // MODÜL B v3: DB now stores mm directly (no cm conversion).
+          const breiteMm = sizeValuesMm[profile.axes[0]] || 0;
+          const tiefeMm  = sizeValuesMm[profile.axes[1]] || 0;  // 1D profiles: 0
+
+          for (const branchSlug of branches) {
+            // No UNIQUE constraint exists — use NOT EXISTS to keep seed idempotent.
+            const result = await pool.query(`
+              INSERT INTO aufmass_lead_products
+                (branch_id, category, product_type, product_name,
+                 breite, tiefe, price, pricing_type,
+                 size_values, size_profile, is_active)
+              SELECT $1::varchar, $2::varchar, $3::varchar, $4::varchar,
+                     $5::int, $6::int, NULL, 'dimension', $7::jsonb, $8::varchar, true
+              WHERE NOT EXISTS (
+                SELECT 1 FROM aufmass_lead_products
+                WHERE branch_id = $1::varchar AND product_name = $4::varchar
+                  AND breite = $5::int AND tiefe = $6::int
+              )
+              RETURNING id
+            `, [branchSlug, category, productType, modelName, breiteMm, tiefeMm,
+                JSON.stringify(sizeValuesMm), profileKey]);
+            if (result.rows.length > 0) totalInserted++;
+          }
+        }
+      }
+    }
+  }
+  if (totalInserted > 0) console.log(`Eager seed: ${totalInserted} placeholder rows inserted across ${branches.length} branches`);
+  else console.log(`Eager seed: no new rows (catalog up-to-date)`);
 }
 
 // ============ AUTH MIDDLEWARE ============
@@ -471,6 +755,79 @@ const requireAdminOrOffice = (req, res, next) => {
   }
   next();
 };
+
+// ============ MODÜL B — Aufmaß ↔ Angebote cross-sync helpers ============
+// Mirrors the frontend STATUS_ORDER in src/pages/Dashboard.tsx so that
+// syncing only moves a form forward in the workflow, never backward.
+const FORM_STATUS_ORDER = [
+  'entwurf',
+  'auftrag_abgelehnt',
+  'neu',
+  'angebot_versendet',
+  'auftrag_erteilt',
+  'bauantrag',
+  'anzahlung',
+  'bestellt',
+  'montage_geplant',
+  'montage_gestartet',
+  'abnahme',
+  'reklamation_eingegangen',
+  'reklamation_bestellt',
+  'reklamation_abgelehnt',
+];
+
+// Keep the linked lead's "Versendet" flag in sync with the form's status:
+// - status >= angebot_versendet  → angebot_sent_at = NOW() (idempotent)
+// - status <  angebot_versendet  → angebot_sent_at = NULL  (badge clears)
+// Unknown statuses are ignored. Forms with no linked lead are no-ops.
+async function syncLeadFromForm(formId, newStatus) {
+  const linkRes = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [formId]);
+  const leadId = linkRes.rows[0]?.lead_id;
+  if (!leadId) return;
+
+  const targetIdx = FORM_STATUS_ORDER.indexOf('angebot_versendet');
+  const newIdx = FORM_STATUS_ORDER.indexOf(newStatus);
+  if (newIdx === -1) return;
+
+  if (newIdx >= targetIdx) {
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = COALESCE(angebot_sent_at, NOW()), updated_at = NOW()
+       WHERE id = $1`,
+      [leadId]
+    );
+  } else {
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = NULL, updated_at = NOW() WHERE id = $1`,
+      [leadId]
+    );
+  }
+}
+
+// When an Angebot is marked as sent for a lead, push every linked form forward
+// to 'angebot_versendet' (only if its current status sits before that step) and
+// record the change in status history.
+async function syncFormsFromLead(leadId, userId) {
+  const targetIdx = FORM_STATUS_ORDER.indexOf('angebot_versendet');
+  const formsRes = await pool.query(
+    'SELECT id, status FROM aufmass_forms WHERE lead_id = $1',
+    [leadId]
+  );
+  for (const form of formsRes.rows) {
+    const currentIdx = FORM_STATUS_ORDER.indexOf(form.status);
+    if (currentIdx >= 0 && currentIdx < targetIdx) {
+      const today = new Date().toISOString().split('T')[0];
+      await pool.query(
+        `UPDATE aufmass_forms SET status = 'angebot_versendet', status_date = $2, updated_at = NOW() WHERE id = $1`,
+        [form.id, today]
+      );
+      await pool.query(
+        `INSERT INTO aufmass_status_history (form_id, status, changed_by, status_date, notes)
+         VALUES ($1, 'angebot_versendet', $2, $3, $4)`,
+        [form.id, userId || null, today, 'Auto-sync: Angebot wurde versendet']
+      );
+    }
+  }
+}
 
 // ============ BRANCH DETECTION MIDDLEWARE ============
 // Detects branch from subdomain (e.g., koblenz.cnsform.com -> branchId = 'koblenz')
@@ -1026,7 +1383,7 @@ app.get('/api/forms', authenticateToken, async (req, res) => {
           f.id, f.datum, f.aufmasser, f.kunde_vorname, f.kunde_nachname, f.kunde_email, f.kunde_telefon,
           f.kundenlokation, f.category, f.product_type, f.model, f.specifications,
           f.markise_data, f.bemerkungen, f.status, f.created_by, f.created_at, f.updated_at,
-          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id,
+          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at, f.marketing_source,
           EXISTS(
             SELECT 1
             FROM aufmass_abnahme_sign_requests sr
@@ -1047,7 +1404,7 @@ app.get('/api/forms', authenticateToken, async (req, res) => {
           f.id, f.datum, f.aufmasser, f.kunde_vorname, f.kunde_nachname, f.kunde_email, f.kunde_telefon,
           f.kundenlokation, f.category, f.product_type, f.model, f.specifications,
           f.markise_data, f.bemerkungen, f.status, f.created_by, f.created_at, f.updated_at,
-          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id,
+          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at, f.marketing_source,
           EXISTS(
             SELECT 1
             FROM aufmass_abnahme_sign_requests sr
@@ -1126,14 +1483,14 @@ app.get('/api/forms/:id', authenticateToken, async (req, res) => {
       query = `SELECT id, datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon,
                kundenlokation, category, product_type, model, specifications,
                markise_data, bemerkungen, status, created_by, created_at, updated_at,
-               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name
+               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id, marketing_source
                FROM aufmass_forms WHERE id = $1 AND branch_id = $2`;
       params = [id, req.branchId];
     } else {
       query = `SELECT id, datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon,
                kundenlokation, category, product_type, model, specifications,
                markise_data, bemerkungen, status, created_by, created_at, updated_at,
-               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name
+               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id, marketing_source
                FROM aufmass_forms WHERE id = $1`;
       params = [id];
     }
@@ -1196,7 +1553,8 @@ app.post('/api/forms', authenticateToken, async (req, res) => {
       weitereProdukte,
       leadId,
       customerSignature,
-      signatureName
+      signatureName,
+      marketingSource
     } = req.body;
 
     // Auto-set status_date to form datum (Aufmass date) when form is created
@@ -1208,15 +1566,15 @@ app.post('/api/forms', authenticateToken, async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO aufmass_forms
-       (datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, category, product_type, model, specifications, markise_data, bemerkungen, status, status_date, branch_id, created_by, lead_id, customer_signature, signature_name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+       (datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, category, product_type, model, specifications, markise_data, bemerkungen, status, status_date, branch_id, created_by, lead_id, customer_signature, signature_name, marketing_source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
        RETURNING id`,
       [
         datum, aufmasser, kundeVorname, kundeNachname, kundeEmail || null, kundeTelefon || null,
         kundenlokation, category, productType, model,
         JSON.stringify(specifications || {}), JSON.stringify(markiseData || null),
         bemerkungen || '', status || 'neu', datum, req.branchId || null, req.user.id, leadId || null,
-        customerSignature || null, signatureName || null
+        customerSignature || null, signatureName || null, marketingSource || null
       ]
     );
 
@@ -1266,7 +1624,8 @@ app.put('/api/forms/:id', authenticateToken, async (req, res) => {
       statusDate: { column: 'status_date' },
       papierkorbDate: { column: 'papierkorb_date' },
       customerSignature: { column: 'customer_signature' },
-      signatureName: { column: 'signature_name' }
+      signatureName: { column: 'signature_name' },
+      marketingSource: { column: 'marketing_source' }
     };
 
     // Auto-set papierkorb_date when moving to trash, clear when restoring
@@ -1335,6 +1694,8 @@ app.put('/api/forms/:id', authenticateToken, async (req, res) => {
            VALUES ($1, $2, $3, $4, $5)`,
           [id, updates.status, req.user?.id || null, updates.statusDate || null, updates.statusNotes || null]
         );
+        // MODÜL B: Reflect angebot_versendet onto the linked lead
+        await syncLeadFromForm(id, updates.status);
       }
     }
 
@@ -1463,6 +1824,127 @@ app.get('/api/forms/:id/pdf', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Error getting PDF:', err);
     res.status(500).json({ error: 'Failed to get PDF' });
+  }
+});
+
+// === FORM PDF SNAPSHOTS — per-document-type frozen copies ===
+// Stores aufmass / angebot / abnahme / rechnung PDFs as immutable snapshots.
+// Triggered on status transitions so historic PDFs remain accessible.
+
+const SNAPSHOT_TYPES = ['aufmass', 'angebot', 'abnahme', 'rechnung'];
+
+app.post('/api/forms/:id/pdf-snapshot', authenticateToken, (req, res, next) => {
+  upload.single('pdf')(req, res, (err) => {
+    if (err) {
+      console.error(`Snapshot upload error for form ${req.params.id}:`, err.message);
+      return res.status(400).json({ error: `Upload fehlgeschlagen: ${err.message}` });
+    }
+    next();
+  });
+}, async (req, res) => {
+  try {
+    const formId = parseInt(req.params.id);
+    const docType = String(req.body.document_type || '').toLowerCase();
+
+    if (!SNAPSHOT_TYPES.includes(docType)) {
+      return res.status(400).json({ error: `Invalid document_type. Must be one of: ${SNAPSHOT_TYPES.join(', ')}` });
+    }
+    if (!req.file) {
+      return res.status(400).json({ error: 'No PDF file provided' });
+    }
+
+    if (!await verifyFormBranch(formId, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    const dir = path.join(PDF_DIR, 'snapshots');
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+    const filename = `form${formId}_${docType}_${Date.now()}.pdf`;
+    const filePath = path.join(dir, filename);
+    fs.writeFileSync(filePath, req.file.buffer);
+
+    // Upsert; remove old file if present
+    const old = await pool.query(
+      'SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = $2',
+      [formId, docType]
+    );
+    if (old.rows.length > 0) {
+      const oldPath = path.join(dir, old.rows[0].file_path);
+      if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      await pool.query(
+        'UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = $3',
+        [filename, formId, docType]
+      );
+    } else {
+      await pool.query(
+        'INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, $2, $3)',
+        [formId, docType, filename]
+      );
+    }
+
+    res.json({ success: true, document_type: docType, created_at: new Date().toISOString() });
+  } catch (err) {
+    console.error('Error saving form PDF snapshot:', err);
+    res.status(500).json({ error: 'Failed to save snapshot' });
+  }
+});
+
+// List available snapshots for a form
+app.get('/api/forms/:id/pdf-snapshots', authenticateToken, async (req, res) => {
+  try {
+    const formId = parseInt(req.params.id);
+    if (!await verifyFormBranch(formId, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const result = await pool.query(
+      `SELECT document_type, created_at FROM aufmass_form_pdf_snapshots
+       WHERE form_id = $1 ORDER BY created_at ASC`,
+      [formId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error listing snapshots:', err);
+    res.status(500).json({ error: 'Failed to list snapshots' });
+  }
+});
+
+// Stream a specific snapshot
+app.get('/api/forms/:id/pdf-snapshot/:docType', authenticateToken, async (req, res) => {
+  try {
+    const formId = parseInt(req.params.id);
+    const docType = String(req.params.docType).toLowerCase();
+    if (!SNAPSHOT_TYPES.includes(docType)) {
+      return res.status(400).json({ error: 'Invalid document_type' });
+    }
+    if (!await verifyFormBranch(formId, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const result = await pool.query(
+      'SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = $2',
+      [formId, docType]
+    );
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Snapshot not found' });
+    }
+    const filePath = path.join(PDF_DIR, 'snapshots', result.rows[0].file_path);
+    if (!fs.existsSync(filePath)) {
+      // Orphan record — clean up
+      await pool.query(
+        'DELETE FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = $2',
+        [formId, docType]
+      );
+      return res.status(404).json({ error: 'Snapshot file missing' });
+    }
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="form_${formId}_${docType}.pdf"`,
+      'Cache-Control': 'private, max-age=86400'
+    });
+    fs.createReadStream(filePath).pipe(res);
+  } catch (err) {
+    console.error('Error streaming snapshot:', err);
+    res.status(500).json({ error: 'Failed to fetch snapshot' });
   }
 });
 
@@ -1698,6 +2180,46 @@ app.get('/api/public/abnahme-sign/:token', async (req, res) => {
     const request = result.rows[0];
     const isExpired = request.expires_at && new Date(request.expires_at) < new Date();
 
+    // Compute current Restbetrag (Brutto − Anzahlungen) and list invoices
+    // for display on the public sign page. We compute live (not from the
+    // snapshot) so any payments added since the link was sent are reflected.
+    let restbetrag = null;
+    let rechnungen = [];
+    if (request.form_id) {
+      try {
+        const angebot = await pool.query(
+          `SELECT brutto_summe FROM aufmass_angebot WHERE form_id = $1`,
+          [request.form_id]
+        );
+        const anzSum = await pool.query(
+          `SELECT COALESCE(SUM(betrag), 0) AS total FROM aufmass_anzahlungen WHERE form_id = $1`,
+          [request.form_id]
+        );
+        if (angebot.rows.length > 0) {
+          const brutto = parseFloat(angebot.rows[0].brutto_summe);
+          const anzahlungen = parseFloat(anzSum.rows[0].total);
+          restbetrag = { brutto, anzahlungen, rest: brutto - anzahlungen };
+        }
+        const rRes = await pool.query(
+          `SELECT id, rechnung_nr, type, brutto_betrag,
+                  (generated_pdf IS NOT NULL) AS has_pdf
+             FROM aufmass_rechnungen
+            WHERE form_id = $1 AND status = 'gesendet'
+            ORDER BY created_at ASC`,
+          [request.form_id]
+        );
+        rechnungen = rRes.rows.map(r => ({
+          id: r.id,
+          rechnung_nr: r.rechnung_nr,
+          type: r.type,
+          brutto_betrag: parseFloat(r.brutto_betrag),
+          has_pdf: r.has_pdf,
+        }));
+      } catch (cErr) {
+        console.warn('Restbetrag/rechnung enrichment failed:', cErr.message);
+      }
+    }
+
     res.json({
       id: request.id,
       formId: request.form_id,
@@ -1705,7 +2227,9 @@ app.get('/api/public/abnahme-sign/:token', async (req, res) => {
       signerName: request.signer_name,
       signedAt: request.signed_at,
       expiresAt: request.expires_at,
-      snapshot: JSON.parse(request.snapshot_json)
+      snapshot: JSON.parse(request.snapshot_json),
+      restbetrag,
+      rechnungen,
     });
   } catch (err) {
     console.error('Error getting public abnahme sign request:', err);
@@ -1782,6 +2306,38 @@ app.post('/api/public/abnahme-sign/:token', async (req, res) => {
 });
 
 // Public PDF download for signed abnahme
+// Public download for a Rechnung tied to the form behind the sign-request token.
+// No JWT — access is gated by the customer's per-Aufmaß sign token.
+app.get('/api/public/abnahme-sign/:token/rechnung/:rechnungId/pdf', async (req, res) => {
+  try {
+    const tokenHash = hashPublicToken(req.params.token);
+    const reqRow = await pool.query(
+      `SELECT form_id FROM aufmass_abnahme_sign_requests WHERE token_hash = $1`,
+      [tokenHash]
+    );
+    if (reqRow.rows.length === 0) return res.status(404).json({ error: 'Sign request not found' });
+
+    const r = await pool.query(
+      `SELECT generated_pdf, rechnung_nr, form_id FROM aufmass_rechnungen WHERE id = $1`,
+      [req.params.rechnungId]
+    );
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Rechnung not found' });
+    if (r.rows[0].form_id !== reqRow.rows[0].form_id) {
+      // Prevent cross-form access via guessed rechnung_id
+      return res.status(403).json({ error: 'Forbidden' });
+    }
+    if (!r.rows[0].generated_pdf) return res.status(404).json({ error: 'PDF not generated' });
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `inline; filename="Rechnung_${r.rows[0].rechnung_nr}.pdf"`);
+    res.setHeader('Cache-Control', 'no-cache');
+    res.send(r.rows[0].generated_pdf);
+  } catch (err) {
+    console.error('Public Rechnung PDF error:', err);
+    res.status(500).json({ error: 'Failed to fetch PDF' });
+  }
+});
+
 app.get('/api/public/abnahme-sign/:token/pdf', async (req, res) => {
   try {
     const tokenHash = hashPublicToken(req.params.token);
@@ -1814,6 +2370,37 @@ app.get('/api/public/abnahme-sign/:token/pdf', async (req, res) => {
   }
 });
 
+// Mark Aufmaß as sent by physical mail (admin-only). Mirrors the email
+// flow but represents an offline action — there is no SMTP integration,
+// the admin clicks a button after dropping the package at the post office.
+// Idempotent — first stamp wins (COALESCE keeps the original timestamp).
+app.post('/api/forms/:id/mark-post-sent', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    let result;
+    if (req.branchId) {
+      result = await pool.query(
+        `UPDATE aufmass_forms SET post_sent_at = COALESCE(post_sent_at, NOW())
+         WHERE id = $1 AND branch_id = $2 RETURNING id, post_sent_at`,
+        [id, req.branchId]
+      );
+    } else {
+      result = await pool.query(
+        `UPDATE aufmass_forms SET post_sent_at = COALESCE(post_sent_at, NOW())
+         WHERE id = $1 RETURNING id, post_sent_at`,
+        [id]
+      );
+    }
+    if (result.rowCount === 0) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    res.json({ message: 'Form marked as sent by post', post_sent_at: result.rows[0].post_sent_at });
+  } catch (err) {
+    console.error('Mark post sent error:', err);
+    res.status(500).json({ error: 'Failed to mark form as sent by post' });
+  }
+});
+
 // Upload images for a form
 app.post('/api/forms/:id/images', authenticateToken, upload.array('images', 10), async (req, res) => {
   try {
@@ -1824,13 +2411,18 @@ app.post('/api/forms/:id/images', authenticateToken, upload.array('images', 10),
       return res.status(400).json({ error: 'No images provided' });
     }
 
-    for (const file of files) {
-      await pool.query(
-        `INSERT INTO aufmass_bilder (form_id, file_name, file_data, file_type)
-         VALUES ($1, $2, $3, $4)`,
-        [id, file.originalname, file.buffer, file.mimetype]
-      );
-    }
+    // Parallel INSERTs — pg.Pool fans these out across its connection pool so
+    // the wall-clock cost approaches max(insert) instead of sum(insert).
+    // Same data, same table, same order-independent rows as before.
+    await Promise.all(
+      files.map((file) =>
+        pool.query(
+          `INSERT INTO aufmass_bilder (form_id, file_name, file_data, file_type)
+           VALUES ($1, $2, $3, $4)`,
+          [id, file.originalname, file.buffer, file.mimetype]
+        )
+      )
+    );
 
     res.json({ message: `${files.length} images uploaded successfully` });
   } catch (err) {
@@ -1855,13 +2447,17 @@ app.post('/api/forms/:id/abnahme-images', authenticateToken, upload.array('image
       return res.status(400).json({ error: 'No images provided' });
     }
 
-    for (const file of files) {
-      await pool.query(
-        `INSERT INTO aufmass_abnahme_bilder (form_id, file_name, file_data, file_type)
-         VALUES ($1, $2, $3, $4)`,
-        [id, file.originalname, file.buffer, file.mimetype]
-      );
-    }
+    // Parallel INSERTs across the pg.Pool — same trade-off as the regular
+    // /images endpoint: order doesn't matter, wall-clock cost drops to max(insert).
+    await Promise.all(
+      files.map((file) =>
+        pool.query(
+          `INSERT INTO aufmass_abnahme_bilder (form_id, file_name, file_data, file_type)
+           VALUES ($1, $2, $3, $4)`,
+          [id, file.originalname, file.buffer, file.mimetype]
+        )
+      )
+    );
 
     res.json({ message: `${files.length} Maengel images uploaded successfully` });
   } catch (err) {
@@ -1970,18 +2566,95 @@ app.get('/api/forms/:id/angebot', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Form not found' });
     }
 
-    // Get angebot summary
-    const summaryResult = await pool.query('SELECT * FROM aufmass_angebot WHERE form_id = $1', [id]);
-
-    // Get angebot items
-    const itemsResult = await pool.query(
+    // (1) Legacy form-bazli Angebot (eski Caglayan oncesi akis)
+    const legacySummary = await pool.query('SELECT * FROM aufmass_angebot WHERE form_id = $1', [id]);
+    const legacyItems = await pool.query(
       'SELECT * FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id',
       [id]
     );
+    if (legacySummary.rows.length > 0 && legacyItems.rows.length > 0) {
+      return res.json({ summary: legacySummary.rows[0], items: legacyItems.rows });
+    }
+
+    // (2) MODÜL B v3: form'un lead_id'si varsa lead-bazli items'i Angebot formatina cevir.
+    // Bu sayede RechnungForm (Modül C) Caglayan'in LeadFormModal akisinda olusan
+    // verileri de gorebilir.
+    const formRow = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [id]);
+    const leadId = formRow.rows[0]?.lead_id;
+    if (!leadId) {
+      return res.json({ summary: null, items: [] });
+    }
+
+    const leadRes = await pool.query('SELECT * FROM aufmass_leads WHERE id = $1', [leadId]);
+    if (leadRes.rows.length === 0) {
+      return res.json({ summary: null, items: [] });
+    }
+    const lead = leadRes.rows[0];
+
+    const itemsRes = await pool.query(
+      'SELECT * FROM aufmass_lead_items WHERE lead_id = $1 ORDER BY id',
+      [leadId]
+    );
+    const extrasRes = await pool.query(
+      'SELECT * FROM aufmass_lead_extras WHERE lead_id = $1 ORDER BY id',
+      [leadId]
+    );
+
+    // Map lead_items → Angebot.items shape (bezeichnung, menge, einzelpreis, gesamtpreis)
+    let sortIdx = 0;
+    const mappedItems = itemsRes.rows.map(it => {
+      const dimsLabel = (it.breite && it.tiefe)
+        ? ` (${it.breite}×${it.tiefe} mm)`
+        : (it.unit_label ? ` (${it.unit_label})` : '');
+      const lineTotal = (Number(it.unit_price) * Number(it.quantity)) - Number(it.discount || 0);
+      return {
+        id: it.id,
+        form_id: parseInt(id),
+        bezeichnung: `${it.product_name}${dimsLabel}`,
+        menge: Number(it.quantity),
+        einzelpreis: Number(it.unit_price),
+        gesamtpreis: lineTotal,
+        sort_order: sortIdx++,
+      };
+    });
+
+    // Append extras as additional invoice lines
+    for (const ex of extrasRes.rows) {
+      mappedItems.push({
+        id: -ex.id,           // negative ids to avoid collision
+        form_id: parseInt(id),
+        bezeichnung: ex.description,
+        menge: 1,
+        einzelpreis: Number(ex.price),
+        gesamtpreis: Number(ex.price),
+        sort_order: sortIdx++,
+      });
+    }
+
+    // Compute totals matching Angebot summary contract (netto/mwst/brutto)
+    const subtotal = Number(lead.subtotal || 0);
+    const totalDiscount = Number(lead.total_discount || 0);
+    const totalPrice = Number(lead.total_price || 0);
+    const netto = totalPrice / 1.19;
+    const mwstSatz = 19;
+    const mwstBetrag = totalPrice - netto;
 
     res.json({
-      summary: summaryResult.rows[0] || null,
-      items: itemsResult.rows
+      summary: {
+        id: lead.id,
+        form_id: parseInt(id),
+        netto_summe: netto.toFixed(2),
+        mwst_satz: mwstSatz,
+        mwst_betrag: mwstBetrag.toFixed(2),
+        brutto_summe: totalPrice.toFixed(2),
+        angebot_datum: lead.created_at,
+        bemerkungen: lead.notes,
+        // For UI: indicate which path the data came from
+        source: 'lead',
+        original_subtotal: subtotal,
+        original_total_discount: totalDiscount,
+      },
+      items: mappedItems
     });
   } catch (err) {
     console.error('Error fetching Angebot:', err);
@@ -2075,6 +2748,500 @@ app.post('/api/forms/:id/angebot', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Error saving Angebot:', err);
     res.status(500).json({ error: 'Failed to save Angebot data' });
+  }
+});
+
+// ============ RECHNUNG (INVOICE) ENDPOINTS — Modul C ============
+
+// Verify a Rechnung belongs to the caller's branch.
+async function verifyRechnungBranch(rechnungId, branchId) {
+  const r = await pool.query('SELECT branch_id FROM aufmass_rechnungen WHERE id = $1', [rechnungId]);
+  if (r.rows.length === 0) return null;
+  if (r.rows[0].branch_id && branchId && r.rows[0].branch_id !== branchId) return null;
+  return r.rows[0];
+}
+
+// POST /api/forms/:id/rechnung — create a new invoice from a form's Angebot
+app.post('/api/forms/:id/rechnung', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!await verifyFormBranch(id, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+
+    const { type, rechnungsdatum, leistungsdatum, zahlungsziel, anzahlungsbetrag } = req.body;
+    if (!['anzahlungsrechnung', 'schlussrechnung'].includes(type)) {
+      return res.status(400).json({ error: 'Invalid type' });
+    }
+    if (!rechnungsdatum || !zahlungsziel) {
+      return res.status(400).json({ error: 'rechnungsdatum and zahlungsziel are required' });
+    }
+    const anzahlungAmount = type === 'anzahlungsrechnung' && anzahlungsbetrag != null
+      ? Number(anzahlungsbetrag)
+      : null;
+    if (anzahlungAmount !== null && (!Number.isFinite(anzahlungAmount) || anzahlungAmount <= 0)) {
+      return res.status(400).json({ error: 'Invalid anzahlungsbetrag' });
+    }
+
+    // Snapshot form (kunde_*) and angebot (totals + items)
+    const formRow = (await pool.query(
+      `SELECT kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, branch_id
+       FROM aufmass_forms WHERE id = $1`, [id])).rows[0];
+    if (!formRow) return res.status(404).json({ error: 'Form not found' });
+
+    // (1) Legacy form-bazli Angebot
+    let angebotRow = (await pool.query(
+      'SELECT netto_summe, mwst_satz, mwst_betrag, brutto_summe FROM aufmass_angebot WHERE form_id = $1',
+      [id])).rows[0];
+    let itemsRows = (await pool.query(
+      'SELECT bezeichnung, menge, einzelpreis, gesamtpreis, sort_order FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id',
+      [id])).rows;
+
+    // (2) MODÜL B fallback: form'un lead_id'si varsa lead-bazli items'i Angebot formatina cevir.
+    if (!angebotRow || itemsRows.length === 0) {
+      const formInfo = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [id]);
+      const leadId = formInfo.rows[0]?.lead_id;
+      if (leadId) {
+        const leadRes = await pool.query('SELECT * FROM aufmass_leads WHERE id = $1', [leadId]);
+        if (leadRes.rows.length > 0) {
+          const lead = leadRes.rows[0];
+          const leadItems = (await pool.query('SELECT * FROM aufmass_lead_items WHERE lead_id = $1 ORDER BY id', [leadId])).rows;
+          const leadExtras = (await pool.query('SELECT * FROM aufmass_lead_extras WHERE lead_id = $1 ORDER BY id', [leadId])).rows;
+
+          const totalPrice = Number(lead.total_price || 0);
+          const nettoCalc = totalPrice / 1.19;
+          const mwstSatzCalc = 19;
+          const mwstBetragCalc = totalPrice - nettoCalc;
+
+          angebotRow = {
+            netto_summe: nettoCalc.toFixed(2),
+            mwst_satz: mwstSatzCalc,
+            mwst_betrag: mwstBetragCalc.toFixed(2),
+            brutto_summe: totalPrice.toFixed(2),
+          };
+
+          let sortIdx = 0;
+          itemsRows = leadItems.map(it => {
+            const dimsLabel = (it.breite && it.tiefe)
+              ? ` (${it.breite}×${it.tiefe} mm)`
+              : (it.unit_label ? ` (${it.unit_label})` : '');
+            const lineTotal = (Number(it.unit_price) * Number(it.quantity)) - Number(it.discount || 0);
+            return {
+              bezeichnung: `${it.product_name}${dimsLabel}`,
+              menge: Number(it.quantity),
+              einzelpreis: Number(it.unit_price),
+              gesamtpreis: lineTotal,
+              sort_order: sortIdx++,
+            };
+          });
+          for (const ex of leadExtras) {
+            itemsRows.push({
+              bezeichnung: ex.description,
+              menge: 1,
+              einzelpreis: Number(ex.price),
+              gesamtpreis: Number(ex.price),
+              sort_order: sortIdx++,
+            });
+          }
+        }
+      }
+    }
+
+    if (!angebotRow) return res.status(400).json({ error: 'Form has no Angebot — cannot create Rechnung' });
+    if (itemsRows.length === 0) return res.status(400).json({ error: 'Angebot has no items' });
+
+    // For Schlussrechnung the displayed totals stay the full Angebot brutto;
+    // the "Restbetrag" is computed at PDF render time from anzahlungen.
+    const angebotNetto = parseFloat(angebotRow.netto_summe);
+    const mwstSatz = parseFloat(angebotRow.mwst_satz);
+    const angebotMwstBetrag = parseFloat(angebotRow.mwst_betrag);
+    const angebotBrutto = parseFloat(angebotRow.brutto_summe);
+
+    // Anzahlungsrechnung override: invoice the deposit slice only. Replace the
+    // itemised lines with a single "Anzahlung X% gemäß Angebot" entry so the
+    // PDF totals are internally consistent (no item × price conflict with the
+    // header brutto). Schlussrechnung path keeps the full Angebot snapshot.
+    let netto, mwstBetrag, brutto, finalItems;
+    if (anzahlungAmount !== null) {
+      brutto = anzahlungAmount;
+      netto = brutto / (1 + mwstSatz / 100);
+      mwstBetrag = brutto - netto;
+      const pct = angebotBrutto > 0 ? Math.round((brutto / angebotBrutto) * 100) : 0;
+      finalItems = [{
+        bezeichnung: pct > 0
+          ? `Anzahlung ${pct}% gemäß bestehendem Angebot`
+          : 'Anzahlung gemäß bestehendem Angebot',
+        menge: 1,
+        einzelpreis: Number(netto.toFixed(2)),
+        gesamtpreis: Number(netto.toFixed(2)),
+        sort_order: 0,
+      }];
+    } else {
+      netto = angebotNetto;
+      mwstBetrag = angebotMwstBetrag;
+      brutto = angebotBrutto;
+      finalItems = itemsRows;
+    }
+
+    const rechnungNr = await generateNextRechnungNummer(req.branchId);
+
+    // 3-step flow: creating a Rechnung produces an Entwurf (draft); the form
+    // moves to a "Rechnung erstellt" status. Sending the email later promotes
+    // both the Rechnung and the form to the final "gesendet" status.
+    const inserted = await pool.query(
+      `INSERT INTO aufmass_rechnungen
+         (rechnung_nr, type, form_id, branch_id,
+          kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kunde_adresse,
+          netto_betrag, mwst_satz, mwst_betrag, brutto_betrag,
+          rechnungsdatum, leistungsdatum, zahlungsziel,
+          items_json, status, created_by)
+       VALUES ($1,$2,$3,$4, $5,$6,$7,$8,$9, $10,$11,$12,$13, $14,$15,$16, $17,'entwurf',$18)
+       RETURNING *`,
+      [rechnungNr, type, id, req.branchId,
+       formRow.kunde_vorname, formRow.kunde_nachname, formRow.kunde_email, formRow.kunde_telefon, formRow.kundenlokation,
+       netto, mwstSatz, mwstBetrag, brutto,
+       rechnungsdatum, leistungsdatum || null, zahlungsziel,
+       JSON.stringify(finalItems), req.user.id]
+    );
+
+    // Advance the parent form to "Entwurf" workflow status
+    const newFormStatus = type === 'schlussrechnung' ? 'schluss_rechnung_erstellt' : 'rechnung_erstellt';
+    await pool.query(
+      `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
+      [newFormStatus, id]
+    );
+
+    res.status(201).json(inserted.rows[0]);
+  } catch (err) {
+    console.error('Error creating Rechnung:', err);
+    res.status(500).json({ error: 'Failed to create Rechnung' });
+  }
+});
+
+// GET /api/forms/:id/rechnungen — list invoices for a form
+app.get('/api/forms/:id/rechnungen', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!await verifyFormBranch(id, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const rows = (await pool.query(
+      `SELECT id, rechnung_nr, type, form_id, branch_id,
+              kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kunde_adresse,
+              netto_betrag, mwst_satz, mwst_betrag, brutto_betrag,
+              rechnungsdatum, leistungsdatum, zahlungsziel,
+              items_json, status, sent_at, paid_at, pdf_generated_at, created_at
+         FROM aufmass_rechnungen WHERE form_id = $1 ORDER BY created_at DESC`,
+      [id])).rows;
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing Rechnungen:', err);
+    res.status(500).json({ error: 'Failed to list Rechnungen' });
+  }
+});
+
+// GET /api/rechnungen/:id — single invoice detail
+app.get('/api/rechnungen/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await pool.query(
+      `SELECT id, rechnung_nr, type, form_id, branch_id,
+              kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kunde_adresse,
+              netto_betrag, mwst_satz, mwst_betrag, brutto_betrag,
+              rechnungsdatum, leistungsdatum, zahlungsziel,
+              items_json, status, sent_at, paid_at, pdf_generated_at, created_at
+         FROM aufmass_rechnungen WHERE id = $1`, [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Rechnung not found' });
+    if (r.rows[0].branch_id && req.branchId && r.rows[0].branch_id !== req.branchId) {
+      return res.status(404).json({ error: 'Rechnung not found' });
+    }
+    res.json(r.rows[0]);
+  } catch (err) {
+    console.error('Error fetching Rechnung:', err);
+    res.status(500).json({ error: 'Failed to fetch Rechnung' });
+  }
+});
+
+// PUT /api/rechnungen/:id — update invoice (only while entwurf)
+app.put('/api/rechnungen/:id', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await verifyRechnungBranch(id, req.branchId);
+    if (!existing) return res.status(404).json({ error: 'Rechnung not found' });
+
+    const cur = await pool.query('SELECT status FROM aufmass_rechnungen WHERE id = $1', [id]);
+    if (cur.rows[0].status !== 'entwurf') {
+      return res.status(409).json({ error: 'Only entwurf invoices can be edited' });
+    }
+
+    const { rechnungsdatum, leistungsdatum, zahlungsziel } = req.body;
+    // Editing invalidates the cached PDF
+    const updated = await pool.query(
+      `UPDATE aufmass_rechnungen
+         SET rechnungsdatum = COALESCE($2, rechnungsdatum),
+             leistungsdatum = $3,
+             zahlungsziel   = COALESCE($4, zahlungsziel),
+             generated_pdf  = NULL,
+             pdf_generated_at = NULL
+       WHERE id = $1
+       RETURNING *`,
+      [id, rechnungsdatum || null, leistungsdatum || null, zahlungsziel || null]
+    );
+    res.json(updated.rows[0]);
+  } catch (err) {
+    console.error('Error updating Rechnung:', err);
+    res.status(500).json({ error: 'Failed to update Rechnung' });
+  }
+});
+
+// POST /api/rechnungen/:id/mark-paid — user confirms the customer has paid
+// this Anzahlungsrechnung. Flips the invoice to status='bezahlt' AND auto-
+// creates a matching Anzahlung receipt so the running totals on the
+// Anzahlungen-Modal update without a second manual entry. Idempotent: if
+// status is already 'bezahlt' or a receipt already exists, the duplicate
+// is skipped instead of erroring.
+app.post('/api/rechnungen/:id/mark-paid', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await verifyRechnungBranch(id, req.branchId);
+    if (!existing) return res.status(404).json({ error: 'Rechnung not found' });
+
+    const r = await pool.query(
+      `SELECT id, type, status, brutto_betrag, form_id, branch_id
+         FROM aufmass_rechnungen WHERE id = $1`, [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Rechnung not found' });
+    const rechnung = r.rows[0];
+    if (rechnung.type !== 'anzahlungsrechnung') {
+      return res.status(400).json({ error: 'Only Anzahlungsrechnungen can be marked paid here' });
+    }
+
+    if (rechnung.status !== 'bezahlt') {
+      await pool.query(
+        `UPDATE aufmass_rechnungen
+           SET status = 'bezahlt', paid_at = COALESCE(paid_at, NOW())
+         WHERE id = $1`, [id]);
+    }
+
+    // Mirror the payment into aufmass_anzahlungen so the totals reflect the
+    // received cash. Skip if a receipt for this rechnung already exists
+    // (user clicked twice, or admin pre-recorded the receipt).
+    const dup = await pool.query(
+      'SELECT id FROM aufmass_anzahlungen WHERE rechnung_id = $1', [id]);
+    if (dup.rows.length === 0) {
+      await pool.query(
+        `INSERT INTO aufmass_anzahlungen
+           (form_id, rechnung_id, betrag, zahlungsdatum, zahlungsmethode, notiz, branch_id, created_by)
+         VALUES ($1, $2, $3, CURRENT_DATE, 'überweisung', $4, $5, $6)`,
+        [rechnung.form_id, id, rechnung.brutto_betrag,
+         `Bestätigt aus Anzahlungsrechnung`, rechnung.branch_id, req.user.id]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error marking Rechnung paid:', err);
+    res.status(500).json({ error: 'Failed to mark as paid' });
+  }
+});
+
+// POST /api/rechnungen/:id/mark-sent — admin manually marks paper-mailed invoice as sent
+app.post('/api/rechnungen/:id/mark-sent', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await verifyRechnungBranch(id, req.branchId);
+    if (!existing) return res.status(404).json({ error: 'Rechnung not found' });
+
+    const r = await pool.query(
+      `UPDATE aufmass_rechnungen
+         SET status = 'gesendet', sent_at = COALESCE(sent_at, NOW())
+       WHERE id = $1 AND status = 'entwurf'
+       RETURNING form_id, type`, [id]);
+    if (r.rows.length === 0) return res.status(409).json({ error: 'Rechnung is not entwurf' });
+
+    // Advance form status as well
+    const formStatus = r.rows[0].type === 'schlussrechnung' ? 'rest_rechnung_erstellt' : 'gesendet';
+    await pool.query(
+      `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
+      [formStatus, r.rows[0].form_id]);
+
+    res.json({ success: true, form_status: formStatus });
+  } catch (err) {
+    console.error('Error marking Rechnung as sent:', err);
+    res.status(500).json({ error: 'Failed to mark as sent' });
+  }
+});
+
+// POST /api/rechnungen/:id/pdf — store the rendered PDF blob (called after client-side render)
+app.post('/api/rechnungen/:id/pdf', authenticateToken, express.raw({ type: 'application/pdf', limit: '20mb' }), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await verifyRechnungBranch(id, req.branchId);
+    if (!existing) return res.status(404).json({ error: 'Rechnung not found' });
+    if (!req.body || !req.body.length) return res.status(400).json({ error: 'PDF body missing' });
+
+    await pool.query(
+      `UPDATE aufmass_rechnungen SET generated_pdf = $1, pdf_generated_at = NOW() WHERE id = $2`,
+      [req.body, id]);
+
+    // MODÜL B v3: mirror to form_pdf_snapshots so the Aufmaß dropdown sees Rechnung-PDF
+    try {
+      const formRow = await pool.query('SELECT form_id FROM aufmass_rechnungen WHERE id = $1', [id]);
+      const formId = formRow.rows[0]?.form_id;
+      if (formId) {
+        const snapDir = path.join(PDF_DIR, 'snapshots');
+        if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+        const snapFilename = `form${formId}_rechnung_${Date.now()}.pdf`;
+        fs.writeFileSync(path.join(snapDir, snapFilename), req.body);
+
+        const old = await pool.query(
+          `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'rechnung'`,
+          [formId]
+        );
+        if (old.rows.length > 0) {
+          const oldPath = path.join(snapDir, old.rows[0].file_path);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          await pool.query(
+            `UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = 'rechnung'`,
+            [snapFilename, formId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, 'rechnung', $2)`,
+            [formId, snapFilename]
+          );
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Form snapshot mirror (rechnung) failed:', snapErr.message);
+    }
+
+    res.json({ success: true, size: req.body.length });
+  } catch (err) {
+    console.error('Error saving Rechnung PDF:', err);
+    res.status(500).json({ error: 'Failed to save PDF' });
+  }
+});
+
+// GET /api/rechnungen/:id/pdf — return the cached PDF
+app.get('/api/rechnungen/:id/pdf', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await pool.query(
+      `SELECT generated_pdf, branch_id, rechnung_nr FROM aufmass_rechnungen WHERE id = $1`, [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Rechnung not found' });
+    if (r.rows[0].branch_id && req.branchId && r.rows[0].branch_id !== req.branchId) {
+      return res.status(404).json({ error: 'Rechnung not found' });
+    }
+    if (!r.rows[0].generated_pdf) return res.status(404).json({ error: 'PDF not generated yet' });
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `inline; filename="Rechnung_${r.rows[0].rechnung_nr}.pdf"`
+    });
+    res.send(r.rows[0].generated_pdf);
+  } catch (err) {
+    console.error('Error fetching Rechnung PDF:', err);
+    res.status(500).json({ error: 'Failed to fetch PDF' });
+  }
+});
+
+// POST /api/forms/:id/anzahlungen — record a down-payment receipt
+app.post('/api/forms/:id/anzahlungen', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!await verifyFormBranch(id, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const { betrag, zahlungsdatum, beleg_file_id, notiz } = req.body;
+    const betragNum = parseFloat(betrag);
+    if (!betragNum || betragNum <= 0) return res.status(400).json({ error: 'Betrag must be > 0' });
+    if (!zahlungsdatum) return res.status(400).json({ error: 'Zahlungsdatum required' });
+
+    // Each Anzahlung automatically gets its own Anzahlungsrechnung (legal receipt)
+    // covering exactly that amount. Brutto-inclusive: VAT is backed out at 19%.
+    const formRow = (await pool.query(
+      `SELECT kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, branch_id
+         FROM aufmass_forms WHERE id = $1`, [id])).rows[0];
+
+    const mwstSatz = 19;
+    const brutto = betragNum;
+    const netto = Math.round((brutto / 1.19) * 100) / 100;
+    const mwstBetrag = Math.round((brutto - netto) * 100) / 100;
+    const itemBezeichnung = `Anzahlung gemäß Auftrag (${zahlungsdatum})`;
+    const items = [{
+      bezeichnung: itemBezeichnung,
+      menge: 1,
+      einzelpreis: netto,
+      gesamtpreis: netto,
+      sort_order: 0,
+    }];
+
+    const rechnungNr = await generateNextRechnungNummer(req.branchId);
+    const zahlungsziel = zahlungsdatum;
+    const rRes = await pool.query(
+      `INSERT INTO aufmass_rechnungen
+         (rechnung_nr, type, form_id, branch_id,
+          kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kunde_adresse,
+          netto_betrag, mwst_satz, mwst_betrag, brutto_betrag,
+          rechnungsdatum, leistungsdatum, zahlungsziel,
+          items_json, status, sent_at, created_by)
+       VALUES ($1,'anzahlungsrechnung',$2,$3, $4,$5,$6,$7,$8, $9,$10,$11,$12, $13,$14,$15, $16,'gesendet',NOW(),$17)
+       RETURNING id`,
+      [rechnungNr, id, req.branchId,
+       formRow?.kunde_vorname || null, formRow?.kunde_nachname || null, formRow?.kunde_email || null, formRow?.kunde_telefon || null, formRow?.kundenlokation || null,
+       netto, mwstSatz, mwstBetrag, brutto,
+       zahlungsdatum, zahlungsdatum, zahlungsziel,
+       JSON.stringify(items), req.user.id]
+    );
+    const newRechnungId = rRes.rows[0].id;
+
+    const ins = await pool.query(
+      `INSERT INTO aufmass_anzahlungen
+         (form_id, rechnung_id, betrag, zahlungsdatum, zahlungsmethode, beleg_file_id, notiz, branch_id, created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [id, newRechnungId, betragNum, zahlungsdatum, 'überweisung',
+       beleg_file_id || null, notiz || null, req.branchId, req.user.id]
+    );
+    // Echo the Rechnung-Nr in the response so the frontend can render its PDF
+    res.status(201).json({ ...ins.rows[0], rechnung_nr: rechnungNr });
+  } catch (err) {
+    console.error('Error creating Anzahlung:', err);
+    res.status(500).json({ error: 'Failed to create Anzahlung' });
+  }
+});
+
+// GET /api/forms/:id/anzahlungen — list down-payment receipts for a form
+app.get('/api/forms/:id/anzahlungen', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!await verifyFormBranch(id, req.branchId)) {
+      return res.status(404).json({ error: 'Form not found' });
+    }
+    const rows = (await pool.query(
+      `SELECT id, form_id, rechnung_id, betrag, zahlungsdatum, zahlungsmethode,
+              beleg_file_id, notiz, created_at
+         FROM aufmass_anzahlungen WHERE form_id = $1 ORDER BY zahlungsdatum ASC, id ASC`,
+      [id])).rows;
+    res.json(rows);
+  } catch (err) {
+    console.error('Error listing Anzahlungen:', err);
+    res.status(500).json({ error: 'Failed to list Anzahlungen' });
+  }
+});
+
+// DELETE /api/anzahlungen/:id — admin/office removes a payment row
+app.delete('/api/anzahlungen/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const r = await pool.query('SELECT branch_id FROM aufmass_anzahlungen WHERE id = $1', [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Anzahlung not found' });
+    if (r.rows[0].branch_id && req.branchId && r.rows[0].branch_id !== req.branchId) {
+      return res.status(404).json({ error: 'Anzahlung not found' });
+    }
+    await pool.query('DELETE FROM aufmass_anzahlungen WHERE id = $1', [id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting Anzahlung:', err);
+    res.status(500).json({ error: 'Failed to delete Anzahlung' });
   }
 });
 
@@ -4010,18 +5177,16 @@ app.get('/api/boldsign/callback-log', (req, res) => {
 // Get all lead products (price matrix)
 app.get('/api/lead-products', authenticateToken, async (req, res) => {
   try {
-    let query, params;
-    if (req.branchId) {
-      query = `SELECT * FROM aufmass_lead_products
-               WHERE branch_id = $1
-               ORDER BY product_name, breite, tiefe`;
-      params = [req.branchId];
-    } else {
-      query = `SELECT * FROM aufmass_lead_products ORDER BY product_name, breite, tiefe`;
-      params = [];
-    }
-
-    const result = await pool.query(query, params);
+    // MODÜL B v3: Admin domain'inden gelen istekte de tek branch göster.
+    // Aksi halde ProductPricing matrix farkli branch'lerin satirlarini karistirir
+    // ve save yanlis ID'ye yazar.
+    const branchSlug = req.branchId || 'koblenz';
+    const result = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1
+       ORDER BY product_name, breite, tiefe`,
+      [branchSlug]
+    );
     res.json(result.rows);
   } catch (err) {
     console.error('Get lead products error:', err);
@@ -4132,15 +5297,10 @@ app.put('/api/lead-products/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { product_name, breite, tiefe, price, pricing_type, unit_label } = req.body;
 
-    // Verify product belongs to this branch
-    let checkQuery, checkParams;
-    if (req.branchId) {
-      checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1 AND branch_id = $2';
-      checkParams = [id, req.branchId];
-    } else {
-      checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1';
-      checkParams = [id];
-    }
+    // Verify product belongs to this branch (admin domain falls back to koblenz)
+    const branchSlug = req.branchId || 'koblenz';
+    const checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1 AND branch_id = $2';
+    const checkParams = [id, branchSlug];
 
     const existing = await pool.query(checkQuery, checkParams);
 
@@ -4259,22 +5419,150 @@ app.delete('/api/lead-products/:id', authenticateToken, async (req, res) => {
 // Get unique product names
 app.get('/api/lead-products/names', authenticateToken, async (req, res) => {
   try {
-    let query, params;
-    if (req.branchId) {
-      query = `SELECT DISTINCT product_name FROM aufmass_lead_products
-               WHERE branch_id = $1
-               ORDER BY product_name`;
-      params = [req.branchId];
-    } else {
-      query = `SELECT DISTINCT product_name FROM aufmass_lead_products ORDER BY product_name`;
-      params = [];
-    }
-
-    const result = await pool.query(query, params);
+    const branchSlug = req.branchId || 'koblenz';
+    const result = await pool.query(
+      `SELECT DISTINCT product_name FROM aufmass_lead_products
+       WHERE branch_id = $1
+       ORDER BY product_name`,
+      [branchSlug]
+    );
     res.json(result.rows.map(r => r.product_name));
   } catch (err) {
     console.error('Get product names error:', err);
     res.status(500).json({ error: 'Failed to fetch product names' });
+  }
+});
+
+// MODÜL B v3: Generic N-axis price lookup using size_values JSONB.
+// Used for Markise (B×L, B×L×H, B×H, B), Keil (L+H+H), and other profiles
+// that the legacy /dimensions endpoint can't represent.
+//
+// Body: { size_values: { breite: 5000, tiefe: 4000 } }   (axis names match productConfig.json)
+// Response: { matched, exact, price_missing, rounded_to?, lead_product? }
+app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req, res) => {
+  try {
+    const { productName } = req.params;
+    const { size_values } = req.body || {};
+    const branchSlug = req.branchId || 'koblenz';
+
+    if (!size_values || typeof size_values !== 'object') {
+      return res.status(400).json({ error: 'size_values object required in body' });
+    }
+
+    const axes = Object.keys(size_values).filter(k => Number.isFinite(Number(size_values[k])));
+
+    // Pricing-type='unit' fallback (no dimensions involved)
+    if (axes.length === 0) {
+      const r = await pool.query(
+        `SELECT * FROM aufmass_lead_products
+         WHERE branch_id = $1 AND product_name = $2
+           AND pricing_type = 'unit' AND is_active = true LIMIT 1`,
+        [branchSlug, productName]
+      );
+      if (r.rows.length > 0) {
+        return res.json({
+          matched: true, exact: true,
+          price_missing: r.rows[0].price == null,
+          lead_product: r.rows[0]
+        });
+      }
+      return res.json({ matched: false });
+    }
+
+    // Exact match on size_values JSONB equality
+    const normalizedSV = Object.fromEntries(axes.map(a => [a, Number(size_values[a])]));
+    const exact = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1 AND product_name = $2
+         AND size_values = $3::jsonb AND is_active = true`,
+      [branchSlug, productName, JSON.stringify(normalizedSV)]
+    );
+    if (exact.rows.length > 0) {
+      return res.json({
+        matched: true, exact: true,
+        price_missing: exact.rows[0].price == null,
+        lead_product: exact.rows[0]
+      });
+    }
+
+    // Round-up: smallest size_values where every axis >= requested
+    const conditions = axes.map((axis, i) =>
+      `(size_values->>'${axis.replace(/'/g, "''")}')::int >= $${i + 3}`
+    ).join(' AND ');
+    const orderBy = axes.map(a =>
+      `(size_values->>'${a.replace(/'/g, "''")}')::int ASC`
+    ).join(', ');
+    const params = [branchSlug, productName, ...axes.map(a => normalizedSV[a])];
+
+    const rounded = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1 AND product_name = $2 AND is_active = true
+         AND size_values IS NOT NULL AND ${conditions}
+       ORDER BY ${orderBy}
+       LIMIT 1`,
+      params
+    );
+    if (rounded.rows.length > 0) {
+      const row = rounded.rows[0];
+      return res.json({
+        matched: true,
+        exact: false,
+        rounded_to: row.size_values,
+        price_missing: row.price == null,
+        lead_product: row
+      });
+    }
+
+    res.json({ matched: false });
+  } catch (err) {
+    console.error('Lead-products lookup error:', err);
+    res.status(500).json({ error: 'Lookup failed' });
+  }
+});
+
+// Upsert price from Angebot/LeadFormModal (creates row if missing, updates price if exists)
+app.post('/api/lead-products/upsert-from-angebot', authenticateToken, async (req, res) => {
+  try {
+    const { product_name, size_values, price, category, product_type, size_profile } = req.body || {};
+    const branchSlug = req.branchId || 'koblenz';
+
+    if (!product_name || !size_values || price == null) {
+      return res.status(400).json({ error: 'product_name, size_values, price required' });
+    }
+
+    const normalizedSV = Object.fromEntries(
+      Object.entries(size_values).map(([k, v]) => [k, Number(v)])
+    );
+    const breiteCm = Math.round((normalizedSV.breite || normalizedSV.markisenbreite || normalizedSV.laenge || 0) / 10);
+    const tiefeCm  = Math.round((normalizedSV.tiefe || normalizedSV.markisenlaenge || normalizedSV.markisenhoehe || normalizedSV.hoehe || normalizedSV.vorneHoehe || 0) / 10);
+
+    // Try update existing exact size_values match
+    const upd = await pool.query(
+      `UPDATE aufmass_lead_products
+       SET price = $1
+       WHERE branch_id = $2 AND product_name = $3 AND size_values = $4::jsonb
+       RETURNING id`,
+      [price, branchSlug, product_name, JSON.stringify(normalizedSV)]
+    );
+    if (upd.rows.length > 0) {
+      return res.json({ success: true, action: 'updated', id: upd.rows[0].id });
+    }
+
+    // Insert new row
+    const ins = await pool.query(
+      `INSERT INTO aufmass_lead_products
+        (branch_id, category, product_type, product_name,
+         breite, tiefe, price, pricing_type,
+         size_values, size_profile, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'dimension', $8::jsonb, $9, true)
+       RETURNING id`,
+      [branchSlug, category || null, product_type || null, product_name,
+       breiteCm, tiefeCm, price, JSON.stringify(normalizedSV), size_profile || null]
+    );
+    res.json({ success: true, action: 'inserted', id: ins.rows[0].id });
+  } catch (err) {
+    console.error('Upsert from angebot error:', err);
+    res.status(500).json({ error: 'Upsert failed' });
   }
 });
 
@@ -4283,21 +5571,12 @@ app.get('/api/lead-products/:productName/dimensions', authenticateToken, async (
   try {
     const { productName } = req.params;
 
-    let query, params;
-    if (req.branchId) {
-      query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
-               FROM aufmass_lead_products
-               WHERE product_name = $1
-               AND (branch_id = $2 OR (branch_id IS NULL AND product_name LIKE '%PREMIUMLINE%'))
-               ORDER BY breite, tiefe`;
-      params = [productName, req.branchId];
-    } else {
-      query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
-               FROM aufmass_lead_products
-               WHERE product_name = $1
-               ORDER BY breite, tiefe`;
-      params = [productName];
-    }
+    const branchSlug = req.branchId || 'koblenz';
+    const query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
+             FROM aufmass_lead_products
+             WHERE product_name = $1 AND branch_id = $2
+             ORDER BY breite, tiefe`;
+    const params = [productName, branchSlug];
 
     const result = await pool.query(query, params);
 
@@ -4339,7 +5618,7 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
   console.log('=== CREATE LEAD START ===');
   console.log('Body:', JSON.stringify(req.body, null, 2));
   try {
-    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price } = req.body;
+    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price, aufmass_form_id, marketing_source } = req.body;
 
     // Use provided total_price or calculate fallback
     let finalTotal = total_price;
@@ -4359,11 +5638,11 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
 
     // Insert lead with discount fields, angebot_nummer and kunden_nummer
     const leadResult = await pool.query(
-      `INSERT INTO aufmass_leads (customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, subtotal, total_discount, total_price, status, branch_id, created_by, angebot_nummer, kunden_nummer)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'unbearbeitet', $10, $11, $12, $13) RETURNING id, angebot_nummer, kunden_nummer`,
+      `INSERT INTO aufmass_leads (customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, subtotal, total_discount, total_price, status, branch_id, created_by, angebot_nummer, kunden_nummer, marketing_source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'unbearbeitet', $10, $11, $12, $13, $14) RETURNING id, angebot_nummer, kunden_nummer`,
       [customer_firstname, customer_lastname, customer_email || null, customer_phone || null,
        customer_address || null, notes || null, subtotal || 0, total_discount || 0, finalTotal,
-       req.branchId || null, req.user.id, angebotNummer, kundenNummer]
+       req.branchId || null, req.user.id, angebotNummer, kundenNummer, marketing_source || null]
     );
 
     const leadId = leadResult.rows[0].id;
@@ -4402,6 +5681,22 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
       }
     }
 
+    // MODÜL B: If created from an existing Aufmaß, link the form to this lead.
+    // Branch-scoped UPDATE so callers cannot link forms outside their branch.
+    if (aufmass_form_id) {
+      if (req.branchId) {
+        await pool.query(
+          'UPDATE aufmass_forms SET lead_id = $1 WHERE id = $2 AND branch_id = $3',
+          [leadId, aufmass_form_id, req.branchId]
+        );
+      } else {
+        await pool.query(
+          'UPDATE aufmass_forms SET lead_id = $1 WHERE id = $2',
+          [leadId, aufmass_form_id]
+        );
+      }
+    }
+
     res.status(201).json({ id: leadId, angebot_nummer: angebotNummer, kunden_nummer: kundenNummer, message: 'Lead created successfully' });
   } catch (err) {
     console.error('=== CREATE LEAD ERROR ===');
@@ -4416,9 +5711,14 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
 app.get('/api/leads', authenticateToken, async (req, res) => {
   try {
     let query, params;
+    // MODÜL B: aufmass_form_id surfaced via subquery so the Schnellangebot
+    // tab can filter out leads that originated from an Aufmaß (those live
+    // in the Aus Aufmaß tab as their source form's "Lead #N" badge).
     if (req.branchId) {
       query = `SELECT l.*, u.name as created_by_name,
-               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count
+               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count,
+               (SELECT MIN(id) FROM aufmass_forms WHERE lead_id = l.id) as aufmass_form_id,
+               (SELECT status FROM aufmass_forms WHERE lead_id = l.id ORDER BY id ASC LIMIT 1) as aufmass_form_status
                FROM aufmass_leads l
                LEFT JOIN aufmass_users u ON l.created_by = u.id
                WHERE l.branch_id = $1
@@ -4426,7 +5726,9 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
       params = [req.branchId];
     } else {
       query = `SELECT l.*, u.name as created_by_name,
-               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count
+               (SELECT COUNT(*) FROM aufmass_lead_angebote WHERE lead_id = l.id) as angebot_count,
+               (SELECT MIN(id) FROM aufmass_forms WHERE lead_id = l.id) as aufmass_form_id,
+               (SELECT status FROM aufmass_forms WHERE lead_id = l.id ORDER BY id ASC LIMIT 1) as aufmass_form_status
                FROM aufmass_leads l
                LEFT JOIN aufmass_users u ON l.created_by = u.id
                ORDER BY l.created_at DESC`;
@@ -4484,6 +5786,19 @@ async function generateNextKundenNummer(branchId) {
   );
   return `${branchKey}-K-${year}-${padNumber(result.rows[0].last_num)}`;
 }
+async function generateNextRechnungNummer(branchId) {
+  const year = new Date().getFullYear();
+  const branchKey = branchPrefixFor(branchId);
+  const result = await pool.query(
+    `INSERT INTO aufmass_rechnung_counters (branch_key, year, last_num)
+     VALUES ($1, $2, 1)
+     ON CONFLICT (branch_key, year)
+     DO UPDATE SET last_num = aufmass_rechnung_counters.last_num + 1
+     RETURNING last_num`,
+    [branchKey, year]
+  );
+  return `${branchKey}-R-${year}-${padNumber(result.rows[0].last_num)}`;
+}
 
 // Helper: enrich lead items with description + custom_fields schema from product master,
 // and parse custom_field_values JSON. Used so the frontend can render PRODUKTDETAILS labels.
@@ -4519,6 +5834,24 @@ async function enrichItemsWithProductMeta(items, branchId) {
   const productParams = branchId ? [names, branchId] : [names];
   const productResult = await pool.query(productQuery, productParams);
 
+  // Modül F: canonical product_id for image lookups.
+  // Must match ProductPricing's grouping (ORDER BY product_name, breite, tiefe)
+  // so the id used for image upload equals the id used for image lookup in PDF.
+  const canonicalIdQuery = branchId
+    ? `SELECT DISTINCT ON (product_name) product_name, id
+       FROM aufmass_lead_products
+       WHERE product_name = ANY($1::text[]) AND branch_id = $2
+       ORDER BY product_name, breite ASC, tiefe ASC, id ASC`
+    : `SELECT DISTINCT ON (product_name) product_name, id
+       FROM aufmass_lead_products
+       WHERE product_name = ANY($1::text[])
+       ORDER BY product_name, breite ASC, tiefe ASC, id ASC`;
+  const canonicalResult = await pool.query(canonicalIdQuery, productParams);
+  const canonicalIdByName = {};
+  for (const row of canonicalResult.rows) {
+    canonicalIdByName[row.product_name] = row.id;
+  }
+
   const metaByName = {};
   for (const row of productResult.rows) {
     let customFields = null;
@@ -4538,6 +5871,7 @@ async function enrichItemsWithProductMeta(items, branchId) {
     const meta = metaByName[item.product_name];
     return {
       ...parseItemCustomFieldValues(item),
+      product_id: canonicalIdByName[item.product_name] ?? item.product_id ?? null,
       description: meta?.description ?? null,
       custom_fields: meta?.custom_fields ?? null
     };
@@ -4589,8 +5923,18 @@ app.get('/api/leads/:id', authenticateToken, async (req, res) => {
       angebote.push({ ...ang, items: enrichedAngItems, extras: angExtras.rows });
     }
 
+    // MODÜL B: include the linked source Aufmaß id so the frontend can fetch
+    // its photos (aufmass_bilder) when regenerating the Angebot PDF outside
+    // the LeadFormModal save path (e.g. lead-list PDF preview / e-mail send).
+    const aufmassFormRes = await pool.query(
+      'SELECT id FROM aufmass_forms WHERE lead_id = $1 ORDER BY id ASC LIMIT 1',
+      [id]
+    );
+    const aufmass_form_id = aufmassFormRes.rows[0]?.id || null;
+
     res.json({
       ...lead,
+      aufmass_form_id,
       items: enrichedLeadItems,
       extras: extrasResult.rows,
       angebote
@@ -4605,9 +5949,11 @@ app.get('/api/leads/:id', authenticateToken, async (req, res) => {
 app.put('/api/leads/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price, angebot_id } = req.body;
+    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price, angebot_id, marketing_source } = req.body;
 
-    // Update customer info on lead (including notes/Beschreibung — was previously omitted)
+    // Update customer info on lead (including notes/Beschreibung — was previously omitted).
+    // marketing_source uses COALESCE so partial updates that omit it preserve the
+    // existing value instead of clobbering it to NULL.
     let result;
     if (req.branchId) {
       result = await pool.query(
@@ -4616,12 +5962,13 @@ app.put('/api/leads/:id', authenticateToken, async (req, res) => {
              customer_email = $3, customer_phone = $4,
              customer_address = $5, notes = $6,
              subtotal = $7, total_discount = $8, total_price = $9,
+             marketing_source = COALESCE($12, marketing_source),
              updated_at = NOW()
          WHERE id = $10 AND branch_id = $11`,
         [customer_firstname, customer_lastname, customer_email || null, customer_phone || null,
          customer_address || null, notes || null,
          subtotal || 0, total_discount || 0, total_price,
-         id, req.branchId]
+         id, req.branchId, marketing_source || null]
       );
     } else {
       result = await pool.query(
@@ -4630,12 +5977,13 @@ app.put('/api/leads/:id', authenticateToken, async (req, res) => {
              customer_email = $3, customer_phone = $4,
              customer_address = $5, notes = $6,
              subtotal = $7, total_discount = $8, total_price = $9,
+             marketing_source = COALESCE($11, marketing_source),
              updated_at = NOW()
          WHERE id = $10`,
         [customer_firstname, customer_lastname, customer_email || null, customer_phone || null,
          customer_address || null, notes || null,
          subtotal || 0, total_discount || 0, total_price,
-         id]
+         id, marketing_source || null]
       );
     }
 
@@ -4770,6 +6118,54 @@ app.put('/api/leads/:id/status', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Update lead status error:', err);
     res.status(500).json({ error: 'Failed to update lead status' });
+  }
+});
+
+// MODÜL B: Mark a lead's angebot as sent (auto-triggered by e-mail flows).
+// Sets aufmass_leads.angebot_sent_at and pushes every linked Aufmaß forward
+// to status 'angebot_versendet'. Idempotent — repeated calls are safe.
+app.post('/api/leads/:id/mark-angebot-sent', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const ownership = req.branchId
+      ? await pool.query('SELECT id FROM aufmass_leads WHERE id = $1 AND branch_id = $2', [id, req.branchId])
+      : await pool.query('SELECT id FROM aufmass_leads WHERE id = $1', [id]);
+    if (ownership.rowCount === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = COALESCE(angebot_sent_at, NOW()), updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
+    await syncFormsFromLead(id, req.user?.id);
+    res.json({ message: 'Angebot marked as sent' });
+  } catch (err) {
+    console.error('Mark angebot sent error:', err);
+    res.status(500).json({ error: 'Failed to mark angebot as sent' });
+  }
+});
+
+// MODÜL B: Manual override for the "Versendet" marker — admin only, used when
+// the offer was sent by physical mail (German postal route) and no e-mail flow
+// fired the auto-sync. Office role is intentionally rejected per spec.
+app.post('/api/leads/:id/mark-angebot-sent-manual', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const ownership = req.branchId
+      ? await pool.query('SELECT id FROM aufmass_leads WHERE id = $1 AND branch_id = $2', [id, req.branchId])
+      : await pool.query('SELECT id FROM aufmass_leads WHERE id = $1', [id]);
+    if (ownership.rowCount === 0) {
+      return res.status(404).json({ error: 'Lead not found' });
+    }
+    await pool.query(
+      `UPDATE aufmass_leads SET angebot_sent_at = COALESCE(angebot_sent_at, NOW()), updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
+    await syncFormsFromLead(id, req.user?.id);
+    res.json({ message: 'Angebot marked as sent (manual)' });
+  } catch (err) {
+    console.error('Manual mark angebot sent error:', err);
+    res.status(500).json({ error: 'Failed to mark angebot as sent' });
   }
 });
 
@@ -4963,6 +6359,39 @@ app.post('/api/leads/:id/angebote/:angebotId/pdf', authenticateToken, upload.sin
 
     const pdfPath = path.join(LEAD_PDF_DIR, `${id}_${angebotId}.pdf`);
     fs.writeFileSync(pdfPath, req.file.buffer);
+
+    // MODÜL B v3: mirror to form_pdf_snapshots so the Aufmaß dropdown sees it
+    try {
+      const linkRes = await pool.query('SELECT id FROM aufmass_forms WHERE lead_id = $1 LIMIT 1', [id]);
+      const formId = linkRes.rows[0]?.id;
+      if (formId) {
+        const snapDir = path.join(PDF_DIR, 'snapshots');
+        if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+        const snapFilename = `form${formId}_angebot_${Date.now()}.pdf`;
+        fs.writeFileSync(path.join(snapDir, snapFilename), req.file.buffer);
+
+        const old = await pool.query(
+          `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'angebot'`,
+          [formId]
+        );
+        if (old.rows.length > 0) {
+          const oldPath = path.join(snapDir, old.rows[0].file_path);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          await pool.query(
+            `UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = 'angebot'`,
+            [snapFilename, formId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, 'angebot', $2)`,
+            [formId, snapFilename]
+          );
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Form snapshot mirror failed (angebote):', snapErr.message);
+    }
+
     res.json({ message: 'Angebot PDF saved successfully' });
   } catch (err) {
     console.error('Error saving angebot PDF:', err);
@@ -5028,6 +6457,40 @@ app.post('/api/leads/:id/pdf', authenticateToken, upload.single('pdf'), async (r
 
     const pdfPath = path.join(LEAD_PDF_DIR, `${id}.pdf`);
     fs.writeFileSync(pdfPath, req.file.buffer);
+
+    // MODÜL B v3: also write a form snapshot (Angebot-PDF) so the Aufmaß
+    // dropdown's "PDF Vorschau → Angebot-PDF" finds the right document.
+    // Bridges Modul B (lead-based) with Modul F2 (form snapshot system).
+    try {
+      const linkRes = await pool.query('SELECT id FROM aufmass_forms WHERE lead_id = $1 LIMIT 1', [id]);
+      const formId = linkRes.rows[0]?.id;
+      if (formId) {
+        const snapDir = path.join(PDF_DIR, 'snapshots');
+        if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
+        const snapFilename = `form${formId}_angebot_${Date.now()}.pdf`;
+        fs.writeFileSync(path.join(snapDir, snapFilename), req.file.buffer);
+
+        const old = await pool.query(
+          `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'angebot'`,
+          [formId]
+        );
+        if (old.rows.length > 0) {
+          const oldPath = path.join(snapDir, old.rows[0].file_path);
+          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+          await pool.query(
+            `UPDATE aufmass_form_pdf_snapshots SET file_path = $1, created_at = NOW() WHERE form_id = $2 AND document_type = 'angebot'`,
+            [snapFilename, formId]
+          );
+        } else {
+          await pool.query(
+            `INSERT INTO aufmass_form_pdf_snapshots (form_id, document_type, file_path) VALUES ($1, 'angebot', $2)`,
+            [formId, snapFilename]
+          );
+        }
+      }
+    } catch (snapErr) {
+      console.warn('Form snapshot mirror failed:', snapErr.message);
+    }
 
     res.json({ message: 'Lead PDF saved successfully' });
   } catch (err) {
@@ -5386,7 +6849,7 @@ app.post('/api/email/test', authenticateToken, requireAdmin, async (req, res) =>
 app.post('/api/email/send', authenticateToken, async (req, res) => {
   try {
     const branchSlug = req.branchId || 'koblenz';
-    const { to, subject, body, body_html, form_id, lead_id, angebot_ids, email_type, attachment_name } = req.body;
+    const { to, subject, body, body_html, form_id, lead_id, angebot_ids, rechnung_id, email_type, attachment_name, attach_agb, extra_pdfs, suppress_main_pdf } = req.body;
 
     if (!to || !subject || !body) {
       return res.status(400).json({ error: 'Empfänger, Betreff und Nachricht sind erforderlich' });
@@ -5410,7 +6873,9 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
     };
 
     // Attach PDF if form_id or lead_id provided
-    if (form_id) {
+    // suppress_main_pdf is set when the client uploads per-product split PDFs via extra_pdfs;
+    // we must skip the consolidated PDF in that case to avoid duplicates.
+    if (form_id && !suppress_main_pdf) {
       // Try filesystem first, then DB
       const pdfPath = path.join(PDF_DIR, `${form_id}.pdf`);
       if (fs.existsSync(pdfPath)) {
@@ -5431,7 +6896,7 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
       }
     }
 
-    if (lead_id) {
+    if (lead_id && !suppress_main_pdf) {
       const leadPdfDir = path.join(PDF_DIR, 'leads');
 
       if (angebot_ids && Array.isArray(angebot_ids) && angebot_ids.length > 0) {
@@ -5487,15 +6952,139 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
       }
     }
 
+    // Client-supplied extra PDFs (e.g. one PDF per product when split-per-item is selected).
+    // Format: [{ filename: "Angebot_Markise.pdf", base64: "<base64-encoded pdf bytes>" }]
+    if (Array.isArray(extra_pdfs) && extra_pdfs.length > 0) {
+      const TOTAL_LIMIT = 25 * 1024 * 1024; // 25 MB combined budget for client uploads
+      let totalBytes = 0;
+      for (const pdf of extra_pdfs) {
+        if (!pdf?.base64 || typeof pdf.base64 !== 'string') continue;
+        const safeName = String(pdf.filename || 'Anhang.pdf').replace(/[^\w\-. ()äöüÄÖÜß]/g, '_').slice(0, 120);
+        let buf;
+        try {
+          buf = Buffer.from(pdf.base64, 'base64');
+        } catch (e) {
+          console.warn('Skipping malformed extra_pdf:', safeName, e.message);
+          continue;
+        }
+        // Sanity-check it's actually a PDF
+        if (buf.length < 5 || buf.subarray(0, 5).toString('ascii') !== '%PDF-') {
+          console.warn('Skipping non-PDF extra attachment:', safeName);
+          continue;
+        }
+        totalBytes += buf.length;
+        if (totalBytes > TOTAL_LIMIT) {
+          return res.status(400).json({ error: 'Gesamtgröße der angehängten PDFs überschreitet 25 MB.' });
+        }
+        mailOptions.attachments.push({ filename: safeName, content: buf, contentType: 'application/pdf' });
+      }
+    }
+
+    // Optional: attach branch's AGB as a separate file (only when uploaded as a PDF).
+    // Selected pages are honored — we splice them out using pdf-lib so the attachment
+    // matches what the user picked in the AGB settings page.
+    if (attach_agb) {
+      try {
+        const termsResult = await pool.query(
+          'SELECT agb_pdf_path, agb_pdf_pages FROM aufmass_branch_terms WHERE branch_slug = $1',
+          [branchSlug]
+        );
+        const terms = termsResult.rows[0];
+        if (terms?.agb_pdf_path) {
+          const fullPath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, terms.agb_pdf_path);
+          if (fs.existsSync(fullPath)) {
+            let pdfBuffer = fs.readFileSync(fullPath);
+            const selectedPages = Array.isArray(terms.agb_pdf_pages) ? terms.agb_pdf_pages : null;
+            if (selectedPages && selectedPages.length > 0) {
+              try {
+                const { PDFDocument } = await import('pdf-lib');
+                const src = await PDFDocument.load(pdfBuffer);
+                const pageCount = src.getPageCount();
+                const validIdx0 = selectedPages
+                  .filter((p) => Number.isInteger(p) && p >= 1 && p <= pageCount)
+                  .map((p) => p - 1);
+                if (validIdx0.length > 0 && validIdx0.length < pageCount) {
+                  const out = await PDFDocument.create();
+                  const copied = await out.copyPages(src, validIdx0);
+                  copied.forEach((p) => out.addPage(p));
+                  const sliced = await out.save();
+                  pdfBuffer = Buffer.from(sliced);
+                }
+              } catch (sliceErr) {
+                console.warn('AGB page-slice failed, sending full PDF:', sliceErr.message);
+              }
+            }
+            mailOptions.attachments.push({
+              filename: 'AGB.pdf',
+              content: pdfBuffer,
+              contentType: 'application/pdf'
+            });
+          }
+        }
+      } catch (agbErr) {
+        console.warn('AGB attachment skipped:', agbErr.message);
+      }
+    }
+
+    // Rechnung PDF attachment (Modul C)
+    let rechnungRow = null;
+    if (rechnung_id) {
+      const rRes = await pool.query(
+        `SELECT id, rechnung_nr, type, form_id, branch_id, generated_pdf, status
+           FROM aufmass_rechnungen WHERE id = $1`,
+        [rechnung_id]
+      );
+      if (rRes.rows.length > 0) {
+        rechnungRow = rRes.rows[0];
+        // Branch isolation
+        if (rechnungRow.branch_id && rechnungRow.branch_id !== branchSlug) {
+          return res.status(403).json({ error: 'Rechnung gehört zu einer anderen Filiale' });
+        }
+        if (rechnungRow.generated_pdf) {
+          mailOptions.attachments.push({
+            filename: attachment_name || `Rechnung_${rechnungRow.rechnung_nr}.pdf`,
+            content: rechnungRow.generated_pdf,
+            contentType: 'application/pdf'
+          });
+        }
+      }
+    }
+
     // Send
     await transporter.sendMail(mailOptions);
+
+    // Post-send Rechnung side-effects: mark sent + advance form status
+    if (rechnungRow && rechnungRow.status === 'entwurf') {
+      await pool.query(
+        `UPDATE aufmass_rechnungen SET status = 'gesendet', sent_at = NOW() WHERE id = $1`,
+        [rechnungRow.id]
+      );
+      if (rechnungRow.form_id) {
+        const newFormStatus = rechnungRow.type === 'schlussrechnung' ? 'rest_rechnung_erstellt' : 'gesendet';
+        await pool.query(
+          `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
+          [newFormStatus, rechnungRow.form_id]
+        );
+      }
+    }
 
     // Log
     await pool.query(
       `INSERT INTO aufmass_email_log (form_id, lead_id, branch_id, email_type, recipient_email, subject, status, sent_by)
        VALUES ($1, $2, $3, $4, $5, $6, 'sent', $7)`,
-      [form_id || null, lead_id || null, branchSlug, email_type || 'manual', to, subject, req.user.id]
+      [form_id || (rechnungRow ? rechnungRow.form_id : null), lead_id || null, branchSlug, email_type || 'manual', to, subject, req.user.id]
     );
+
+    // Stamp the form's email_sent_at the first time any form-bound mail goes
+    // out (Dashboard card email icon, FormPage "E-Mail senden", or any future
+    // form-related send flow). Idempotent — COALESCE preserves the original
+    // timestamp on retries. Lead-only sends (form_id null) don't touch this.
+    if (form_id) {
+      await pool.query(
+        `UPDATE aufmass_forms SET email_sent_at = COALESCE(email_sent_at, NOW()) WHERE id = $1`,
+        [form_id]
+      );
+    }
 
     res.json({ success: true, message: 'E-Mail erfolgreich gesendet' });
   } catch (err) {
@@ -5577,24 +7166,39 @@ app.put('/api/branch/company-info', authenticateToken, requireAdmin, async (req,
       return res.status(400).json({ error: 'Pflichtfelder fehlen (Firmenname, Adresse, Telefon, E-Mail, USt-IdNr)' });
     }
 
-    // Ensure branch_settings row exists
-    await pool.query(
-      `INSERT INTO aufmass_branch_settings (branch_slug) VALUES ($1) ON CONFLICT (branch_slug) DO NOTHING`,
+    // Manual upsert (branch_slug may not have a UNIQUE constraint)
+    const existing = await pool.query(
+      'SELECT branch_slug FROM aufmass_branch_settings WHERE branch_slug = $1',
       [branchSlug]
     );
 
-    await pool.query(
-      `UPDATE aufmass_branch_settings SET
-        company_name = $2, company_strasse = $3, company_plz = $4, company_ort = $5,
-        company_telefon = $6, company_email = $7, company_ust_id = $8, company_web = $9,
-        company_steuernr = $10, company_iban = $11, company_bic = $12, company_bank_name = $13,
-        company_geschaeftsfuehrer = $14, company_handelsregister = $15
-       WHERE branch_slug = $1`,
-      [branchSlug, company_name, company_strasse, company_plz, company_ort,
-       company_telefon, company_email, company_ust_id, company_web || '',
-       company_steuernr || '', company_iban || '', company_bic || '', company_bank_name || '',
-       company_geschaeftsfuehrer || '', company_handelsregister || '']
-    );
+    if (existing.rows.length === 0) {
+      await pool.query(
+        `INSERT INTO aufmass_branch_settings (
+          branch_slug, company_name, company_strasse, company_plz, company_ort,
+          company_telefon, company_email, company_ust_id, company_web,
+          company_steuernr, company_iban, company_bic, company_bank_name,
+          company_geschaeftsfuehrer, company_handelsregister
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)`,
+        [branchSlug, company_name, company_strasse, company_plz, company_ort,
+         company_telefon, company_email, company_ust_id, company_web || '',
+         company_steuernr || '', company_iban || '', company_bic || '', company_bank_name || '',
+         company_geschaeftsfuehrer || '', company_handelsregister || '']
+      );
+    } else {
+      await pool.query(
+        `UPDATE aufmass_branch_settings SET
+          company_name = $2, company_strasse = $3, company_plz = $4, company_ort = $5,
+          company_telefon = $6, company_email = $7, company_ust_id = $8, company_web = $9,
+          company_steuernr = $10, company_iban = $11, company_bic = $12, company_bank_name = $13,
+          company_geschaeftsfuehrer = $14, company_handelsregister = $15
+         WHERE branch_slug = $1`,
+        [branchSlug, company_name, company_strasse, company_plz, company_ort,
+         company_telefon, company_email, company_ust_id, company_web || '',
+         company_steuernr || '', company_iban || '', company_bic || '', company_bank_name || '',
+         company_geschaeftsfuehrer || '', company_handelsregister || '']
+      );
+    }
 
     res.json({ success: true });
   } catch (err) {
@@ -5628,6 +7232,618 @@ app.get('/api/branch/company-info-public', authenticateToken, async (req, res) =
     res.status(500).json({ error: 'Failed to fetch company info' });
   }
 });
+
+// ============ MODÜL F: PRODUCT IMAGES ============
+
+const productImageUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = path.join(process.cwd(), 'product-images');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname);
+      cb(null, `prod_${Date.now()}_${Math.random().toString(36).substring(7)}${ext}`);
+    }
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
+});
+
+// GET — list product images
+app.get('/api/products/:productId/images', authenticateToken, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const productId = parseInt(req.params.productId);
+    const result = await pool.query(
+      `SELECT id, image_path, image_order, show_on_cover, uploaded_at
+       FROM aufmass_product_images
+       WHERE branch_slug = $1 AND product_id = $2
+       ORDER BY image_order ASC`,
+      [branchSlug, productId]
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error fetching product images:', err);
+    res.status(500).json({ error: 'Failed to fetch product images' });
+  }
+});
+
+// POST — upload product image (max 3 per product)
+app.post('/api/products/:productId/images', authenticateToken, requireAdmin, (req, res) => {
+  productImageUpload.single('image')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    try {
+      const branchSlug = req.branchId || 'koblenz';
+      const productId = parseInt(req.params.productId);
+
+      const countResult = await pool.query(
+        'SELECT COUNT(*) FROM aufmass_product_images WHERE branch_slug = $1 AND product_id = $2',
+        [branchSlug, productId]
+      );
+      if (parseInt(countResult.rows[0].count) >= 3) {
+        fs.unlinkSync(req.file.path);
+        return res.status(400).json({ error: 'Maximum 3 Bilder pro Produkt' });
+      }
+
+      const orderResult = await pool.query(
+        'SELECT COALESCE(MAX(image_order), 0) + 1 AS next_order FROM aufmass_product_images WHERE branch_slug = $1 AND product_id = $2',
+        [branchSlug, productId]
+      );
+      const nextOrder = orderResult.rows[0].next_order;
+
+      const insertResult = await pool.query(
+        `INSERT INTO aufmass_product_images (branch_slug, product_id, image_path, image_order, show_on_cover)
+         VALUES ($1, $2, $3, $4, false)
+         RETURNING id, image_path, image_order, show_on_cover, uploaded_at`,
+        [branchSlug, productId, req.file.filename, nextOrder]
+      );
+
+      res.json(insertResult.rows[0]);
+    } catch (err) {
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      console.error('Error uploading product image:', err);
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  });
+});
+
+// DELETE — remove a product image
+app.delete('/api/products/:productId/images/:imageId', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const imageId = parseInt(req.params.imageId);
+
+    const result = await pool.query(
+      'SELECT image_path FROM aufmass_product_images WHERE id = $1 AND branch_slug = $2',
+      [imageId, branchSlug]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Bild nicht gefunden' });
+
+    const imagePath = path.join(process.cwd(), 'product-images', result.rows[0].image_path);
+    if (fs.existsSync(imagePath)) fs.unlinkSync(imagePath);
+
+    await pool.query('DELETE FROM aufmass_product_images WHERE id = $1 AND branch_slug = $2', [imageId, branchSlug]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting product image:', err);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// PUT — toggle cover flag (max 2 cover images per product)
+app.put('/api/products/:productId/images/:imageId/cover-flag', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const imageId = parseInt(req.params.imageId);
+    const productId = parseInt(req.params.productId);
+    const { show_on_cover } = req.body;
+
+    if (show_on_cover === true) {
+      const countResult = await pool.query(
+        `SELECT COUNT(*) FROM aufmass_product_images
+         WHERE branch_slug = $1 AND product_id = $2 AND show_on_cover = true AND id != $3`,
+        [branchSlug, productId, imageId]
+      );
+      if (parseInt(countResult.rows[0].count) >= 2) {
+        return res.status(400).json({ error: 'Maximal 2 Bilder können auf dem Cover angezeigt werden' });
+      }
+    }
+
+    await pool.query(
+      'UPDATE aufmass_product_images SET show_on_cover = $1 WHERE id = $2 AND branch_slug = $3',
+      [!!show_on_cover, imageId, branchSlug]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error updating cover flag:', err);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+// GET — serve product image file (public; filenames are unguessable random strings)
+app.get('/api/product-image/:filename', (req, res) => {
+  const filename = req.params.filename;
+  if (!/^[\w\-.]+\.(jpg|jpeg|png|webp)$/i.test(filename)) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  const filePath = path.join(process.cwd(), 'product-images', filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(filePath);
+});
+
+// ============ MODÜL F: BRANCH TERMS (AGB) ============
+
+app.get('/api/branch/terms', authenticateToken, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const result = await pool.query(
+      `SELECT content, show_on_aufmass, show_on_angebot, show_on_abnahme, show_on_rechnung,
+              agb_pdf_path, agb_pdf_pages, attach_separately
+       FROM aufmass_branch_terms WHERE branch_slug = $1`,
+      [branchSlug]
+    );
+    if (result.rows.length === 0) {
+      return res.json({
+        content: '',
+        show_on_aufmass: false,
+        show_on_angebot: true,
+        show_on_abnahme: false,
+        show_on_rechnung: false,
+        agb_pdf_path: null,
+        agb_pdf_pages: null,
+        attach_separately: false
+      });
+    }
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error fetching branch terms:', err);
+    res.status(500).json({ error: 'Failed to fetch terms' });
+  }
+});
+
+app.put('/api/branch/terms', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const { content, show_on_aufmass, show_on_angebot, show_on_abnahme, show_on_rechnung, attach_separately } = req.body;
+
+    const existing = await pool.query(
+      'SELECT branch_slug FROM aufmass_branch_terms WHERE branch_slug = $1',
+      [branchSlug]
+    );
+
+    if (existing.rows.length === 0) {
+      await pool.query(
+        `INSERT INTO aufmass_branch_terms
+         (branch_slug, content, show_on_aufmass, show_on_angebot, show_on_abnahme, show_on_rechnung, attach_separately, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())`,
+        [branchSlug, content || '', !!show_on_aufmass, !!show_on_angebot, !!show_on_abnahme, !!show_on_rechnung, !!attach_separately]
+      );
+    } else {
+      await pool.query(
+        `UPDATE aufmass_branch_terms SET
+           content = $2, show_on_aufmass = $3, show_on_angebot = $4,
+           show_on_abnahme = $5, show_on_rechnung = $6, attach_separately = $7, updated_at = NOW()
+         WHERE branch_slug = $1`,
+        [branchSlug, content || '', !!show_on_aufmass, !!show_on_angebot, !!show_on_abnahme, !!show_on_rechnung, !!attach_separately]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error saving branch terms:', err);
+    res.status(500).json({ error: 'Save failed' });
+  }
+});
+
+// ============ MODÜL F2: PDF Cover/AGB Override System ============
+
+const branchPdfUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const branchSlug = req.branchId || 'koblenz';
+      const dir = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug);
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext = path.extname(file.originalname).toLowerCase();
+      cb(null, `${Date.now()}_${Math.random().toString(36).substring(2, 10)}${ext}`);
+    }
+  }),
+  fileFilter: (req, file, cb) => {
+    if (file.mimetype !== 'application/pdf') return cb(new Error('Nur PDF-Dateien erlaubt'));
+    cb(null, true);
+  },
+  limits: { fileSize: 10 * 1024 * 1024 } // 10 MB
+});
+
+// Helper: validate PDF magic bytes (defense-in-depth beyond MIME)
+function isPdfMagic(filePath) {
+  try {
+    const fd = fs.openSync(filePath, 'r');
+    const buf = Buffer.alloc(5);
+    fs.readSync(fd, buf, 0, 5, 0);
+    fs.closeSync(fd);
+    return buf.toString('ascii') === '%PDF-';
+  } catch {
+    return false;
+  }
+}
+
+// Helper: count pages in a PDF using pdf-lib (server-side)
+async function getPdfPageCount(filePath) {
+  const { PDFDocument } = await import('pdf-lib');
+  const bytes = fs.readFileSync(filePath);
+  const pdfDoc = await PDFDocument.load(bytes, { ignoreEncryption: false });
+  return pdfDoc.getPageCount();
+}
+
+// === COVER PDF (per-product) ===
+
+app.get('/api/products/:productId/cover-pdf', authenticateToken, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const productId = parseInt(req.params.productId);
+    const result = await pool.query(
+      `SELECT id, file_path, selected_pages, page_count, uploaded_at
+       FROM aufmass_product_cover_pdfs
+       WHERE branch_slug = $1 AND product_id = $2`,
+      [branchSlug, productId]
+    );
+    if (result.rows.length === 0) return res.json(null);
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error fetching cover PDF:', err);
+    res.status(500).json({ error: 'Failed to fetch cover PDF' });
+  }
+});
+
+app.post('/api/products/:productId/cover-pdf', authenticateToken, requireAdmin, (req, res) => {
+  branchPdfUpload.single('pdf')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'Keine Datei hochgeladen' });
+
+    if (!isPdfMagic(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Ungültige PDF-Datei' });
+    }
+
+    let pageCount;
+    try {
+      pageCount = await getPdfPageCount(req.file.path);
+    } catch (e) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'PDF konnte nicht gelesen werden (möglicherweise verschlüsselt)' });
+    }
+    if (pageCount > 30) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Maximal 30 Seiten erlaubt' });
+    }
+
+    try {
+      const branchSlug = req.branchId || 'koblenz';
+      const productId = parseInt(req.params.productId);
+
+      // Delete old PDF if exists
+      const old = await pool.query(
+        'SELECT file_path FROM aufmass_product_cover_pdfs WHERE branch_slug = $1 AND product_id = $2',
+        [branchSlug, productId]
+      );
+      if (old.rows.length > 0) {
+        const oldPath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, old.rows[0].file_path);
+        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      }
+
+      // Default: first page selected
+      const defaultPages = [1];
+
+      const upsertResult = await pool.query(
+        `INSERT INTO aufmass_product_cover_pdfs (branch_slug, product_id, file_path, selected_pages, page_count, uploaded_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, NOW())
+         ON CONFLICT (branch_slug, product_id)
+         DO UPDATE SET file_path = EXCLUDED.file_path, selected_pages = EXCLUDED.selected_pages,
+                       page_count = EXCLUDED.page_count, uploaded_at = NOW()
+         RETURNING id, file_path, selected_pages, page_count, uploaded_at`,
+        [branchSlug, productId, req.file.filename, JSON.stringify(defaultPages), pageCount]
+      );
+      res.json(upsertResult.rows[0]);
+    } catch (err) {
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      console.error('Error saving cover PDF:', err);
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  });
+});
+
+app.put('/api/products/:productId/cover-pdf/pages', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const productId = parseInt(req.params.productId);
+    const { selected_pages } = req.body;
+
+    if (!Array.isArray(selected_pages) || selected_pages.some(p => typeof p !== 'number' || p < 1)) {
+      return res.status(400).json({ error: 'Ungültige Seitenauswahl' });
+    }
+
+    await pool.query(
+      `UPDATE aufmass_product_cover_pdfs SET selected_pages = $1::jsonb
+       WHERE branch_slug = $2 AND product_id = $3`,
+      [JSON.stringify(selected_pages), branchSlug, productId]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error updating cover PDF pages:', err);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+app.delete('/api/products/:productId/cover-pdf', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const productId = parseInt(req.params.productId);
+
+    const existing = await pool.query(
+      'SELECT file_path FROM aufmass_product_cover_pdfs WHERE branch_slug = $1 AND product_id = $2',
+      [branchSlug, productId]
+    );
+    if (existing.rows.length > 0) {
+      const filePath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, existing.rows[0].file_path);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    await pool.query(
+      'DELETE FROM aufmass_product_cover_pdfs WHERE branch_slug = $1 AND product_id = $2',
+      [branchSlug, productId]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting cover PDF:', err);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// === AGB PDF (branch-level) ===
+
+app.post('/api/branch/agb-pdf', authenticateToken, requireAdmin, (req, res) => {
+  branchPdfUpload.single('pdf')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'Keine Datei hochgeladen' });
+
+    if (!isPdfMagic(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Ungültige PDF-Datei' });
+    }
+
+    let pageCount;
+    try {
+      pageCount = await getPdfPageCount(req.file.path);
+    } catch (e) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'PDF konnte nicht gelesen werden' });
+    }
+    if (pageCount > 30) {
+      fs.unlinkSync(req.file.path);
+      return res.status(400).json({ error: 'Maximal 30 Seiten erlaubt' });
+    }
+
+    try {
+      const branchSlug = req.branchId || 'koblenz';
+
+      // Delete old AGB PDF if exists
+      const old = await pool.query(
+        'SELECT agb_pdf_path FROM aufmass_branch_terms WHERE branch_slug = $1',
+        [branchSlug]
+      );
+      if (old.rows.length > 0 && old.rows[0].agb_pdf_path) {
+        const oldPath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, old.rows[0].agb_pdf_path);
+        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      }
+
+      // Default: NO pages selected — client-side auto-detect or manual picker decides.
+      // Selecting all pages by default silently includes covers/marketing — worse than empty.
+      const defaultPages = [];
+
+      // Upsert (branch_terms row may not exist yet)
+      const exists = await pool.query('SELECT branch_slug FROM aufmass_branch_terms WHERE branch_slug = $1', [branchSlug]);
+      if (exists.rows.length === 0) {
+        await pool.query(
+          `INSERT INTO aufmass_branch_terms (branch_slug, content, agb_pdf_path, agb_pdf_pages, updated_at)
+           VALUES ($1, '', $2, $3::jsonb, NOW())`,
+          [branchSlug, req.file.filename, JSON.stringify(defaultPages)]
+        );
+      } else {
+        await pool.query(
+          `UPDATE aufmass_branch_terms SET agb_pdf_path = $1, agb_pdf_pages = $2::jsonb, updated_at = NOW()
+           WHERE branch_slug = $3`,
+          [req.file.filename, JSON.stringify(defaultPages), branchSlug]
+        );
+      }
+
+      res.json({ file_path: req.file.filename, page_count: pageCount, selected_pages: defaultPages });
+    } catch (err) {
+      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      console.error('Error saving AGB PDF:', err);
+      res.status(500).json({ error: 'Upload failed' });
+    }
+  });
+});
+
+app.put('/api/branch/agb-pdf/pages', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const { selected_pages } = req.body;
+    if (!Array.isArray(selected_pages) || selected_pages.some(p => typeof p !== 'number' || p < 1)) {
+      return res.status(400).json({ error: 'Ungültige Seitenauswahl' });
+    }
+    await pool.query(
+      `UPDATE aufmass_branch_terms SET agb_pdf_pages = $1::jsonb, updated_at = NOW()
+       WHERE branch_slug = $2`,
+      [JSON.stringify(selected_pages), branchSlug]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error updating AGB PDF pages:', err);
+    res.status(500).json({ error: 'Update failed' });
+  }
+});
+
+app.delete('/api/branch/agb-pdf', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const branchSlug = req.branchId || 'koblenz';
+    const existing = await pool.query(
+      'SELECT agb_pdf_path FROM aufmass_branch_terms WHERE branch_slug = $1',
+      [branchSlug]
+    );
+    if (existing.rows.length > 0 && existing.rows[0].agb_pdf_path) {
+      const filePath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, existing.rows[0].agb_pdf_path);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    await pool.query(
+      `UPDATE aufmass_branch_terms SET agb_pdf_path = NULL, agb_pdf_pages = NULL, updated_at = NOW()
+       WHERE branch_slug = $1`,
+      [branchSlug]
+    );
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error deleting AGB PDF:', err);
+    res.status(500).json({ error: 'Delete failed' });
+  }
+});
+
+// GET — serve branch-uploaded PDF (auth required, branch-isolated)
+app.get('/api/branch-pdf/:filename', authenticateToken, (req, res) => {
+  const filename = req.params.filename;
+  if (!/^[\w\-.]+\.pdf$/i.test(filename)) {
+    return res.status(400).json({ error: 'Invalid filename' });
+  }
+  const branchSlug = req.branchId || 'koblenz';
+  const filePath = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug, filename);
+  if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Not found' });
+  res.sendFile(filePath);
+});
+
+// === LEAD PDF CACHE (frozen-on-first-render for legal stability) ===
+
+const cachedPdfUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
+
+app.get('/api/lead-pdf-cache/:leadId', authenticateToken, async (req, res) => {
+  try {
+    const leadId = parseInt(req.params.leadId);
+    const angebotId = req.query.angebot_id ? parseInt(req.query.angebot_id) : null;
+    const documentType = req.query.document_type || 'angebot';
+
+    // Branch isolation: only return if lead belongs to this branch
+    const branchCheck = req.branchId
+      ? await pool.query('SELECT id FROM aufmass_leads WHERE id = $1 AND branch_id = $2', [leadId, req.branchId])
+      : await pool.query('SELECT id FROM aufmass_leads WHERE id = $1', [leadId]);
+    if (branchCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+
+    const result = await pool.query(
+      `SELECT file_path, created_at FROM aufmass_lead_pdf_cache
+       WHERE lead_id = $1 AND (angebot_id = $2 OR ($2 IS NULL AND angebot_id IS NULL))
+         AND document_type = $3`,
+      [leadId, angebotId, documentType]
+    );
+    if (result.rows.length === 0) return res.json(null);
+
+    const filePath = path.join(process.cwd(), 'aufmass-pdfs', 'cached', result.rows[0].file_path);
+    if (!fs.existsSync(filePath)) {
+      // Cache record exists but file missing — clean up the orphan
+      await pool.query(
+        `DELETE FROM aufmass_lead_pdf_cache WHERE lead_id = $1
+         AND (angebot_id = $2 OR ($2 IS NULL AND angebot_id IS NULL)) AND document_type = $3`,
+        [leadId, angebotId, documentType]
+      );
+      return res.json(null);
+    }
+    res.sendFile(filePath);
+  } catch (err) {
+    console.error('Error fetching cached PDF:', err);
+    res.status(500).json({ error: 'Failed to fetch cached PDF' });
+  }
+});
+
+app.post('/api/lead-pdf-cache/:leadId', authenticateToken, (req, res) => {
+  cachedPdfUpload.single('pdf')(req, res, async (err) => {
+    if (err) return res.status(400).json({ error: err.message });
+    if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+    try {
+      const leadId = parseInt(req.params.leadId);
+      const angebotId = req.body.angebot_id ? parseInt(req.body.angebot_id) : null;
+      const documentType = req.body.document_type || 'angebot';
+
+      // Branch isolation
+      const branchCheck = req.branchId
+        ? await pool.query('SELECT id FROM aufmass_leads WHERE id = $1 AND branch_id = $2', [leadId, req.branchId])
+        : await pool.query('SELECT id FROM aufmass_leads WHERE id = $1', [leadId]);
+      if (branchCheck.rows.length === 0) return res.status(404).json({ error: 'Lead not found' });
+
+      const dir = path.join(process.cwd(), 'aufmass-pdfs', 'cached');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+
+      const filename = `lead${leadId}_ang${angebotId || 'main'}_${documentType}_${Date.now()}.pdf`;
+      const filePath = path.join(dir, filename);
+      fs.writeFileSync(filePath, req.file.buffer);
+
+      // Remove old cache file if exists, then upsert
+      const old = await pool.query(
+        `SELECT file_path FROM aufmass_lead_pdf_cache WHERE lead_id = $1
+         AND (angebot_id = $2 OR ($2 IS NULL AND angebot_id IS NULL)) AND document_type = $3`,
+        [leadId, angebotId, documentType]
+      );
+      if (old.rows.length > 0) {
+        const oldPath = path.join(dir, old.rows[0].file_path);
+        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        await pool.query(
+          `UPDATE aufmass_lead_pdf_cache SET file_path = $1, created_at = NOW()
+           WHERE lead_id = $2 AND (angebot_id = $3 OR ($3 IS NULL AND angebot_id IS NULL))
+             AND document_type = $4`,
+          [filename, leadId, angebotId, documentType]
+        );
+      } else {
+        await pool.query(
+          `INSERT INTO aufmass_lead_pdf_cache (lead_id, angebot_id, document_type, file_path, created_at)
+           VALUES ($1, $2, $3, $4, NOW())`,
+          [leadId, angebotId, documentType, filename]
+        );
+      }
+      res.json({ success: true });
+    } catch (err) {
+      console.error('Error caching PDF:', err);
+      res.status(500).json({ error: 'Cache failed' });
+    }
+  });
+});
+
+// Internal helper: invalidate cache for a lead (called after lead/angebot edits)
+async function invalidateLeadPdfCache(leadId, angebotId = null) {
+  try {
+    const dir = path.join(process.cwd(), 'aufmass-pdfs', 'cached');
+    let toDelete;
+    if (angebotId !== null) {
+      toDelete = await pool.query(
+        `SELECT file_path FROM aufmass_lead_pdf_cache WHERE lead_id = $1 AND angebot_id = $2`,
+        [leadId, angebotId]
+      );
+      await pool.query(`DELETE FROM aufmass_lead_pdf_cache WHERE lead_id = $1 AND angebot_id = $2`, [leadId, angebotId]);
+    } else {
+      toDelete = await pool.query(`SELECT file_path FROM aufmass_lead_pdf_cache WHERE lead_id = $1`, [leadId]);
+      await pool.query(`DELETE FROM aufmass_lead_pdf_cache WHERE lead_id = $1`, [leadId]);
+    }
+    for (const row of toDelete.rows) {
+      const p = path.join(dir, row.file_path);
+      if (fs.existsSync(p)) fs.unlinkSync(p);
+    }
+  } catch (err) {
+    console.error('Error invalidating PDF cache:', err);
+  }
+}
 
 // ============ BRANCH USAGE DASHBOARD (super admin only) ============
 

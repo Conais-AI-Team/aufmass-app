@@ -66,6 +66,17 @@ export interface FormData {
   customerSignature?: string | null;
   signatureName?: string | null;
   abnahmeSignPending?: boolean;
+  // First time the Aufmaß PDF was sent by e-mail (form's "E-Mail senden"
+  // button after save, or Dashboard card's e-mail icon). NULL means
+  // nothing has gone out yet — Dashboard renders an "ausstehend" badge.
+  email_sent_at?: string | null;
+  // First time the Aufmaß was marked as sent by physical mail (admin-only
+  // manual action via the post button on the card). NULL means no postal
+  // copy has gone out yet.
+  post_sent_at?: string | null;
+  // Marketing source slug ("Wie sind Sie auf uns aufmerksam geworden?")
+  // — see src/utils/marketingSources.ts for the canonical list.
+  marketingSource?: string | null;
 }
 
 export interface ApiForm {
@@ -99,6 +110,9 @@ export interface ApiForm {
   customer_signature?: string | null;
   signature_name?: string | null;
   abnahme_sign_pending?: boolean;
+  email_sent_at?: string | null;
+  post_sent_at?: string | null;
+  marketing_source?: string | null;
 }
 
 export interface Stats {
@@ -336,7 +350,10 @@ function transformApiToFrontend(apiForm: ApiForm): FormData {
     lead_id: apiForm.lead_id,
     customerSignature: apiForm.customer_signature || null,
     signatureName: apiForm.signature_name || null,
-    abnahmeSignPending: Boolean(apiForm.abnahme_sign_pending)
+    abnahmeSignPending: Boolean(apiForm.abnahme_sign_pending),
+    email_sent_at: apiForm.email_sent_at ?? null,
+    post_sent_at: apiForm.post_sent_at ?? null,
+    marketingSource: apiForm.marketing_source ?? null
   };
 }
 
@@ -490,6 +507,20 @@ export interface AbnahmeSignRequestResponse {
   expiresAt: string;
 }
 
+export interface PublicRechnungSummary {
+  id: number;
+  rechnung_nr: string;
+  type: 'anzahlungsrechnung' | 'schlussrechnung';
+  brutto_betrag: number;
+  has_pdf: boolean;
+}
+
+export interface PublicRestbetrag {
+  brutto: number;
+  anzahlungen: number;
+  rest: number;
+}
+
 export interface PublicAbnahmeSignRequest {
   id: number;
   formId: number;
@@ -498,6 +529,12 @@ export interface PublicAbnahmeSignRequest {
   signedAt?: string | null;
   expiresAt: string;
   snapshot: AbnahmeSignSnapshot;
+  restbetrag?: PublicRestbetrag | null;
+  rechnungen?: PublicRechnungSummary[];
+}
+
+export function getPublicRechnungPdfUrl(token: string, rechnungId: number): string {
+  return `${API_BASE_URL}/public/abnahme-sign/${token}/rechnung/${rechnungId}/pdf`;
 }
 
 export async function createAbnahmeSignRequest(formId: number): Promise<AbnahmeSignRequestResponse> {
@@ -758,6 +795,49 @@ export async function getPdfStatus(formId: number): Promise<PdfStatus> {
   return response.json();
 }
 
+// ============ FORM PDF SNAPSHOTS — frozen historic copies per document type ============
+
+export type FormPdfDocType = 'aufmass' | 'angebot' | 'abnahme' | 'rechnung';
+
+export interface FormPdfSnapshot {
+  document_type: FormPdfDocType;
+  created_at: string;
+}
+
+export async function saveFormPdfSnapshot(
+  formId: number,
+  docType: FormPdfDocType,
+  pdfBlob: Blob
+): Promise<{ success: boolean; document_type: FormPdfDocType; created_at: string }> {
+  const formData = new window.FormData();
+  formData.append('pdf', pdfBlob, `form_${formId}_${docType}.pdf`);
+  formData.append('document_type', docType);
+
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/forms/${formId}/pdf-snapshot`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || 'Failed to save snapshot');
+  }
+  return response.json();
+}
+
+export async function getFormPdfSnapshots(formId: number): Promise<FormPdfSnapshot[]> {
+  const response = await authFetch(`${API_BASE_URL}/forms/${formId}/pdf-snapshots`);
+  if (!response.ok) return [];
+  return response.json();
+}
+
+// URL-with-token for opening a snapshot in a new tab
+export function getFormPdfSnapshotUrl(formId: number, docType: FormPdfDocType): string {
+  const token = getStoredToken();
+  return `${API_BASE_URL}/forms/${formId}/pdf-snapshot/${docType}${token ? `?token=${token}` : ''}`;
+}
+
 // ============ E-SIGNATURE API ============
 
 export interface BranchFeatures {
@@ -970,7 +1050,27 @@ export interface AngebotData {
 export async function getAngebot(formId: number): Promise<AngebotData> {
   const response = await authFetch(`${API_BASE_URL}/forms/${formId}/angebot`);
   if (!response.ok) throw new Error('Failed to fetch Angebot data');
-  return response.json();
+  const raw = await response.json();
+  // Postgres NUMERIC arrives as string — coerce to number so .toFixed() etc. work
+  const toNum = (v: unknown): number => {
+    if (v === null || v === undefined) return 0;
+    return typeof v === 'string' ? parseFloat(v) : (v as number);
+  };
+  return {
+    summary: raw.summary ? {
+      ...raw.summary,
+      netto_summe: toNum(raw.summary.netto_summe),
+      mwst_satz: toNum(raw.summary.mwst_satz),
+      mwst_betrag: toNum(raw.summary.mwst_betrag),
+      brutto_summe: toNum(raw.summary.brutto_summe),
+    } : null,
+    items: (raw.items || []).map((it: Record<string, unknown>) => ({
+      ...it,
+      menge: toNum(it.menge),
+      einzelpreis: toNum(it.einzelpreis),
+      gesamtpreis: toNum(it.gesamtpreis),
+    })),
+  };
 }
 
 // Save Angebot data
@@ -1018,6 +1118,39 @@ export async function updateLeadStatus(leadId: number, status: string): Promise<
     body: JSON.stringify({ status })
   });
   if (!response.ok) throw new Error('Failed to update lead status');
+  return response.json();
+}
+
+// MODÜL B — Aufmaß ↔ Angebote sync
+// Auto-trigger: called after a successful Angebot e-mail send. Backend flips
+// angebot_sent_at on the lead and pushes every linked Aufmaß forward to
+// 'angebot_versendet'. Idempotent.
+export async function markLeadAngebotAsSent(leadId: number): Promise<{ message: string }> {
+  const response = await authFetch(`${API_BASE_URL}/leads/${leadId}/mark-angebot-sent`, {
+    method: 'POST'
+  });
+  if (!response.ok) throw new Error('Failed to mark Angebot as sent');
+  return response.json();
+}
+
+// MODÜL B — Admin-only manual override for the postal-mail case (no e-mail
+// flow ever fires). Backend rejects non-admin callers; UI hides the button
+// for office/user roles.
+export async function markLeadAngebotAsSentManual(leadId: number): Promise<{ message: string }> {
+  const response = await authFetch(`${API_BASE_URL}/leads/${leadId}/mark-angebot-sent-manual`, {
+    method: 'POST'
+  });
+  if (!response.ok) throw new Error('Failed to mark Angebot as sent (manual)');
+  return response.json();
+}
+
+// Admin-only: mark an Aufmaß as physically posted to the customer.
+// Idempotent on the backend (first stamp wins via COALESCE).
+export async function markFormPostSent(formId: number): Promise<{ message: string; post_sent_at: string }> {
+  const response = await authFetch(`${API_BASE_URL}/forms/${formId}/mark-post-sent`, {
+    method: 'POST'
+  });
+  if (!response.ok) throw new Error('Failed to mark form as sent by post');
   return response.json();
 }
 
@@ -1180,7 +1313,15 @@ export const testEmailConnection = (settings: {
 export const sendEmail = (data: {
   to: string; subject: string; body: string; body_html?: string;
   form_id?: number; lead_id?: number; angebot_ids?: number[];
+  rechnung_id?: number;
   email_type?: string; attachment_name?: string;
+  /** When true, attaches the branch's uploaded AGB-PDF as a separate file */
+  attach_agb?: boolean;
+  /** Client-generated PDFs to attach (e.g. one per product). Each entry: { filename, base64 } */
+  extra_pdfs?: { filename: string; base64: string }[];
+  /** When true, server skips attaching the consolidated form/lead PDF
+   *  (used when the client uploads per-product split PDFs via extra_pdfs) */
+  suppress_main_pdf?: boolean;
 }): Promise<{ success: boolean; message: string }> => api.post('/email/send', data);
 
 export const getEmailLog = (): Promise<EmailLogEntry[]> => api.get('/email/log');
@@ -1212,6 +1353,250 @@ export const saveBranchCompanyInfo = (info: BranchCompanyInfo): Promise<{ succes
 // Public read for PDF generation (any authenticated user)
 export const getBranchCompanyInfoPublic = (): Promise<BranchCompanyInfo> =>
   api.get('/branch/company-info-public');
+
+// ============ MODÜL F: PRODUCT IMAGES ============
+export interface ProductImage {
+  id: number;
+  image_path: string;
+  image_order: number;
+  show_on_cover: boolean;
+  uploaded_at?: string;
+}
+
+export const getProductImages = (productId: number): Promise<ProductImage[]> =>
+  api.get(`/products/${productId}/images`);
+
+export const uploadProductImage = async (productId: number, file: File): Promise<ProductImage> => {
+  const formData = new FormData();
+  formData.append('image', file);
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/products/${productId}/images`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || 'Upload failed');
+  }
+  return response.json();
+};
+
+export const deleteProductImage = (productId: number, imageId: number): Promise<{ success: boolean }> =>
+  api.delete(`/products/${productId}/images/${imageId}`);
+
+export const setProductImageCoverFlag = (
+  productId: number,
+  imageId: number,
+  show_on_cover: boolean
+): Promise<{ success: boolean }> =>
+  api.put(`/products/${productId}/images/${imageId}/cover-flag`, { show_on_cover });
+
+// ============ MODÜL F: BRANCH TERMS (AGB) ============
+export interface BranchTerms {
+  content: string;
+  show_on_aufmass: boolean;
+  show_on_angebot: boolean;
+  show_on_abnahme: boolean;
+  show_on_rechnung: boolean;
+  agb_pdf_path?: string | null;
+  agb_pdf_pages?: number[] | null;
+  /** When true, AGB is sent as a separate email attachment (rather than embedded in the main PDF) */
+  attach_separately?: boolean;
+}
+
+export const getBranchTerms = (): Promise<BranchTerms> => api.get('/branch/terms');
+
+export const saveBranchTerms = (terms: BranchTerms): Promise<{ success: boolean }> =>
+  api.put('/branch/terms', terms);
+
+// ============ MODÜL B v3: Generic N-axis price lookup ============
+export interface LeadProductLookupResult {
+  matched: boolean;
+  exact?: boolean;
+  price_missing?: boolean;
+  rounded_to?: Record<string, number>;
+  lead_product?: {
+    id: number;
+    product_name: string;
+    price: number | null;
+    size_values: Record<string, number>;
+    size_profile: string | null;
+    category: string | null;
+    product_type: string | null;
+    pricing_type: string;
+    unit_label: string | null;
+    description: string | null;
+    custom_fields: string | null;
+  };
+}
+
+/** Generic lookup that supports any size profile (P1–P8). Pass size_values in mm. */
+export const lookupLeadProductBySize = (
+  productName: string,
+  sizeValues: Record<string, number>
+): Promise<LeadProductLookupResult> =>
+  api.post(`/lead-products/${encodeURIComponent(productName)}/lookup`, { size_values: sizeValues });
+
+/** Upsert a price from the Angebot modal — creates row if missing, updates if exists. */
+export const upsertLeadProductFromAngebot = (input: {
+  product_name: string;
+  size_values: Record<string, number>;
+  price: number;
+  category?: string;
+  product_type?: string;
+  size_profile?: string;
+}): Promise<{ success: boolean; action: 'inserted' | 'updated'; id: number }> =>
+  api.post('/lead-products/upsert-from-angebot', input);
+
+// ============ MODÜL F2: PDF Cover/AGB Override ============
+export interface ProductCoverPdf {
+  id: number;
+  file_path: string;
+  selected_pages: number[];
+  page_count: number;
+  uploaded_at: string;
+}
+
+export interface BranchAgbPdf {
+  file_path: string;
+  selected_pages: number[];
+  page_count: number;
+}
+
+export const getProductCoverPdf = (productId: number): Promise<ProductCoverPdf | null> =>
+  api.get(`/products/${productId}/cover-pdf`);
+
+export const uploadProductCoverPdf = async (productId: number, file: File): Promise<ProductCoverPdf> => {
+  const formData = new FormData();
+  formData.append('pdf', file);
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/products/${productId}/cover-pdf`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || 'Upload failed');
+  }
+  return response.json();
+};
+
+export const setCoverPdfPages = (productId: number, selected_pages: number[]): Promise<{ success: boolean }> =>
+  api.put(`/products/${productId}/cover-pdf/pages`, { selected_pages });
+
+export const deleteProductCoverPdf = (productId: number): Promise<{ success: boolean }> =>
+  api.delete(`/products/${productId}/cover-pdf`);
+
+export const uploadAgbPdf = async (file: File): Promise<BranchAgbPdf> => {
+  const formData = new FormData();
+  formData.append('pdf', file);
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/branch/agb-pdf`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+  if (!response.ok) {
+    const err = await response.json().catch(() => ({}));
+    throw new Error(err.error || 'Upload failed');
+  }
+  return response.json();
+};
+
+export const setAgbPdfPages = (selected_pages: number[]): Promise<{ success: boolean }> =>
+  api.put('/branch/agb-pdf/pages', { selected_pages });
+
+export const deleteAgbPdf = (): Promise<{ success: boolean }> =>
+  api.delete('/branch/agb-pdf');
+
+// Returns absolute URL with auth token for fetching uploaded PDFs
+export const getBranchPdfUrl = (filename: string): string =>
+  `${API_BASE_URL}/branch-pdf/${filename}`;
+
+// Cache branch-uploaded PDF bytes per filename — same AGB/cover PDF is loaded once
+// for split-per-product flows that call fetchBranchPdfBytes once per item.
+// Returns a fresh Uint8Array slice each time so consumers (pdf-lib, pdfjs) can transfer
+// the buffer without invalidating the cache.
+const branchPdfBytesCache = new Map<string, Uint8Array>();
+const branchPdfInFlight = new Map<string, Promise<Uint8Array | null>>();
+
+export const fetchBranchPdfBytes = async (filename: string): Promise<Uint8Array | null> => {
+  const cached = branchPdfBytesCache.get(filename);
+  if (cached) return new Uint8Array(cached); // copy so callers can transfer
+
+  const pending = branchPdfInFlight.get(filename);
+  if (pending) return pending.then((b) => (b ? new Uint8Array(b) : null));
+
+  const token = getStoredToken();
+  const promise = (async (): Promise<Uint8Array | null> => {
+    try {
+      const response = await fetch(getBranchPdfUrl(filename), {
+        headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+      });
+      if (!response.ok) return null;
+      const buf = await response.arrayBuffer();
+      const bytes = new Uint8Array(buf);
+      branchPdfBytesCache.set(filename, bytes);
+      return bytes;
+    } catch {
+      return null;
+    } finally {
+      branchPdfInFlight.delete(filename);
+    }
+  })();
+
+  branchPdfInFlight.set(filename, promise);
+  const result = await promise;
+  return result ? new Uint8Array(result) : null;
+};
+
+export const invalidateBranchPdfBytesCache = (filename?: string) => {
+  if (filename !== undefined) branchPdfBytesCache.delete(filename);
+  else branchPdfBytesCache.clear();
+};
+
+// ============ LEAD PDF CACHE ============
+export const fetchCachedLeadPdf = async (
+  leadId: number,
+  angebotId: number | null,
+  documentType: 'angebot' | 'aufmass' | 'abnahme' | 'rechnung'
+): Promise<Blob | null> => {
+  const token = getStoredToken();
+  const params = new URLSearchParams();
+  if (angebotId !== null) params.set('angebot_id', String(angebotId));
+  params.set('document_type', documentType);
+  try {
+    const response = await fetch(`${API_BASE_URL}/lead-pdf-cache/${leadId}?${params}`, {
+      headers: token ? { 'Authorization': `Bearer ${token}` } : {}
+    });
+    if (!response.ok) return null;
+    const ct = response.headers.get('content-type') || '';
+    if (!ct.includes('pdf')) return null; // null JSON response means no cache
+    return await response.blob();
+  } catch {
+    return null;
+  }
+};
+
+export const storeCachedLeadPdf = async (
+  leadId: number,
+  angebotId: number | null,
+  documentType: 'angebot' | 'aufmass' | 'abnahme' | 'rechnung',
+  pdfBlob: Blob
+): Promise<void> => {
+  const formData = new FormData();
+  formData.append('pdf', pdfBlob, 'cached.pdf');
+  if (angebotId !== null) formData.append('angebot_id', String(angebotId));
+  formData.append('document_type', documentType);
+  const token = getStoredToken();
+  await fetch(`${API_BASE_URL}/lead-pdf-cache/${leadId}`, {
+    method: 'POST',
+    headers: token ? { 'Authorization': `Bearer ${token}` } : {},
+    body: formData
+  });
+};
 
 // ============ BRANCH USAGE DASHBOARD ============
 export interface BranchUserStat {
@@ -1283,4 +1668,145 @@ export const getBranchStats = (from?: string, to?: string): Promise<BranchStatsR
   const qs = params.toString();
   return api.get(`/admin/branch-stats${qs ? `?${qs}` : ''}`);
 };
+
+// ============ RECHNUNG (INVOICE) — Modul C ============
+export type RechnungType = 'anzahlungsrechnung' | 'schlussrechnung';
+export type RechnungStatus = 'entwurf' | 'gesendet' | 'bezahlt';
+export type ZahlungsMethode = 'bar' | 'überweisung' | 'paypal' | 'other';
+
+export interface RechnungItem {
+  bezeichnung: string;
+  menge: number;
+  einzelpreis: number;
+  gesamtpreis: number;
+  sort_order?: number;
+}
+
+export interface Rechnung {
+  id: number;
+  rechnung_nr: string;
+  type: RechnungType;
+  form_id: number;
+  branch_id: string;
+  kunde_vorname: string | null;
+  kunde_nachname: string | null;
+  kunde_email: string | null;
+  kunde_telefon: string | null;
+  kunde_adresse: string | null;
+  netto_betrag: number | string;
+  mwst_satz: number | string;
+  mwst_betrag: number | string;
+  brutto_betrag: number | string;
+  rechnungsdatum: string;
+  leistungsdatum: string | null;
+  zahlungsziel: string;
+  items_json: RechnungItem[] | string;
+  status: RechnungStatus;
+  sent_at: string | null;
+  paid_at: string | null;
+  pdf_generated_at: string | null;
+  created_at: string;
+}
+
+export interface CreateRechnungPayload {
+  type: RechnungType;
+  rechnungsdatum: string;
+  leistungsdatum?: string | null;
+  zahlungsziel: string;
+  // For anzahlungsrechnung: the deposit slice in EUR (brutto). When set, the
+  // backend stores this as the invoice's brutto and replaces items with a
+  // single "Anzahlung" line. Ignored for schlussrechnung.
+  anzahlungsbetrag?: number;
+}
+
+export interface UpdateRechnungPayload {
+  rechnungsdatum?: string;
+  leistungsdatum?: string | null;
+  zahlungsziel?: string;
+}
+
+export interface Anzahlung {
+  id: number;
+  form_id: number;
+  rechnung_id: number | null;
+  betrag: number | string;
+  zahlungsdatum: string;
+  zahlungsmethode: ZahlungsMethode;
+  beleg_file_id: number | null;
+  notiz: string | null;
+  created_at: string;
+}
+
+export interface CreateAnzahlungPayload {
+  betrag: number;
+  zahlungsdatum: string;
+  zahlungsmethode?: ZahlungsMethode;
+  beleg_file_id?: number | null;
+  notiz?: string | null;
+  rechnung_id?: number | null;
+}
+
+export const createRechnung = (formId: number, payload: CreateRechnungPayload): Promise<Rechnung> =>
+  api.post(`/forms/${formId}/rechnung`, payload);
+
+export const getRechnungenByForm = (formId: number): Promise<Rechnung[]> =>
+  api.get(`/forms/${formId}/rechnungen`);
+
+export const getRechnung = (id: number): Promise<Rechnung> =>
+  api.get(`/rechnungen/${id}`);
+
+export const updateRechnung = (id: number, payload: UpdateRechnungPayload): Promise<Rechnung> =>
+  api.put(`/rechnungen/${id}`, payload);
+
+export const markRechnungSent = (id: number): Promise<{ success: boolean; form_status: string }> =>
+  api.post(`/rechnungen/${id}/mark-sent`);
+
+// Confirm customer paid this Anzahlungsrechnung. Backend flips status to
+// 'bezahlt' and auto-creates a matching Anzahlung receipt — no second
+// manual entry needed.
+export const markRechnungPaid = (id: number): Promise<{ success: boolean }> =>
+  api.post(`/rechnungen/${id}/mark-paid`);
+
+export async function saveRechnungPdf(id: number, pdfBlob: Blob): Promise<{ success: boolean; size: number }> {
+  const token = getStoredToken();
+  const response = await fetch(`${API_BASE_URL}/rechnungen/${id}/pdf`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/pdf',
+      ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    },
+    body: pdfBlob
+  });
+  if (!response.ok) throw new Error('Failed to save Rechnung PDF');
+  return response.json();
+}
+
+export function getRechnungPdfUrl(id: number): string {
+  const token = getStoredToken();
+  return `${API_BASE_URL}/rechnungen/${id}/pdf${token ? `?token=${token}` : ''}`;
+}
+
+export const createAnzahlung = (formId: number, payload: CreateAnzahlungPayload): Promise<Anzahlung> =>
+  api.post(`/forms/${formId}/anzahlungen`, payload);
+
+export const getAnzahlungenByForm = (formId: number): Promise<Anzahlung[]> =>
+  api.get(`/forms/${formId}/anzahlungen`);
+
+export const deleteAnzahlung = (id: number): Promise<{ success: boolean }> =>
+  api.delete(`/anzahlungen/${id}`);
+
+// Helper: parse items_json which arrives either as JSON string or as object array
+export function parseRechnungItems(items: RechnungItem[] | string | null | undefined): RechnungItem[] {
+  if (!items) return [];
+  if (typeof items === 'string') {
+    try { return JSON.parse(items) as RechnungItem[]; } catch { return []; }
+  }
+  return items;
+}
+
+// Helper: normalize numeric column (Postgres NUMERIC arrives as string)
+export function num(v: number | string | null | undefined): number {
+  if (v === null || v === undefined) return 0;
+  return typeof v === 'string' ? parseFloat(v) : v;
+}
 

@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react';
 import { useParams } from 'react-router-dom';
 import SignatureCanvas from '../components/SignatureCanvas';
 import { useToast } from '../components/Toast';
-import { getPublicAbnahmeSignRequest, submitPublicAbnahmeSignature, type PublicAbnahmeSignRequest } from '../services/api';
+import { getPublicAbnahmeSignRequest, submitPublicAbnahmeSignature, getPublicRechnungPdfUrl, type PublicAbnahmeSignRequest } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import './AbnahmeSignPage.css';
 
@@ -165,6 +165,9 @@ const AbnahmeSignPage = () => {
   }
 
   const { form, abnahme, photos } = request.snapshot;
+  const restbetrag = request.restbetrag;
+  const rechnungen = request.rechnungen || [];
+  const fmt = (n: number) => n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
   return (
     <div className="abnahme-sign-page">
@@ -220,6 +223,101 @@ const AbnahmeSignPage = () => {
                 </div>
               </div>
             </div>
+
+            {/* Modul C: Zahlungsübersicht — Restbetrag + bezahlte Rechnungen */}
+            {(restbetrag || rechnungen.length > 0) && (
+              <div className="abnahme-sign-section">
+                <div className="section-title">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="12" y1="1" x2="12" y2="23"/><path d="M17 5H9.5a3.5 3.5 0 000 7h5a3.5 3.5 0 010 7H6"/></svg>
+                  <h2>Zahlungsübersicht</h2>
+                </div>
+                {restbetrag && (
+                  <div style={{
+                    display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px',
+                    padding: '12px 14px', borderRadius: '10px',
+                    background: restbetrag.rest > 0 ? 'rgba(245,158,11,0.10)' : 'rgba(16,185,129,0.10)',
+                    border: `1px solid ${restbetrag.rest > 0 ? 'rgba(245,158,11,0.30)' : 'rgba(16,185,129,0.30)'}`,
+                    marginBottom: rechnungen.length > 0 ? '12px' : 0,
+                  }}>
+                    <div>
+                      <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.7 }}>Gesamtsumme</div>
+                      <strong style={{ fontSize: '15px' }}>{fmt(restbetrag.brutto)} EUR</strong>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.7 }}>Bereits bezahlt</div>
+                      <strong style={{ fontSize: '15px', color: '#10b981' }}>{fmt(restbetrag.anzahlungen)} EUR</strong>
+                    </div>
+                    <div>
+                      <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.7 }}>Restbetrag</div>
+                      <strong style={{ fontSize: '15px', color: restbetrag.rest > 0 ? '#f59e0b' : '#10b981' }}>
+                        {fmt(restbetrag.rest)} EUR
+                      </strong>
+                    </div>
+                  </div>
+                )}
+                {(rechnungen.length > 0 || (restbetrag && restbetrag.rest > 0)) && (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                    <div style={{ fontSize: '11px', textTransform: 'uppercase', letterSpacing: '0.5px', opacity: 0.7, marginBottom: '4px' }}>
+                      Rechnungen
+                    </div>
+                    {rechnungen.map(r => (
+                      <a
+                        key={r.id}
+                        href={r.has_pdf ? getPublicRechnungPdfUrl(token!, r.id) : undefined}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        onClick={(e) => { if (!r.has_pdf) e.preventDefault(); }}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '10px',
+                          padding: '10px 12px', borderRadius: '8px',
+                          background: 'rgba(255,255,255,0.04)',
+                          border: '1px solid rgba(255,255,255,0.08)',
+                          textDecoration: 'none', color: 'inherit',
+                          opacity: r.has_pdf ? 1 : 0.5, cursor: r.has_pdf ? 'pointer' : 'not-allowed',
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="#0ea5e9" strokeWidth="2" width="18" height="18" style={{ flexShrink: 0 }}>
+                          <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" />
+                        </svg>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '13px', fontWeight: 600 }}>
+                            {r.type === 'schlussrechnung' ? 'Schlussrechnung' : 'Anzahlungsrechnung'} {r.rechnung_nr}
+                          </div>
+                          <div style={{ fontSize: '11px', opacity: 0.65, marginTop: '2px' }}>
+                            {fmt(r.brutto_betrag)} EUR{r.has_pdf ? ' · PDF öffnen' : ' · PDF nicht verfügbar'}
+                          </div>
+                        </div>
+                      </a>
+                    ))}
+                    {/* Placeholder for the upcoming Schlussrechnung when none exists yet
+                        and a Restbetrag is still open. The legal final invoice is
+                        issued after acceptance, so the PDF is intentionally absent. */}
+                    {restbetrag && restbetrag.rest > 0 && !rechnungen.some(r => r.type === 'schlussrechnung') && (
+                      <div
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: '10px',
+                          padding: '10px 12px', borderRadius: '8px',
+                          background: 'rgba(245,158,11,0.06)',
+                          border: '1px dashed rgba(245,158,11,0.3)',
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="#f59e0b" strokeWidth="2" width="18" height="18" style={{ flexShrink: 0 }}>
+                          <circle cx="12" cy="12" r="10" /><polyline points="12 6 12 12 16 14" />
+                        </svg>
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: '13px', fontWeight: 600 }}>
+                            Schlussrechnung — folgt nach Abnahme
+                          </div>
+                          <div style={{ fontSize: '11px', opacity: 0.75, marginTop: '2px' }}>
+                            Voraussichtlicher Restbetrag: {fmt(restbetrag.rest)} EUR · Wird Ihnen nach erfolgreicher Abnahme separat zugestellt.
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+            )}
 
             <div className="abnahme-sign-section">
               <div className="section-title">

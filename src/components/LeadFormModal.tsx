@@ -1,7 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, saveLeadPdf, saveAngebotPdf } from '../services/api';
+import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl, lookupLeadProductBySize } from '../services/api';
+import type { FormData as AufmassFormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
+import { getSizeProfileForType, PROFILE_AXES, AXIS_LABELS, extractSizeValues, parseModelList, type SizeProfile } from '../utils/sizeProfile';
+import { MARKETING_SOURCES } from '../utils/marketingSources';
 import './LeadFormModal.css';
 
 interface AngebotData {
@@ -35,6 +38,7 @@ interface EditLeadData {
   customer_email: string;
   customer_phone?: string;
   customer_address?: string;
+  marketing_source?: string | null;
   notes?: string;
   subtotal?: number;
   total_discount?: number;
@@ -49,10 +53,15 @@ interface EditLeadData {
 interface LeadFormModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSuccess: () => void;
+  // MODÜL B: onSuccess optionally receives the saved lead id and whether the
+  // user ticked "send by e-mail", so the parent can chain the EmailComposer.
+  onSuccess: (leadId?: number, sendEmail?: boolean) => void;
   editData?: EditLeadData | null;
   editAngebotId?: number | null;
   newAngebotForLeadId?: number | null;
+  // MODÜL B: When set, the modal seeds itself from this Aufmaß form
+  // (customer + product + measurements + photos read-only).
+  fromAufmassFormId?: number | null;
 }
 
 interface ProductDimensions {
@@ -85,25 +94,49 @@ interface ProductRow {
   // For rounding display
   roundedBreite?: number;
   roundedTiefe?: number;
+  // MODÜL B: when seeded from an Aufmaß, remember the original measurements
+  // so we can restore them after the product picker resets the row.
+  aufmassBreite?: number;
+  aufmassTiefe?: number;
+  // MODÜL B v3: N-axis support for non-2D profiles (Markise UNTERGLAS, Keil, etc.)
+  // When set, the row uses these instead of breite/tiefe for the lookup call.
+  size_profile?: SizeProfile | null;
+  size_axes?: string[];
+  size_values?: Record<string, number>;
+  // Source category/product_type — needed for re-running profile detection
+  source_category?: string;
+  source_product_type?: string;
+  // Last lookup status (drives the "Preis fehlt" / "auf X×Y aufgerundet" badge)
+  lookup_status?: 'matched' | 'rounded' | 'price_missing' | 'no_match';
+  rounded_to?: Record<string, number>;
 }
 
-// Rounding functions for price calculation
-const roundBreiteToGrid = (value: number): number => {
-  // Breite grid: 200, 300, 400, 500, 600, 700, 800, 900, 1000, 1100, 1200
-  const min = 200;
-  const max = 1200;
-  const step = 100;
-  const rounded = Math.ceil(value / step) * step;
-  return Math.max(min, Math.min(max, rounded));
+// MODÜL B v3: All dimensions are in mm (productConfig.json reference).
+// Dynamic round-up against the actual grid loaded from /dimensions endpoint —
+// works for any custom grid the branch added (3500, 4250 etc), not a hardcoded step.
+
+const findClosestBreiteInGrid = (dimensions: ProductDimensions, requested: number): number | null => {
+  const keys = Object.keys(dimensions).map(Number).filter(k => k >= requested).sort((a, b) => a - b);
+  return keys.length > 0 ? keys[0] : null;
 };
 
-const roundTiefeToGrid = (value: number): number => {
-  // Tiefe grid: 150, 200, 250, 300, 350, 400, 450, 500, 550, 600
-  const min = 150;
-  const max = 600;
-  const step = 50;
-  const rounded = Math.ceil(value / step) * step;
-  return Math.max(min, Math.min(max, rounded));
+const findClosestTiefeInGrid = (
+  tiefes: { tiefe: number; price: number }[],
+  requested: number
+): { tiefe: number; price: number } | null => {
+  const matches = tiefes.filter(t => t.tiefe >= requested).sort((a, b) => a.tiefe - b.tiefe);
+  return matches.length > 0 ? matches[0] : null;
+};
+
+// Legacy: hardcoded step round (used if dimensions yet to load — fallback only)
+const roundBreiteToGrid = (mmValue: number): number => {
+  const min = 2000, max = 12000, step = 1000;
+  return Math.max(min, Math.min(max, Math.ceil(mmValue / step) * step));
+};
+
+const roundTiefeToGrid = (mmValue: number): number => {
+  const min = 1500, max = 6000, step = 500;
+  return Math.max(min, Math.min(max, Math.ceil(mmValue / step) * step));
 };
 
 interface LeadExtra {
@@ -115,13 +148,14 @@ interface LeadExtra {
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
 
-export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, editAngebotId, newAngebotForLeadId }: LeadFormModalProps) {
+export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, editAngebotId, newAngebotForLeadId, fromAufmassFormId }: LeadFormModalProps) {
   // Customer info
   const [firstname, setFirstname] = useState('');
   const [lastname, setLastname] = useState('');
   const [email, setEmail] = useState('');
   const [phone, setPhone] = useState('');
   const [address, setAddress] = useState('');
+  const [marketingSource, setMarketingSource] = useState('');
   const [notes, setNotes] = useState('');
 
   // Products
@@ -139,31 +173,59 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
+  // MODÜL B — fromAufmass mode state
+  const [aufmassData, setAufmassData] = useState<(AufmassFormData & { bilder?: { id: number; file_name: string; file_type: string }[] }) | null>(null);
+  const [sendEmailAfterSave, setSendEmailAfterSave] = useState(false);
+
   const isEditMode = !!editData && !newAngebotForLeadId;
   const isNewAngebotMode = !!newAngebotForLeadId;
+  // MODÜL B: fromAufmass features (banner + photos) are available whenever
+  // a source Aufmaß id is provided, even in edit mode. The status-bar
+  // intercept always passes fromAufmassFormId so the user sees the Aufmaß
+  // context regardless of whether the lead already existed.
+  const isFromAufmassMode = !isNewAngebotMode && !!fromAufmassFormId;
+  // Auto-fill of customer/products/notes only happens when there is NO
+  // editData yet — edit mode keeps its own fields.
+  const isFromAufmassAutoFill = isFromAufmassMode && !isEditMode;
 
   // Initialize form
   useEffect(() => {
     if (isOpen) {
       loadProductNames();
-      if (isNewAngebotMode && editData) {
+      if (isFromAufmassAutoFill && fromAufmassFormId) {
+        // MODÜL B fromAufmass mode: pull customer + product hint + photos from
+        // the source Aufmaß. Customer fields stay editable. Product picker is
+        // left to the user (lead-products taxonomy ≠ Aufmaß category/model)
+        // but breite/tiefe and bemerkungen are seeded for convenience.
+        loadFromAufmass(fromAufmassFormId);
+      } else if (isNewAngebotMode && editData) {
         // New angebot mode: pre-fill customer info (readonly), clear products
         setFirstname(editData.customer_firstname || '');
         setLastname(editData.customer_lastname || '');
         setEmail(editData.customer_email || '');
         setPhone(editData.customer_phone || '');
         setAddress(editData.customer_address || '');
+        setMarketingSource(editData.marketing_source || '');
         setNotes('');
         setTotalDiscount(0);
         setProductRows([createEmptyRow()]);
         setExtras([]);
       } else if (editData) {
+        // MODÜL B: edit mode opened from the status-bar intercept also gets
+        // the source Aufmaß loaded so the banner + photos still render.
+        // Doesn't touch firstname/lastname/products — that comes from editData.
+        if (fromAufmassFormId) {
+          getForm(fromAufmassFormId)
+            .then(setAufmassData)
+            .catch(err => console.error('Failed to load Aufmaß metadata for edit mode:', err));
+        }
         // Populate form with existing data
         setFirstname(editData.customer_firstname || '');
         setLastname(editData.customer_lastname || '');
         setEmail(editData.customer_email || '');
         setPhone(editData.customer_phone || '');
         setAddress(editData.customer_address || '');
+        setMarketingSource(editData.marketing_source || '');
         // If editing a specific angebot, use that angebot's data
         const targetAngebot = editAngebotId && editData.angebote
           ? editData.angebote.find(a => a.id === editAngebotId)
@@ -231,7 +293,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         setProductRows([createEmptyRow()]);
       }
     }
-  }, [isOpen, editData, editAngebotId, newAngebotForLeadId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, editData, editAngebotId, newAngebotForLeadId, fromAufmassFormId]);
 
   const createEmptyRow = (): ProductRow => ({
     id: generateId(),
@@ -244,6 +307,177 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
     pricing_type: 'dimension',
     dimensions: {}
   });
+
+  // MODÜL B — Seed the form from a source Aufmaß. Customer fields, notes,
+  // and breite/tiefe are copied; product_name and price are left for the user
+  // to pick from the lead-products dropdown (different taxonomy upstream).
+  const loadFromAufmass = async (formId: number) => {
+    try {
+      const data = await getForm(formId);
+      setAufmassData(data);
+      setFirstname(data.kundeVorname || '');
+      setLastname(data.kundeNachname || '');
+      setEmail(data.kundeEmail || '');
+      setPhone(data.kundeTelefon || '');
+      setAddress(data.kundenlokation || '');
+      setNotes(data.bemerkungen || '');
+      setTotalDiscount(0);
+      setExtras([]);
+      setSendEmailAfterSave(false);
+
+      // MODÜL B v3: Build one row per (product × model) — main product can be
+      // multi-select (N models on same dims), weitereProdukte are single-select
+      // (each has its own dims/model).
+      type AufmassEntry = {
+        category?: string;
+        productType?: string;
+        modelName: string;
+        specifications: Record<string, unknown>;
+      };
+      const entries: AufmassEntry[] = [];
+
+      const mainSpecs = (data.specifications || {}) as Record<string, unknown>;
+      const mainModels = parseModelList(data.model);
+      if (mainModels.length === 0) {
+        // No model selected — push a single empty row so the user can pick manually
+        entries.push({
+          category: data.category,
+          productType: data.productType,
+          modelName: '',
+          specifications: mainSpecs,
+        });
+      } else {
+        for (const m of mainModels) {
+          entries.push({
+            category: data.category,
+            productType: data.productType,
+            modelName: m,
+            specifications: mainSpecs,
+          });
+        }
+      }
+
+      // weitereProdukte — single-select model each, own specifications
+      if (Array.isArray(data.weitereProdukte)) {
+        for (const wp of data.weitereProdukte) {
+          const wpSpecs = (wp.specifications || {}) as Record<string, unknown>;
+          const wpModelList = parseModelList(wp.model);
+          if (wpModelList.length === 0) {
+            entries.push({
+              category: wp.category,
+              productType: wp.productType,
+              modelName: '',
+              specifications: wpSpecs,
+            });
+          } else {
+            // Defensive: even if WeitereProdukte UI is single-select today, support multi
+            for (const m of wpModelList) {
+              entries.push({
+                category: wp.category,
+                productType: wp.productType,
+                modelName: m,
+                specifications: wpSpecs,
+              });
+            }
+          }
+        }
+      }
+
+      // Get available product names — auto-fill skipped if model not in this branch's catalog
+      const availableNames = await api.get<string[]>('/lead-products/names').catch(() => [] as string[]);
+
+      const enrichedRows = await Promise.all(entries.map(async (entry) => {
+        const r = createEmptyRow();
+
+        // Determine size profile from category/product_type
+        const profile = getSizeProfileForType(entry.category, entry.productType);
+        const axes = profile ? PROFILE_AXES[profile] : [];
+        const sizeValues = profile ? extractSizeValues(entry.specifications, profile) : {};
+
+        r.size_profile = profile;
+        r.size_axes = axes;
+        r.size_values = sizeValues;
+        r.source_category = entry.category;
+        r.source_product_type = entry.productType;
+
+        // Legacy 2D fields kept in sync for the existing UI
+        // (axes[0] → breite slot, axes[1] → tiefe slot — generic mapping for display)
+        if (axes[0] && sizeValues[axes[0]] != null) {
+          r.breite = sizeValues[axes[0]];
+          r.aufmassBreite = sizeValues[axes[0]];
+        }
+        if (axes[1] && sizeValues[axes[1]] != null) {
+          r.tiefe = sizeValues[axes[1]];
+          r.aufmassTiefe = sizeValues[axes[1]];
+        }
+
+        if (!entry.modelName || !availableNames.includes(entry.modelName)) {
+          // Mark as "no_match" so the badge says "Modell nicht im Katalog"
+          if (entry.modelName) r.lookup_status = 'no_match';
+          return r;
+        }
+
+        r.product_name = entry.modelName;
+
+        // Generic N-axis lookup via the new endpoint (handles all 8 profiles)
+        if (Object.keys(sizeValues).length > 0) {
+          try {
+            const result = await lookupLeadProductBySize(entry.modelName, sizeValues);
+            if (result.matched && result.lead_product) {
+              const lp = result.lead_product;
+              if (lp.price != null && lp.price > 0) {
+                r.price = lp.price;
+                r.lookup_status = result.exact ? 'matched' : 'rounded';
+                if (!result.exact && result.rounded_to) {
+                  r.rounded_to = result.rounded_to;
+                  // Reflect rounded values in legacy display fields too
+                  if (axes[0] && result.rounded_to[axes[0]] != null) r.roundedBreite = result.rounded_to[axes[0]];
+                  if (axes[1] && result.rounded_to[axes[1]] != null) r.roundedTiefe = result.rounded_to[axes[1]];
+                }
+              } else {
+                r.lookup_status = 'price_missing';
+              }
+              // Hydrate description/custom_fields from the legacy /dimensions response
+              // (lookup endpoint doesn't return them yet — fetch separately, non-blocking)
+              loadDimensions(entry.modelName).then(dims => {
+                if (dims.description) r.description = dims.description;
+                if (dims.custom_fields) r.custom_fields = dims.custom_fields;
+              }).catch(() => { /* ignore */ });
+              // Also fill .dimensions for the existing edit UI
+              try {
+                const dims = await loadDimensions(entry.modelName);
+                r.dimensions = dims.dimensions || {};
+                r.pricing_type = dims.pricing_type;
+                if (dims.pricing_type === 'unit') {
+                  r.unit_label = dims.unit_label;
+                  if (!r.price && dims.unit_price) r.price = dims.unit_price;
+                }
+                r.description = dims.description;
+                r.custom_fields = dims.custom_fields;
+              } catch { /* ignore */ }
+            } else {
+              r.lookup_status = 'no_match';
+            }
+          } catch (e) {
+            console.warn('Generic lookup failed for', entry.modelName, e);
+            r.lookup_status = 'no_match';
+          }
+        }
+
+        return r;
+      }));
+
+      setProductRows(enrichedRows.length > 0 ? enrichedRows : [createEmptyRow()]);
+    } catch (err) {
+      console.error('Failed to load Aufmaß for auto-fill:', err);
+      setError('Aufmaß-Daten konnten nicht geladen werden.');
+    }
+  };
+
+  // MODÜL B — Photos from the source Aufmaß, image-typed only (PDFs filtered)
+  const aufmassImages = (aufmassData?.bilder || []).filter(b =>
+    (b.file_type || '').startsWith('image/')
+  );
 
   const loadProductNames = async () => {
     try {
@@ -292,29 +526,51 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
               if (result.pricing_type === 'unit') {
                 return { ...r, pricing_type: 'unit', unit_label: result.unit_label, price: result.unit_price || 0, dimensions: {}, description: result.description, custom_fields: result.custom_fields, custom_field_values: {} };
               }
-              return { ...r, pricing_type: 'dimension', dimensions: result.dimensions || {}, description: result.description, custom_fields: result.custom_fields, custom_field_values: {} };
+              const dims = result.dimensions || {};
+              const next: ProductRow = { ...r, pricing_type: 'dimension', dimensions: dims, description: result.description, custom_fields: result.custom_fields, custom_field_values: {} };
+              // MODÜL B: if this row was seeded from an Aufmaß, restore the
+              // original measurements after the product picker reset and
+              // compute the price from the freshly loaded dimension matrix.
+              if (r.aufmassBreite && r.aufmassTiefe && Object.keys(dims).length > 0) {
+                next.breite = r.aufmassBreite;
+                next.tiefe = r.aufmassTiefe;
+                const rb = roundBreiteToGrid(r.aufmassBreite);
+                const rt = roundTiefeToGrid(r.aufmassTiefe);
+                next.roundedBreite = rb;
+                next.roundedTiefe = rt;
+                const breiteKey = Object.keys(dims).find(b => Number(b) === rb);
+                if (breiteKey) {
+                  const found = dims[Number(breiteKey)].find(d => d.tiefe === rt);
+                  next.price = found?.price || 0;
+                }
+              }
+              return next;
             }));
           });
         }
       } else if (field === 'breite' || field === 'tiefe') {
-        // Calculate price using rounded values
         const breiteValue = field === 'breite' ? (value as number) : (updated.breite as number);
         const tiefeValue = field === 'tiefe' ? (value as number) : (updated.tiefe as number);
 
         if (breiteValue && tiefeValue && Object.keys(updated.dimensions).length > 0) {
-          // Round values for price lookup
-          const roundedBreite = roundBreiteToGrid(breiteValue);
-          const roundedTiefe = roundTiefeToGrid(tiefeValue);
-
-          updated.roundedBreite = roundedBreite;
-          updated.roundedTiefe = roundedTiefe;
-
-          // Find price from dimensions matrix using rounded values
-          const breiteKey = Object.keys(updated.dimensions).find(b => Number(b) === roundedBreite);
-          if (breiteKey && updated.dimensions[Number(breiteKey)]) {
-            const found = updated.dimensions[Number(breiteKey)].find(d => d.tiefe === roundedTiefe);
-            updated.price = found?.price || 0;
+          // Dynamic round-up against actual grid keys (handles custom branch grids)
+          const rb = findClosestBreiteInGrid(updated.dimensions, breiteValue);
+          if (rb !== null) {
+            const rtMatch = findClosestTiefeInGrid(updated.dimensions[rb], tiefeValue);
+            if (rtMatch) {
+              updated.roundedBreite = rb;
+              updated.roundedTiefe = rtMatch.tiefe;
+              updated.price = rtMatch.price;
+            } else {
+              // Tiefe out of grid: leave price 0, mark only breite-rounded
+              updated.roundedBreite = rb;
+              updated.roundedTiefe = undefined;
+              updated.price = 0;
+            }
           } else {
+            // Beyond grid max: no rounding possible
+            updated.roundedBreite = undefined;
+            updated.roundedTiefe = undefined;
             updated.price = 0;
           }
         } else {
@@ -441,6 +697,10 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
     setLoading(true);
     setError('');
 
+    // MODÜL B: id of the lead we just created/updated, used so the parent
+    // can chain the EmailComposer when sendEmailAfterSave is true.
+    let savedLeadId: number | undefined;
+
     // Helper to build item payload for a single product row
     const buildItemPayload = (r: ProductRow) => ({
       product_name: r.product_name,
@@ -477,6 +737,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
       customer_email: email.trim(),
       customer_phone: phone.trim() || null,
       customer_address: address.trim() || null,
+      marketing_source: marketingSource || null,
       notes: notes.trim() || null,
     };
 
@@ -504,32 +765,38 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
           const result = await api.post<{ id: number }>('/leads', payload);
 
-          // Generate PDF for this single-item lead
-          try {
-            const pdfResult = await generateAngebotPDF({
-              customer_firstname: firstname.trim(),
-              customer_lastname: lastname.trim(),
-              customer_email: email.trim(),
-              customer_phone: phone.trim() || undefined,
-              customer_address: address.trim() || undefined,
-              notes: notes.trim() || undefined,
-              items: [buildPdfItem(item)],
-              extras: itemExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-              subtotal: itemTotal + extrasTotal,
-              item_discounts: item.discount || 0,
-              total_discount: 0,
-              total_discount_percent: 0,
-              total_price: itemTotal + extrasTotal
-            }, { returnBlob: true });
-
-            if (pdfResult?.blob) {
-              await saveLeadPdf(result.id, pdfResult.blob);
+          // Generate PDF in background — modal kapanmasini bloklamasin
+          // (multi-product cover + AGB merge dakikalar surebilir).
+          const einzelLeadId = result.id;
+          const einzelPdfPayload = {
+            customer_firstname: firstname.trim(),
+            customer_lastname: lastname.trim(),
+            customer_email: email.trim(),
+            customer_phone: phone.trim() || undefined,
+            customer_address: address.trim() || undefined,
+            notes: notes.trim() || undefined,
+            items: [buildPdfItem(item)],
+            extras: itemExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
+            subtotal: itemTotal + extrasTotal,
+            item_discounts: item.discount || 0,
+            total_discount: 0,
+            total_discount_percent: 0,
+            total_price: itemTotal + extrasTotal
+          };
+          void (async () => {
+            try {
+              const pdfResult = await generateAngebotPDF(einzelPdfPayload, { returnBlob: true });
+              if (pdfResult?.blob) await saveLeadPdf(einzelLeadId, pdfResult.blob);
+            } catch (pdfErr) {
+              console.error('Einzelangebot PDF failed:', pdfErr);
             }
-          } catch (pdfErr) {
-            console.error('Einzelangebot PDF failed:', pdfErr);
-          }
+          })();
         }
+        // einzelAngebote may have created several leads; we don't pick a
+        // single id to chain the EmailComposer in this mode (would be
+        // ambiguous). savedLeadId stays undefined → no auto-send.
       } else if (isNewAngebotMode && newAngebotForLeadId) {
+        savedLeadId = newAngebotForLeadId;
         // === NEW ANGEBOT MODE: Add angebot to existing lead ===
         const angebotPayload = {
           items: validItems.map(buildItemPayload),
@@ -542,33 +809,35 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
         const result = await api.post<{ id: number; angebot_nummer: string }>(`/leads/${newAngebotForLeadId}/angebote`, angebotPayload);
 
-        // Generate and save PDF for this angebot
-        try {
-          const itemDiscountsTotal = calculateItemDiscounts();
-          const pdfResult = await generateAngebotPDF({
-            customer_firstname: firstname.trim(),
-            customer_lastname: lastname.trim(),
-            customer_email: email.trim(),
-            customer_phone: phone.trim() || undefined,
-            customer_address: address.trim() || undefined,
-            notes: notes.trim() || undefined,
-            kunden_nummer: editData?.kunden_nummer || undefined,
-            angebot_nummer: result.angebot_nummer || undefined,
-            items: validItems.map(buildPdfItem),
-            extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-            subtotal: calculateSubtotal(),
-            item_discounts: itemDiscountsTotal,
-            total_discount: totalDiscount || 0,
-            total_discount_percent: getTotalDiscountPercent(),
-            total_price: calculateTotal()
-          }, { returnBlob: true });
-
-          if (pdfResult?.blob) {
-            await saveAngebotPdf(newAngebotForLeadId, result.id, pdfResult.blob);
+        // Generate and save PDF in background — modal kapanmasini bloklamasin
+        const newAngLeadId = newAngebotForLeadId;
+        const newAngId = result.id;
+        const newAngebotNummer = result.angebot_nummer;
+        const newAngPdfPayload = {
+          customer_firstname: firstname.trim(),
+          customer_lastname: lastname.trim(),
+          customer_email: email.trim(),
+          customer_phone: phone.trim() || undefined,
+          customer_address: address.trim() || undefined,
+          notes: notes.trim() || undefined,
+          kunden_nummer: editData?.kunden_nummer || undefined,
+          angebot_nummer: newAngebotNummer || undefined,
+          items: validItems.map(buildPdfItem),
+          extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
+          subtotal: calculateSubtotal(),
+          item_discounts: calculateItemDiscounts(),
+          total_discount: totalDiscount || 0,
+          total_discount_percent: getTotalDiscountPercent(),
+          total_price: calculateTotal()
+        };
+        void (async () => {
+          try {
+            const pdfResult = await generateAngebotPDF(newAngPdfPayload, { returnBlob: true });
+            if (pdfResult?.blob) await saveAngebotPdf(newAngLeadId, newAngId, pdfResult.blob);
+          } catch (pdfErr) {
+            console.error('Angebot PDF generation failed:', pdfErr);
           }
-        } catch (pdfErr) {
-          console.error('Angebot PDF generation failed:', pdfErr);
-        }
+        })();
       } else {
         // === NORMAL MODE: Single lead with all products ===
         const payload = {
@@ -578,51 +847,62 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           total_discount: totalDiscount || 0,
           subtotal: calculateSubtotal(),
           total_price: calculateTotal(),
-          ...(editAngebotId ? { angebot_id: editAngebotId } : {})
+          ...(editAngebotId ? { angebot_id: editAngebotId } : {}),
+          // MODÜL B: link the new lead back to the source Aufmaß so the
+          // bidirectional sync (status / angebot_sent_at) can reach it.
+          ...(isFromAufmassMode && fromAufmassFormId ? { aufmass_form_id: fromAufmassFormId } : {})
         };
 
         const result = isEditMode
           ? await api.put<{ id: number; angebot_nummer?: string; kunden_nummer?: string }>(`/leads/${editData!.id}`, payload)
           : await api.post<{ id: number; angebot_nummer?: string; kunden_nummer?: string }>('/leads', payload);
         const leadId = isEditMode ? editData!.id : result.id;
+        savedLeadId = leadId;
         const resAngebotNummer = (result as { angebot_nummer?: string }).angebot_nummer || editData?.angebot_nummer;
         const resKundenNummer = (result as { kunden_nummer?: string }).kunden_nummer || editData?.kunden_nummer;
 
-        // Generate and save Angebot PDF
-        try {
-          const itemDiscountsTotal = calculateItemDiscounts();
-          const pdfResult = await generateAngebotPDF({
-            customer_firstname: firstname.trim(),
-            customer_lastname: lastname.trim(),
-            customer_email: email.trim(),
-            customer_phone: phone.trim() || undefined,
-            customer_address: address.trim() || undefined,
-            notes: notes.trim() || undefined,
-            kunden_nummer: resKundenNummer || undefined,
-            angebot_nummer: resAngebotNummer || undefined,
-            items: validItems.map(buildPdfItem),
-            extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-            subtotal: calculateSubtotal(),
-            item_discounts: itemDiscountsTotal,
-            total_discount: totalDiscount || 0,
-            total_discount_percent: getTotalDiscountPercent(),
-            total_price: calculateTotal()
-          }, { returnBlob: true });
-
-          if (pdfResult?.blob) {
-            if (editAngebotId) {
+        // Generate and save Angebot PDF in background — modal kapanmasini bloklamasin
+        const normalLeadId = leadId;
+        const normalAngebotId = editAngebotId;
+        const normalPdfPayload = {
+          customer_firstname: firstname.trim(),
+          customer_lastname: lastname.trim(),
+          customer_email: email.trim(),
+          customer_phone: phone.trim() || undefined,
+          customer_address: address.trim() || undefined,
+          notes: notes.trim() || undefined,
+          kunden_nummer: resKundenNummer || undefined,
+          angebot_nummer: resAngebotNummer || undefined,
+          items: validItems.map(buildPdfItem),
+          extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
+          subtotal: calculateSubtotal(),
+          item_discounts: calculateItemDiscounts(),
+          total_discount: totalDiscount || 0,
+          total_discount_percent: getTotalDiscountPercent(),
+          total_price: calculateTotal(),
+          // MODÜL B: forward Aufmaß photos so the generator can embed them.
+          // Empty for non-fromAufmass modes — keeps prior behavior intact.
+          bilder: isFromAufmassMode ? aufmassImages : undefined
+        };
+        void (async () => {
+          try {
+            const pdfResult = await generateAngebotPDF(normalPdfPayload, { returnBlob: true });
+            if (!pdfResult?.blob) return;
+            if (normalAngebotId) {
               const { saveAngebotPdf } = await import('../services/api');
-              await saveAngebotPdf(leadId, editAngebotId, pdfResult.blob);
+              await saveAngebotPdf(normalLeadId, normalAngebotId, pdfResult.blob);
             } else {
-              await saveLeadPdf(leadId, pdfResult.blob);
+              await saveLeadPdf(normalLeadId, pdfResult.blob);
             }
+          } catch (pdfErr) {
+            console.error('Angebot PDF generation failed:', pdfErr);
           }
-        } catch (pdfErr) {
-          console.error('Angebot PDF generation failed:', pdfErr);
-        }
+        })();
       }
 
-      onSuccess();
+      // MODÜL B: pass savedLeadId + sendEmailAfterSave so the parent can
+      // auto-open EmailComposer for the freshly saved lead.
+      onSuccess(savedLeadId, sendEmailAfterSave);
       resetForm();
       onClose();
     } catch (err) {
@@ -645,6 +925,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
     setTotalDiscount(0);
     setEinzelAngebote(false);
     setError('');
+    setAufmassData(null);
+    setSendEmailAfterSave(false);
   };
 
   const formatPrice = (price: number) => {
@@ -670,7 +952,15 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           onClick={e => e.stopPropagation()}
         >
           <div className="lead-modal-header">
-            <h2>{isNewAngebotMode ? 'Weiteres Angebot hinzufügen' : isEditMode ? 'Angebot bearbeiten' : 'Neues Angebot erstellen'}</h2>
+            <h2>
+              {isFromAufmassMode
+                ? `Angebot aus Aufmaß #${fromAufmassFormId}`
+                : isNewAngebotMode
+                  ? 'Weiteres Angebot hinzufügen'
+                  : isEditMode
+                    ? 'Angebot bearbeiten'
+                    : 'Neues Angebot erstellen'}
+            </h2>
             <button className="close-btn" onClick={onClose}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M18 6L6 18M6 6l12 12" />
@@ -680,6 +970,17 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
           <div className="lead-modal-body">
             {error && <div className="lead-error">{error}</div>}
+
+            {isFromAufmassMode && aufmassData && (
+              <div className="from-aufmass-banner">
+                <strong>Aus Aufmaß #{fromAufmassFormId}:</strong>{' '}
+                {[aufmassData.category, aufmassData.productType, aufmassData.model].filter(Boolean).join(' / ')}
+                {aufmassData.kundenlokation ? ` — ${aufmassData.kundenlokation}` : ''}
+                <div className="from-aufmass-banner-hint">
+                  Kunde, Maße und Bilder wurden vorausgefüllt. Bitte das passende Produkt aus der Liste wählen und den Preis erfassen.
+                </div>
+              </div>
+            )}
 
             {/* Customer Info Section */}
             <section className="lead-section">
@@ -741,6 +1042,20 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                     style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
                   />
                 </div>
+                <div className="form-group full-width">
+                  <label>Wie sind Sie auf uns aufmerksam geworden?</label>
+                  <select
+                    value={marketingSource}
+                    onChange={e => setMarketingSource(e.target.value)}
+                    disabled={isNewAngebotMode}
+                    style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
+                  >
+                    <option value="">Bitte auswählen...</option>
+                    {MARKETING_SOURCES.map((s) => (
+                      <option key={s.value} value={s.value}>{s.label}</option>
+                    ))}
+                  </select>
+                </div>
               </div>
             </section>
 
@@ -789,29 +1104,29 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                       ) : (
                         <>
                           <div className="select-group">
-                            <label>Breite (cm)</label>
+                            <label>Breite (mm)</label>
                             <input
                               type="number"
                               min="1"
-                              max="1200"
+                              max="12000"
                               value={row.breite}
                               onChange={e => updateRow(row.id, 'breite', e.target.value ? Number(e.target.value) : '')}
                               disabled={!row.product_name}
-                              placeholder="z.B. 485"
+                              placeholder="z.B. 4850"
                               className="dimension-input"
                             />
                           </div>
 
                           <div className="select-group">
-                            <label>Tiefe (cm)</label>
+                            <label>Tiefe (mm)</label>
                             <input
                               type="number"
                               min="1"
-                              max="600"
+                              max="6000"
                               value={row.tiefe}
                               onChange={e => updateRow(row.id, 'tiefe', e.target.value ? Number(e.target.value) : '')}
                               disabled={!row.product_name}
-                              placeholder="z.B. 287"
+                              placeholder="z.B. 2870"
                               className="dimension-input"
                             />
                           </div>
@@ -1022,6 +1337,33 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
               />
             </section>
 
+            {/* MODÜL B — Photos pulled in from the source Aufmaß. Read-only:
+                no upload/remove because the Aufmaß remains the system of
+                record for these images. They get embedded in the Angebot PDF
+                automatically by the generator. */}
+            {isFromAufmassMode && aufmassImages.length > 0 && (
+              <section className="lead-section">
+                <h3>Fotos vom Aufmaß ({aufmassImages.length})</h3>
+                <p className="aufmass-photos-hint">
+                  Diese Fotos stammen vom verknüpften Aufmaß und werden im Angebot-PDF eingebettet.
+                </p>
+                <div className="aufmass-photos-grid">
+                  {aufmassImages.map(img => (
+                    <a
+                      key={img.id}
+                      href={getImageUrl(img.id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="aufmass-photo-thumb"
+                      title={img.file_name}
+                    >
+                      <img src={getImageUrl(img.id)} alt={img.file_name} loading="lazy" />
+                    </a>
+                  ))}
+                </div>
+              </section>
+            )}
+
             {/* Pricing Summary */}
             <div className="lead-pricing-summary">
               {/* Subtotal */}
@@ -1075,6 +1417,20 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           </div>
 
           <div className="lead-modal-footer">
+            {/* MODÜL B Soru-3 (a): when ticked, the parent auto-opens the
+                EmailComposer right after save and the eventual e-mail send
+                triggers markLeadAngebotAsSent on the lead. Hidden in
+                Einzelangebote mode because it can produce multiple leads. */}
+            {!einzelAngebote && (
+              <label className="send-email-toggle">
+                <input
+                  type="checkbox"
+                  checked={sendEmailAfterSave}
+                  onChange={e => setSendEmailAfterSave(e.target.checked)}
+                />
+                <span>Angebot direkt per E-Mail senden</span>
+              </label>
+            )}
             <button className="btn-cancel" onClick={onClose}>Abbrechen</button>
             <button className="btn-save" onClick={handleSubmit} disabled={loading}>
               {loading ? 'Speichern...' : (isEditMode ? 'Angebot aktualisieren' : 'Angebot speichern')}

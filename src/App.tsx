@@ -1251,7 +1251,8 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
               kundeNachname: formData.kundeNachname,
               kundeEmail: formData.kundeEmail,
               kundeTelefon: formData.kundeTelefon,
-              kundenlokation: formData.kundenlokation
+              kundenlokation: formData.kundenlokation,
+              marketingSource: formData.marketingSource
             }}
             updateField={updateGrunddatenField}
           />
@@ -1417,7 +1418,13 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
       {/* Progress indicator */}
       <div className="progress-container">
         <div className="progress-steps">
-          {steps.map((step, index) => (
+          {steps.map((step, index) => {
+            // Bearbeiten ("Aufmaß düzenleme") modunda her step'e direkt
+            // zıplanabilir — form zaten dolu, validation gerekmez. Yeni
+            // form akışında (isExistingForm=false) sequential davranış
+            // korunur: sadece geri zıplama mümkün.
+            const canJumpToStep = isExistingForm || index < currentStep;
+            return (
             <motion.div
               key={step.id}
               className={`progress-step ${index === currentStep ? 'active' : ''} ${index < currentStep ? 'completed' : ''}`}
@@ -1425,18 +1432,19 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
               animate={{ opacity: 1, scale: 1 }}
               transition={{ duration: 0.3, delay: index * 0.1 }}
               onClick={() => {
-                if (index < currentStep) {
+                if (canJumpToStep && index !== currentStep) {
                   setCurrentStep(index);
                 }
               }}
-              style={{ cursor: index < currentStep ? 'pointer' : 'default' }}
+              style={{ cursor: canJumpToStep ? 'pointer' : 'default' }}
             >
               <div className="step-number">
                 <StepIcon step={index + 1} />
               </div>
               <div className="step-title">{step.title}</div>
             </motion.div>
-          ))}
+            );
+          })}
         </div>
         <div className="progress-bar">
           <motion.div
@@ -1473,6 +1481,14 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
                       className={`breadcrumb-step-inner ${isActive ? 'active' : ''} ${isPast ? 'past' : ''}`}
                       style={{ '--step-color': step.color } as React.CSSProperties}
                       onClick={() => {
+                        // MODÜL B: skip the date dialog for "angebot_versendet"
+                        // — the parent intercepts onStatusChange and opens the
+                        // LeadFormModal instead. Backend cross-sync sets the
+                        // status_date automatically when the lead is saved.
+                        if (step.value === 'angebot_versendet' && onStatusChange) {
+                          onStatusChange(step.value);
+                          return;
+                        }
                         setPendingStatusValue(step.value);
                         setStatusDateValue(new Date().toISOString().split('T')[0]);
                         setStatusDateModalOpen(true);

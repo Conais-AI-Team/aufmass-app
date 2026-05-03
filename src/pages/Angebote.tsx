@@ -1,10 +1,12 @@
-import { useState, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useRef } from 'react';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf } from '../services/api';
+import { api, getLeadPdfUrl, getAngebotPdfUrl, getStoredUser, saveLeadPdf, saveAngebotPdf, getForms, getForm, markLeadAngebotAsSent, markLeadAngebotAsSentManual } from '../services/api';
+import type { FormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
 import LeadFormModal from '../components/LeadFormModal';
 import EmailComposer from '../components/EmailComposer';
+import AusAufmassTab from '../components/AusAufmassTab';
 import { useToast } from '../components/Toast';
 import './Angebote.css';
 
@@ -39,6 +41,16 @@ interface Lead {
   angebot_nummer?: string;
   kunden_nummer?: string;
   angebot_count?: number;
+  // MODÜL B: timestamp set when an Angebot was sent (auto via e-mail flow
+  // or admin-only manual override). NULL means nothing has been sent yet.
+  angebot_sent_at?: string | null;
+  // MODÜL B: id of the source Aufmaß when this lead was created from one.
+  aufmass_form_id?: number | null;
+  // MODÜL B: status of that source Aufmaß. Schnellangebot only hides leads
+  // whose source is still 'neu' (Aufmaß Genommen) — those still appear in
+  // the Aus Aufmaß tab. Once the Aufmaß moves past Aufmaß Genommen the
+  // source disappears from Aus Aufmaß and the lead must show up here.
+  aufmass_form_status?: string | null;
 }
 
 interface ProductCustomField {
@@ -52,6 +64,7 @@ interface ProductCustomField {
 
 interface LeadItem {
   id: number;
+  product_id?: number;
   product_name: string;
   breite: number;
   tiefe: number;
@@ -77,6 +90,9 @@ interface LeadDetail extends Lead {
   items: LeadItem[];
   extras: LeadExtra[];
   angebote?: Angebot[];
+  // MODÜL B: id of the source Aufmaß (when this lead was created from one).
+  // Used to pull aufmass_bilder during PDF regenerate so photos stay embedded.
+  aufmass_form_id?: number | null;
 }
 
 const LEAD_STATUS_OPTIONS = [
@@ -113,18 +129,45 @@ const isAdminOrOffice = () => {
   return user?.role === 'admin' || user?.role === 'office';
 };
 
+// MODÜL B Soru-3 (c): manual "mark sent" override is admin-only by spec
+// (postal-mail case). Office is intentionally excluded.
+const isAdmin = () => getStoredUser()?.role === 'admin';
+
 const isLeadStatusBackward = (current: string, next: string): boolean => {
   return LEAD_STATUS_ORDER.indexOf(next) < LEAD_STATUS_ORDER.indexOf(current);
 };
 
+type AngeboteTab = 'schnell' | 'aus_aufmass';
+
 export default function Angebote() {
   const navigate = useNavigate();
   const toast = useToast();
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // MODÜL B: Tab persistence via URL param. Defaults to 'schnell' so the
+  // existing Angebote URL keeps showing the Schnellangebot list as before.
+  const tabParam = searchParams.get('tab');
+  const activeTab: AngeboteTab = tabParam === 'aus_aufmass' ? 'aus_aufmass' : 'schnell';
+  const setActiveTab = (tab: AngeboteTab) => {
+    const next = new URLSearchParams(searchParams);
+    if (tab === 'schnell') next.delete('tab');
+    else next.set('tab', tab);
+    setSearchParams(next, { replace: true });
+  };
+
+  // MODÜL B — Aus Aufmaß tab state
+  const [aufmassForms, setAufmassForms] = useState<FormData[]>([]);
+  const [aufmassLoading, setAufmassLoading] = useState(false);
+  const [aufmassSearchQuery, setAufmassSearchQuery] = useState('');
+  // When set, LeadFormModal opens in "fromAufmass" mode and pulls customer +
+  // product + measurements + photos from the chosen Aufmaß form.
+  const [fromAufmassFormId, setFromAufmassFormId] = useState<number | null>(null);
+
   const [leads, setLeads] = useState<Lead[]>([]);
   const [loading, setLoading] = useState(true);
   const [leadModalOpen, setLeadModalOpen] = useState(false);
   const [statusDropdownOpen, setStatusDropdownOpen] = useState<number | null>(null);
-  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; leadId?: number; emailType?: string; attachmentName?: string; angebote?: import('../components/EmailComposer').AngebotAttachment[] } | null>(null);
+  const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; leadId?: number; emailType?: string; attachmentName?: string; angebote?: import('../components/EmailComposer').AngebotAttachment[]; angebotPdfData?: import('../utils/angebotPdfGenerator').AngebotPdfData } | null>(null);
   const [editLeadData, setEditLeadData] = useState<LeadDetail | null>(null);
   const [editAngebotId, setEditAngebotId] = useState<number | null>(null);
   const [newAngebotLeadId, setNewAngebotLeadId] = useState<number | null>(null);
@@ -132,6 +175,8 @@ export default function Angebote() {
   const [selectedLead, setSelectedLead] = useState<LeadDetail | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [deleteAngebotConfirm, setDeleteAngebotConfirm] = useState<{ leadId: number; angebotId: number } | null>(null);
+  // MODÜL B: id of the lead awaiting confirm for the manual "Versendet" override
+  const [manualSentConfirmId, setManualSentConfirmId] = useState<number | null>(null);
   const [expandedLeadId, setExpandedLeadId] = useState<number | null>(null);
   const [expandedAngebote, setExpandedAngebote] = useState<Record<number, Angebot[]>>({});
   const [filterStatus, setFilterStatus] = useState('alle');
@@ -140,6 +185,66 @@ export default function Angebote() {
   useEffect(() => {
     loadLeads();
   }, []);
+
+  // MODÜL B — load Aufmaß forms when the Aus Aufmaß tab becomes active
+  useEffect(() => {
+    if (activeTab !== 'aus_aufmass') return;
+    if (aufmassForms.length > 0 || aufmassLoading) return;
+    setAufmassLoading(true);
+    getForms()
+      .then(setAufmassForms)
+      .catch(err => {
+        console.error('Failed to load Aufmaß forms:', err);
+        toast.error('Fehler', 'Aufmaß-Liste konnte nicht geladen werden.');
+      })
+      .finally(() => setAufmassLoading(false));
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab]);
+
+  // MODÜL B — handle deep-link from Dashboard "Angebot erstellen" button.
+  // Why the ref: React StrictMode mounts effects twice in dev, which would
+  // open the modal twice for the same Aufmaß ID. The ref gates per-ID so we
+  // only act once even across the dev double-mount.
+  const fromAufmassParam = searchParams.get('from_aufmass');
+  const handledFromAufmass = useRef<string | null>(null);
+  useEffect(() => {
+    if (!fromAufmassParam) return;
+    if (activeTab !== 'aus_aufmass') return;
+    if (handledFromAufmass.current === fromAufmassParam) return;
+    handledFromAufmass.current = fromAufmassParam;
+    const id = Number(fromAufmassParam);
+    if (Number.isFinite(id) && id > 0) {
+      openFromAufmass(id);
+    }
+    // Clear the param so a refresh doesn't re-fire the modal
+    const next = new URLSearchParams(searchParams);
+    next.delete('from_aufmass');
+    setSearchParams(next, { replace: true });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fromAufmassParam, activeTab]);
+
+  // Open LeadFormModal seeded with an Aufmaß. Used by both the deep-link
+  // (Dashboard → URL param) and the per-card button in the Aus Aufmaß tab.
+  // If the Aufmaß is already linked to a lead, open in edit mode against
+  // that lead so successive saves UPDATE instead of inserting duplicates.
+  const openFromAufmass = async (formId: number) => {
+    try {
+      const fresh = await getForm(formId);
+      setFromAufmassFormId(formId);
+      setEditAngebotId(null);
+      setNewAngebotLeadId(null);
+      if (fresh.lead_id) {
+        const leadDetail = await api.get<LeadDetail>(`/leads/${fresh.lead_id}`);
+        setEditLeadData(leadDetail);
+      } else {
+        setEditLeadData(null);
+      }
+      setLeadModalOpen(true);
+    } catch (err) {
+      console.error('Failed to open Aufmaß modal:', err);
+      toast.error('Fehler', 'Angebot-Formular konnte nicht geöffnet werden.');
+    }
+  };
 
   // Close status dropdown on outside click
   useEffect(() => {
@@ -252,6 +357,29 @@ export default function Angebote() {
     }
   };
 
+  // MODÜL B Soru-3 (c): admin-only manual override for postal mail. Backend
+  // also enforces the role check, so a non-admin caller would be rejected
+  // even if the button were rendered.
+  const handleMarkAngebotSentManual = async (leadId: number) => {
+    try {
+      await markLeadAngebotAsSentManual(leadId);
+      setManualSentConfirmId(null);
+      // Refresh both leads (Versendet badge) and Aufmaß forms (status moves
+      // to 'angebot_versendet' via backend syncFormsFromLead). Without the
+      // aufmassForms reload the Aus Aufmaß tab would keep the source form
+      // pinned to the "Aufmaß Genommen" tab.
+      await Promise.all([
+        loadLeads(),
+        getForms().then(setAufmassForms).catch(err => console.error('Reload aufmass forms failed:', err)),
+      ]);
+      toast.success('Versendet markiert', `Angebot für Lead #${leadId} wurde als versendet markiert.`);
+    } catch (err) {
+      console.error('Manual mark-sent failed:', err);
+      toast.error('Fehler', 'Konnte nicht als versendet markiert werden.');
+      setManualSentConfirmId(null);
+    }
+  };
+
   const handleDeleteAngebot = async (leadId: number, angebotId: number) => {
     try {
       await api.delete(`/leads/${leadId}/angebote/${angebotId}`);
@@ -298,6 +426,20 @@ export default function Angebote() {
     })[0];
   };
 
+  // MODÜL B: pull source-Aufmaß photos so the regenerated Angebot PDF still
+  // embeds them. Returns undefined when the lead has no linked Aufmaß or the
+  // fetch fails — generator skips the image section in that case.
+  const fetchAufmassBilder = async (lead: LeadDetail): Promise<{ id: number; file_name: string; file_type: string }[] | undefined> => {
+    if (!lead.aufmass_form_id) return undefined;
+    try {
+      const form = await getForm(lead.aufmass_form_id);
+      return form.bilder;
+    } catch (err) {
+      console.error('Failed to fetch Aufmaß bilder for PDF:', err);
+      return undefined;
+    }
+  };
+
   const buildPdfPayload = (lead: LeadDetail, angebot?: Angebot | null) => {
     const items = angebot?.items || lead.items || [];
     const extras = angebot?.extras || lead.extras || [];
@@ -318,6 +460,7 @@ export default function Angebote() {
       angebot_nummer: angebot?.angebot_nummer || lead.angebot_nummer || undefined,
       created_at: angebot?.created_at || lead.created_at,
       items: items.map(item => ({
+        product_id: item.product_id,
         product_name: item.product_name,
         breite: item.breite,
         tiefe: item.tiefe,
@@ -366,7 +509,8 @@ export default function Angebote() {
       // Prefer angebot-level PDF when available — lead-level cache can be stale after edits
       if (latestAngebot) {
         // Always regenerate from current lead/angebot data to guarantee fresh content (Beschreibung etc.)
-        const pdfResult = await generateAngebotPDF(buildPdfPayload(leadDetail, latestAngebot), { returnBlob: true });
+        const bilder = await fetchAufmassBilder(leadDetail);
+        const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail, latestAngebot), bilder }, { returnBlob: true });
         if (!pdfResult?.blob) {
           throw new Error('PDF blob could not be generated');
         }
@@ -383,7 +527,8 @@ export default function Angebote() {
         return;
       }
 
-      const pdfResult = await generateAngebotPDF(buildPdfPayload(leadDetail), { returnBlob: true });
+      const bilder = await fetchAufmassBilder(leadDetail);
+      const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail), bilder }, { returnBlob: true });
       if (!pdfResult?.blob) {
         throw new Error('PDF blob could not be generated');
       }
@@ -409,7 +554,8 @@ export default function Angebote() {
         throw new Error(`Angebot ${angebotId} not found`);
       }
 
-      const pdfResult = await generateAngebotPDF(buildPdfPayload(leadDetail, angebot), { returnBlob: true });
+      const bilder = await fetchAufmassBilder(leadDetail);
+      const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail, angebot), bilder }, { returnBlob: true });
       if (!pdfResult?.blob) {
         throw new Error('PDF blob could not be generated');
       }
@@ -440,30 +586,32 @@ export default function Angebote() {
         : await api.get<LeadDetail>(`/leads/${lead.id}`);
 
       const angeboteList = leadDetail.angebote || [];
-      const angeboteAttachments: import('../components/EmailComposer').AngebotAttachment[] = [];
 
-      // Generate and save PDF for each angebot
-      for (const ang of angeboteList) {
+      // MODÜL B: fetch source-Aufmaß bilder once and reuse for every PDF below
+      const bilder = await fetchAufmassBilder(leadDetail);
+
+      // Generate and save PDFs for all Angebote in parallel (was sequential — much slower)
+      const tasks = angeboteList.map(async (ang) => {
         try {
           const pdfResult = await generateAngebotPDF(
-            buildPdfPayload(leadDetail, ang),
+            { ...buildPdfPayload(leadDetail, ang), bilder },
             { returnBlob: true }
           );
           if (pdfResult?.blob) {
             await saveAngebotPdf(leadDetail.id, ang.id, pdfResult.blob);
-            angeboteAttachments.push({ id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: true });
-          } else {
-            angeboteAttachments.push({ id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: false });
+            return { id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: true };
           }
         } catch {
-          angeboteAttachments.push({ id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: false });
+          // fall through to ready:false
         }
-      }
+        return { id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: false };
+      });
+      const angeboteAttachments: import('../components/EmailComposer').AngebotAttachment[] = await Promise.all(tasks);
 
       // If no angebote, generate lead-level PDF
       if (angeboteList.length === 0) {
         const pdfResult = await generateAngebotPDF(
-          buildPdfPayload(leadDetail, undefined),
+          { ...buildPdfPayload(leadDetail, undefined), bilder },
           { returnBlob: true }
         );
         if (pdfResult?.blob) {
@@ -475,6 +623,8 @@ export default function Angebote() {
       const greeting = customerName ? `Sehr geehrte/r ${customerName},` : 'Sehr geehrte Damen und Herren,';
       const angCount = angeboteAttachments.length;
 
+      // If exactly one Angebot exists, expose its payload so the user can split per product
+      const singleAng = angeboteList.length === 1 ? angeboteList[0] : null;
       setEmailComposer({
         to: leadDetail.customer_email,
         subject: `Ihr Angebot - AYLUX Sonnenschutzsysteme`,
@@ -482,6 +632,7 @@ export default function Angebote() {
         leadId: leadDetail.id,
         emailType: 'angebot',
         angebote: angeboteAttachments.length > 0 ? angeboteAttachments : undefined,
+        angebotPdfData: singleAng ? buildPdfPayload(leadDetail, singleAng) : (angeboteList.length === 0 ? buildPdfPayload(leadDetail, undefined) : undefined),
       });
     } catch (err) {
       console.error('Send lead by e-mail failed:', err);
@@ -500,8 +651,9 @@ export default function Angebote() {
       const angebot = leadDetail.angebote?.find(a => a.id === angebotId);
       if (!angebot) throw new Error(`Angebot ${angebotId} not found`);
 
+      const bilder = await fetchAufmassBilder(leadDetail);
       const pdfResult = await generateAngebotPDF(
-        buildPdfPayload(leadDetail, angebot),
+        { ...buildPdfPayload(leadDetail, angebot), bilder },
         { returnBlob: true }
       );
       if (!pdfResult?.blob) throw new Error('PDF blob could not be generated');
@@ -519,6 +671,8 @@ export default function Angebote() {
         leadId: leadDetail.id,
         emailType: 'angebot',
         angebote: [{ id: angebotId, angebot_nummer: angebot.angebot_nummer || `#${angebotId}`, ready: true }],
+        // Pass payload so EmailComposer can offer "Pro Produkt einzelne PDF" for multi-item angebote
+        angebotPdfData: buildPdfPayload(leadDetail, angebot),
       });
     } catch (err) {
       console.error('Send angebot by e-mail failed:', err);
@@ -566,7 +720,12 @@ export default function Angebote() {
     });
   };
 
-  const filteredLeads = leads.filter(lead => {
+  // MODÜL B: leads that originated from an Aufmaß stay exclusively in the
+  // Aus Aufmaß tab (which itself surfaces both 'neu' and 'angebot_versendet'
+  // source states). Schnellangebot is reserved for stand-alone leads.
+  const independentLeads = leads.filter(l => !l.aufmass_form_id);
+
+  const filteredLeads = independentLeads.filter(lead => {
     const matchesStatus = filterStatus === 'alle' || lead.status === filterStatus;
     const q = searchQuery.toLowerCase();
     const matchesSearch = !q ||
@@ -586,19 +745,68 @@ export default function Angebote() {
           <h1>Angebote</h1>
         </div>
         <div className="header-right">
-          <motion.button
-            className="btn-primary"
-            onClick={() => { setEditLeadData(null); setEditAngebotId(null); setNewAngebotLeadId(null); setLeadModalOpen(true); }}
-            whileHover={{ scale: 1.02 }}
-            whileTap={{ scale: 0.98 }}
-          >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-            Neues Angebot
-          </motion.button>
+          {activeTab === 'schnell' && (
+            <motion.button
+              className="btn-primary"
+              onClick={() => { setEditLeadData(null); setEditAngebotId(null); setNewAngebotLeadId(null); setLeadModalOpen(true); }}
+              whileHover={{ scale: 1.02 }}
+              whileTap={{ scale: 0.98 }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 5v14M5 12h14" />
+              </svg>
+              Neues Angebot
+            </motion.button>
+          )}
         </div>
       </header>
+
+      {/* MODÜL B — Top-level tabs: Schnellangebot vs Aus Aufmaß */}
+      <div className="angebote-tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected={activeTab === 'schnell'}
+          className={`angebote-tab ${activeTab === 'schnell' ? 'active' : ''}`}
+          onClick={() => setActiveTab('schnell')}
+        >
+          Schnellangebot
+        </button>
+        <button
+          role="tab"
+          aria-selected={activeTab === 'aus_aufmass'}
+          className={`angebote-tab ${activeTab === 'aus_aufmass' ? 'active' : ''}`}
+          onClick={() => setActiveTab('aus_aufmass')}
+        >
+          Aus Aufmaß
+        </button>
+      </div>
+
+      {activeTab === 'aus_aufmass' ? (
+        <AusAufmassTab
+          forms={aufmassForms}
+          leadsById={new Map(leads.map(l => [l.id, l]))}
+          loading={aufmassLoading}
+          searchQuery={aufmassSearchQuery}
+          onSearchChange={setAufmassSearchQuery}
+          onPickAufmass={openFromAufmass}
+          onOpenLeadPdf={(leadId) => openLeadPdfWithFallback(leadId)}
+          onSendLeadEmail={(leadId) => {
+            const lead = leads.find(l => l.id === leadId);
+            if (lead) handleSendLeadByEmail(lead);
+          }}
+          onEditLead={(leadId) => handleEditLead(leadId)}
+          onViewLeadDetails={(leadId) => handleViewDetails(leadId)}
+          onAddLeadAngebot={(leadId) => handleAddAngebot(leadId)}
+          onDeleteLead={(leadId) => setDeleteConfirmId(leadId)}
+          onManualMarkSent={(leadId) => setManualSentConfirmId(leadId)}
+          manualSentConfirmId={manualSentConfirmId}
+          onConfirmManualMarkSent={(leadId) => handleMarkAngebotSentManual(leadId)}
+          onCancelManualMarkSent={() => setManualSentConfirmId(null)}
+          isAdmin={isAdmin()}
+          formatPrice={formatPrice}
+        />
+      ) : (
+        <>
 
       {/* Filter Tabs + Search */}
       <div className="lead-filters">
@@ -614,8 +822,8 @@ export default function Angebote() {
               <span>{option.label}</span>
               <span className="lead-tab-count">
                 {option.value === 'alle'
-                  ? leads.length
-                  : leads.filter(l => l.status === option.value).length}
+                  ? independentLeads.length
+                  : independentLeads.filter(l => l.status === option.value).length}
               </span>
             </button>
           ))}
@@ -683,6 +891,16 @@ export default function Angebote() {
                         first angebot. */}
                     {lead.angebot_nummer && getAngebotCount(lead) <= 1 && (
                       <span className="angebot-nummer">Ang: {lead.angebot_nummer}</span>
+                    )}
+                    {/* MODÜL B — Versendet badge: shown when angebot_sent_at is filled.
+                        Set by the e-mail send flow (auto) or admin manual override. */}
+                    {lead.angebot_sent_at && (
+                      <span
+                        className="versendet-badge"
+                        title={`Angebot versendet: ${formatDate(lead.angebot_sent_at)}`}
+                      >
+                        ✓ Versendet
+                      </span>
                     )}
                     <span className="lead-email">{lead.customer_email}</span>
                   </div>
@@ -816,6 +1034,21 @@ export default function Angebote() {
                       <circle cx="12" cy="12" r="3" />
                     </svg>
                   </button>
+                  {/* MODÜL B Soru-3 (c) — admin-only manual override for postal mail.
+                      Hidden once angebot_sent_at is filled (already marked as sent
+                      via the e-mail flow or a previous manual click). */}
+                  {!lead.angebot_sent_at && isAdmin() && (
+                    <button
+                      className="btn-icon"
+                      title="Manuell als versendet markieren (Post)"
+                      onClick={() => setManualSentConfirmId(lead.id)}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M22 2L11 13" />
+                        <path d="M22 2l-7 20-4-9-9-4 20-7z" />
+                      </svg>
+                    </button>
+                  )}
                   <button
                     className="btn-icon delete"
                     title="Löschen"
@@ -908,26 +1141,51 @@ export default function Angebote() {
                   </div>
                 </div>
               )}
+
+              {/* MODÜL B — Manual mark-sent confirmation (admin only) */}
+              {manualSentConfirmId === lead.id && (
+                <div className="delete-confirm">
+                  <p>Angebot wurde per Post versendet?</p>
+                  <div className="confirm-actions">
+                    <button className="btn-cancel" onClick={() => setManualSentConfirmId(null)}>Abbrechen</button>
+                    <button className="btn-save" onClick={() => handleMarkAngebotSentManual(lead.id)}>Als versendet markieren</button>
+                  </div>
+                </div>
+              )}
             </motion.div>
           ))}
         </div>
+      )}
+        </>
       )}
 
       {/* Lead Form Modal */}
       <LeadFormModal
         isOpen={leadModalOpen}
-        onClose={() => { setLeadModalOpen(false); setEditLeadData(null); setEditAngebotId(null); setNewAngebotLeadId(null); }}
-        onSuccess={() => {
+        onClose={() => { setLeadModalOpen(false); setEditLeadData(null); setEditAngebotId(null); setNewAngebotLeadId(null); setFromAufmassFormId(null); }}
+        onSuccess={(savedLeadId, sendEmail) => {
           setLeadModalOpen(false);
           setEditLeadData(null);
           setEditAngebotId(null);
           setNewAngebotLeadId(null);
+          setFromAufmassFormId(null);
           loadLeads();
           if (expandedLeadId) loadAngebote(expandedLeadId);
+          // MODÜL B Soru-3 (a): if the user ticked the "send by e-mail" box,
+          // open the EmailComposer for the freshly saved lead. The composer
+          // then triggers markLeadAngebotAsSent on a successful send.
+          if (sendEmail && savedLeadId) {
+            api.get<LeadDetail>(`/leads/${savedLeadId}`).then(leadDetail => {
+              if (leadDetail.customer_email) {
+                handleSendLeadByEmail(leadDetail);
+              }
+            }).catch(err => console.error('Auto-send after save failed:', err));
+          }
         }}
         editData={editLeadData}
         editAngebotId={editAngebotId}
         newAngebotForLeadId={newAngebotLeadId}
+        fromAufmassFormId={fromAufmassFormId}
       />
 
       {/* Detail Modal */}
@@ -1140,7 +1398,23 @@ export default function Angebote() {
             angebote={emailComposer.angebote}
             emailType={emailComposer.emailType}
             attachmentName={emailComposer.attachmentName}
+            angebotPdfData={emailComposer.angebotPdfData}
             onClose={() => setEmailComposer(null)}
+            onSent={() => {
+              // MODÜL B Soru-3 (a) + (b): once an Angebot e-mail is sent,
+              // mark the lead and push every linked Aufmaß forward to
+              // angebot_versendet. Idempotent — safe to retry.
+              const sentLeadId = emailComposer.leadId;
+              const isAngebot = emailComposer.emailType === 'angebot';
+              if (sentLeadId && isAngebot) {
+                markLeadAngebotAsSent(sentLeadId)
+                  .then(() => Promise.all([
+                    loadLeads(),
+                    getForms().then(setAufmassForms).catch(() => {}),
+                  ]))
+                  .catch(err => console.error('mark-angebot-sent failed:', err));
+              }
+            }}
           />
         )}
       </AnimatePresence>

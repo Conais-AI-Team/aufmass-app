@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>AYLUX Aufmaß — Modul C Diagrams</title>
+<style>
+  :root {
+    --bg: #0b0d11;
+    --bg-card: #14171c;
+    --bg-soft: #1c2026;
+    --border: #2a2f37;
+    --text: #e8eaed;
+    --text-dim: #9aa0a6;
+    --accent: #7fa93d;
+    --accent-2: #38bdf8;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .layout { display: grid; grid-template-columns: 260px 1fr; min-height: 100vh; }
+  aside {
+    position: sticky; top: 0; height: 100vh; overflow-y: auto;
+    background: var(--bg-card); border-right: 1px solid var(--border);
+    padding: 24px 18px;
+  }
+  aside h1 { font-size: 14px; letter-spacing: 0.5px; text-transform: uppercase; color: var(--accent); margin: 0 0 6px 0; }
+  aside .subtitle { font-size: 11px; color: var(--text-dim); margin-bottom: 22px; }
+  aside nav a {
+    display: block; padding: 9px 12px; margin-bottom: 4px;
+    color: var(--text-dim); text-decoration: none; font-size: 13px;
+    border-radius: 6px; border-left: 3px solid transparent;
+    transition: all 0.15s;
+  }
+  aside nav a:hover { background: var(--bg-soft); color: var(--text); }
+  aside nav a.active { color: var(--accent); border-left-color: var(--accent); background: rgba(127,169,61,0.08); }
+  main { padding: 36px 48px 80px; max-width: 1400px; }
+  section { margin-bottom: 56px; scroll-margin-top: 24px; }
+  h2 {
+    font-size: 22px; margin: 0 0 6px 0;
+    display: flex; align-items: center; gap: 10px;
+  }
+  h2 .num {
+    display: inline-flex; width: 30px; height: 30px;
+    align-items: center; justify-content: center;
+    background: var(--accent); color: #fff; border-radius: 8px;
+    font-size: 14px; font-weight: 700;
+  }
+  .desc { color: var(--text-dim); font-size: 14px; margin: 0 0 18px 0; line-height: 1.5; }
+  .diagram {
+    background: var(--bg-card); border: 1px solid var(--border);
+    border-radius: 12px; padding: 24px; overflow-x: auto;
+  }
+  .legend { font-size: 12px; color: var(--text-dim); margin-top: 10px; }
+  .legend code { background: var(--bg-soft); padding: 2px 6px; border-radius: 4px; color: var(--accent-2); }
+  header.page-head {
+    padding: 32px 48px 16px; border-bottom: 1px solid var(--border);
+    background: linear-gradient(180deg, rgba(127,169,61,0.05) 0%, transparent 100%);
+  }
+  header.page-head h1 { font-size: 28px; margin: 0; }
+  header.page-head p { color: var(--text-dim); font-size: 14px; margin: 6px 0 0 0; }
+  .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 999px;
+    background: rgba(127,169,61,0.15); color: var(--accent);
+    font-size: 11px; font-weight: 600; letter-spacing: 0.5px;
+    margin-left: 10px; vertical-align: middle;
+  }
+  .mermaid { background: transparent !important; }
+
+  /* Print: PDF / sayfa-sayfa görsel olarak paylaşmak için */
+  @media print {
+    @page { size: A4 landscape; margin: 12mm; }
+    html, body {
+      background: #fff !important;
+      color: #000 !important;
+      font-size: 11pt;
+    }
+    aside { display: none !important; }
+    .layout { display: block !important; }
+    main { padding: 0 !important; max-width: none !important; }
+    header.page-head {
+      padding: 0 0 12mm 0 !important;
+      border-bottom: 2px solid #000 !important;
+      background: none !important;
+    }
+    header.page-head h1 { color: #000 !important; }
+    header.page-head p { color: #444 !important; }
+    section {
+      page-break-before: always;
+      page-break-inside: avoid;
+      margin: 0 !important;
+      padding-top: 4mm;
+    }
+    section:first-of-type { page-break-before: auto; }
+    h2 { color: #000 !important; }
+    h2 .num { background: #7fa93d !important; color: #fff !important; }
+    .desc { color: #444 !important; }
+    .diagram {
+      background: #fff !important;
+      border: 1px solid #ccc !important;
+      padding: 8mm !important;
+      page-break-inside: avoid;
+    }
+    .legend { color: #555 !important; }
+    .legend code { background: #eee !important; color: #333 !important; }
+    .badge { background: #7fa93d !important; color: #fff !important; }
+    /* Mermaid SVG'leri renkli kalabilsin ama arka plan beyaz olsun */
+    .mermaid svg { background: #fff !important; max-width: 100% !important; height: auto !important; }
+    /* Linkler URL göstermesin */
+    a { color: inherit !important; text-decoration: none !important; }
+    a[href]::after { content: '' !important; }
+  }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <h1>Modul C</h1>
+    <div class="subtitle">Rechnung-Sistemi · Diagramlar</div>
+    <nav>
+      <a href="#s1" class="active">1 · Form Status Lifecycle</a>
+      <a href="#s2">2 · Rechnung Status</a>
+      <a href="#s3">3 · Anzahlung Flow</a>
+      <a href="#s4">4 · Rechnung Erstellt Chain</a>
+      <a href="#s5">5 · Public Sign Sequence</a>
+      <a href="#s6">6 · Email Send Sequence</a>
+      <a href="#s7">7 · DB Schema</a>
+      <a href="#s8">8 · Architecture</a>
+      <a href="#s9">9 · Status Karar Ağacı</a>
+    </nav>
+  </aside>
+
+  <div>
+    <header class="page-head">
+      <h1>AYLUX Aufmaß — Modul C Diagrams <span class="badge">v698c5f5</span></h1>
+      <p>3-step Rechnung flow · Anzahlungen · Schluss · Public sign page · Email integration</p>
+    </header>
+
+    <main>
+
+      <section id="s1">
+        <h2><span class="num">1</span>Form Status Lifecycle</h2>
+        <p class="desc">aufmass_forms.status alanının tüm geçişleri. Modul C ile eklenenler kalın renkte (rechnung_erstellt, schluss_rechnung_erstellt).</p>
+        <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> entwurf: Speichern entw.
+  entwurf --> neu: Vollständig speichern
+  neu --> angebot_versendet: Angebot kaydet
+  angebot_versendet --> auftrag_erteilt: Kunde akzept.
+  angebot_versendet --> auftrag_abgelehnt: Kunde reject
+  auftrag_erteilt --> rechnung_erstellt: Rechnung Entwurf seç
+  rechnung_erstellt --> gesendet: Senden / Mark-sent
+  gesendet --> bauantrag
+  bauantrag --> anzahlung
+  anzahlung --> anzahlung: + N Anzahlungen
+  anzahlung --> bestellt
+  bestellt --> montage_geplant
+  montage_geplant --> montage_gestartet
+  montage_gestartet --> abnahme: Kunde imza
+  montage_gestartet --> reklamation_eingegangen: Mängel
+  abnahme --> schluss_rechnung_erstellt: Schluss Entwurf
+  schluss_rechnung_erstellt --> rest_rechnung_erstellt: Senden / Mark-sent
+  reklamation_eingegangen --> reklamation_bestellt
+  reklamation_eingegangen --> reklamation_abgelehnt
+  rest_rechnung_erstellt --> [*]
+  auftrag_abgelehnt --> [*]
+  reklamation_abgelehnt --> [*]
+  reklamation_bestellt --> abnahme: Tekrar dene
+  note right of rechnung_erstellt: YENİ · Modul C
+  note right of schluss_rechnung_erstellt: YENİ · Modul C
+</pre>
+        </div>
+        <div class="legend">Yeni statüler: <code>rechnung_erstellt</code>, <code>schluss_rechnung_erstellt</code> (Entwurf'lar). <code>gesendet</code> ve <code>rest_rechnung_erstellt</code> mevcuttu, anlamı netleşti.</div>
+      </section>
+
+      <section id="s2">
+        <h2><span class="num">2</span>Rechnung Status</h2>
+        <p class="desc">aufmass_rechnungen.status — bireysel fatura row'unun yaşam döngüsü.</p>
+        <div class="diagram">
+<pre class="mermaid">
+stateDiagram-v2
+  [*] --> entwurf: POST /forms/:id/rechnung
+  entwurf --> entwurf: PUT (Datum/Ziel düzelt, PDF invalidate)
+  entwurf --> gesendet: /email/send (rechnung_id) VEYA /mark-sent
+  gesendet --> bezahlt: paid_at SET (scope dışı, sonraki iter)
+  bezahlt --> [*]
+  gesendet --> [*]: arşiv
+  note right of gesendet: PDF tekrar üretilemez
+  note left of entwurf: Anzahlung tahsilatı durumunda backend doğrudan 'gesendet' olarak insert eder (Entwurf atlanır)
+</pre>
+        </div>
+      </section>
+
+      <section id="s3">
+        <h2><span class="num">3</span>Anzahlung Flow</h2>
+        <p class="desc">Her ödeme tahsilatı = bir Anzahlungsrechnung + PDF. Sunucu atomik olarak ikisini de oluşturur.</p>
+        <div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  A[Status: anzahlung<br/>AnzahlungForm modali açılır] --> B[Form: Betrag, Datum, Notiz, Beleg]
+  B --> C[Anzahlung speichern]
+  C --> D[POST /api/forms/:id/anzahlungen]
+  D --> E[BACKEND ATOMIC]
+  E --> F[1- generateNextRechnungNummer]
+  E --> G[2- INSERT rechnung type=anzahlungs status=gesendet brutto=betrag]
+  E --> H[3- INSERT anzahlung rechnung_id=new]
+  E --> I[4- RETURN anzahlung + rechnung_nr]
+  I --> J[FRONTEND]
+  J --> K[5- getRechnung]
+  J --> L[6- generateRechnungPDF jsPDF]
+  J --> M[7- saveRechnungPdf blob]
+  J --> N[8- Liste yenile + toast]
+  N --> O[Satırda 3 ikon]
+  O --> P[PDF aç]
+  O --> Q[Email gönder]
+  O --> R[Sil]
+  style E fill:#1c2026,stroke:#7fa93d
+  style J fill:#1c2026,stroke:#38bdf8
+</pre>
+        </div>
+      </section>
+
+      <section id="s4">
+        <h2><span class="num">4</span>Rechnung Erstellt — Status Chain</h2>
+        <p class="desc">Kullanıcı dropdown'dan Rechnung Entwurf seçince ne olur (Angebot kontrolü dahil).</p>
+        <div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  Start[User: Status Dropdown<br/>rechnung_erstellt VEYA<br/>schluss_rechnung_erstellt] --> Date[Date picker modal]
+  Date --> Save[updateForm status statusDate]
+  Save --> Check{getAngebot:<br/>kalem var mı?}
+  Check -->|YES| OpenR[RechnungForm modali aç<br/>Anzahlungs/Schluss]
+  Check -->|NO| Toast[Toast: Angebot fehlt]
+  Toast --> SetTarget[rechnungChainTarget set]
+  SetTarget --> OpenA[AngebotModal açılır]
+  OpenA --> SaveA[Angebot save]
+  SaveA --> Promote[form.status = auftrag_erteilt]
+  Promote --> OpenR
+  OpenR --> Fill[User: Datum + Ziel + Email checkbox]
+  Fill --> CreateR[POST /forms/:id/rechnung]
+  CreateR --> InsertR[INSERT entwurf row<br/>form.status = *_erstellt]
+  InsertR --> PDF[FE: generate PDF + saveBlob]
+  PDF --> Branch{Email checkbox?}
+  Branch -->|AÇIK| Composer[EmailComposer aç<br/>rechnungId set]
+  Branch -->|KAPALI| Toast2[Entwurf erstellt toast<br/>Card: Senden / Als gesendet markieren]
+  Composer --> Send[POST /email/send]
+  Send --> Promote2[Backend: rechnung+form gesendet]
+  style OpenR fill:#1c2026,stroke:#7fa93d
+  style Promote2 fill:#1c2026,stroke:#7fa93d
+</pre>
+        </div>
+      </section>
+
+      <section id="s5">
+        <h2><span class="num">5</span>Public Abnahme Sign — Sequence</h2>
+        <p class="desc">Kunde public link ile sayfayı açar. Restbetrag canlı hesaplanır, gönderilmiş Rechnung'lar listelenir.</p>
+        <div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  participant Admin
+  participant FE as Frontend
+  participant BE as Backend
+  participant DB
+  participant Kunde
+
+  Admin->>FE: Status → abnahme + Speichern
+  FE->>BE: POST /forms/:id/abnahme/sign-request
+  BE->>DB: INSERT sign_request (token_hash, snapshot_json)
+  BE-->>FE: signUrl
+  FE->>Admin: EmailComposer + Restbetrag satırı
+
+  Note over Kunde: Mail link tıklar
+  Kunde->>BE: GET /public/abnahme-sign/:token
+  BE->>DB: SELECT sign_request
+  BE->>DB: SELECT angebot.brutto + SUM(anzahlungen)
+  BE->>DB: SELECT rechnungen WHERE status='gesendet'
+  BE-->>Kunde: snapshot + restbetrag + rechnungen[]
+
+  Note over Kunde: Sayfa render: Zahlungsübersicht + PDF link'leri
+  Kunde->>BE: GET /public/abnahme-sign/:token/rechnung/:id/pdf
+  BE-->>Kunde: PDF blob (form_id sahiplik kontrolü)
+
+  Kunde->>BE: POST sign (signature_data + name)
+  BE->>DB: UPDATE sign_request SET status=signed
+  BE->>DB: UPDATE form SET status=abnahme
+  BE-->>Kunde: Vielen Dank
+</pre>
+        </div>
+      </section>
+
+      <section id="s6">
+        <h2><span class="num">6</span>Email Send Sequence (rechnung_id)</h2>
+        <p class="desc">EmailComposer "Jetzt senden" tıklayınca arka planda neler oluyor.</p>
+        <div class="diagram">
+<pre class="mermaid">
+sequenceDiagram
+  participant Admin
+  participant FE as Frontend
+  participant BE as Backend
+  participant DB
+  participant SMTP
+
+  Admin->>FE: Send tıkla
+  FE->>BE: POST /email/send {rechnung_id}
+  BE->>DB: SELECT rechnung WHERE id=$1
+  DB-->>BE: row + branch_id + generated_pdf
+  BE->>BE: branch_id check
+  BE->>BE: attach generated_pdf blob
+  BE->>SMTP: transporter.sendMail()
+  SMTP-->>BE: delivered
+
+  alt rechnung.status='entwurf'
+    BE->>DB: UPDATE rechnung SET status='gesendet', sent_at=NOW()
+    BE->>DB: UPDATE form SET status='gesendet' or 'rest_rechnung_erstellt'
+  end
+
+  BE->>DB: INSERT email_log
+  BE-->>FE: 200 OK
+  FE-->>Admin: Toast E-Mail gesendet
+</pre>
+        </div>
+      </section>
+
+      <section id="s7">
+        <h2><span class="num">7</span>DB Schema — Modul C</h2>
+        <p class="desc">3 yeni tablo + ilişkiler. items_json snapshot olarak immutable.</p>
+        <div class="diagram">
+<pre class="mermaid">
+erDiagram
+  aufmass_forms ||--o{ aufmass_rechnungen : has
+  aufmass_forms ||--o{ aufmass_anzahlungen : has
+  aufmass_rechnungen ||--o| aufmass_anzahlungen : "auto-linked (1:1)"
+  aufmass_forms ||--o{ aufmass_angebot : has
+  aufmass_angebot ||--o{ aufmass_angebot_items : has
+  aufmass_users ||--o{ aufmass_rechnungen : created_by
+
+  aufmass_rechnungen {
+    serial id PK
+    varchar rechnung_nr UK
+    varchar type "anzahlungs|schluss"
+    int form_id FK
+    varchar branch_id
+    varchar kunde_vorname "snapshot"
+    varchar kunde_nachname "snapshot"
+    decimal netto_betrag
+    decimal mwst_satz
+    decimal mwst_betrag
+    decimal brutto_betrag
+    date rechnungsdatum
+    date leistungsdatum
+    date zahlungsziel
+    jsonb items_json "snapshot"
+    varchar status "entwurf|gesendet"
+    timestamp sent_at
+    timestamp paid_at
+    bytea generated_pdf
+    timestamp created_at
+  }
+
+  aufmass_anzahlungen {
+    serial id PK
+    int form_id FK
+    int rechnung_id FK "auto"
+    decimal betrag
+    date zahlungsdatum
+    varchar zahlungsmethode "default überweisung"
+    int beleg_file_id FK
+    text notiz
+    varchar branch_id
+    timestamp created_at
+  }
+
+  aufmass_rechnung_counters {
+    varchar branch_key PK
+    int year PK
+    int last_num "race-safe UPSERT"
+  }
+</pre>
+        </div>
+        <div class="legend">Format: <code>KOB-R-2026-00001</code> (branchKey + R + year + 5-haneli sıra)</div>
+      </section>
+
+      <section id="s8">
+        <h2><span class="num">8</span>System Architecture</h2>
+        <p class="desc">Browser → Vite → Express → Postgres. SMTP opsiyonel (per-Aufmaß).</p>
+        <div class="diagram">
+<pre class="mermaid">
+flowchart TB
+  subgraph Browser
+    direction TB
+    Dashboard[Dashboard.tsx<br/>Card actions, modals]
+    FormPage[FormPage.tsx<br/>Bearbeiten parite]
+    Modals[Modals]
+    PDF[rechnungPdfGenerator<br/>jsPDF UStG §14]
+    API[services/api.ts]
+  end
+
+  subgraph Backend
+    direction TB
+    Auth[JWT auth + verifyFormBranch]
+    EP[Endpoints]
+    Pool[pg.Pool]
+  end
+
+  subgraph DB
+    direction TB
+    Forms[(aufmass_forms<br/>aufmass_angebot)]
+    Rechnungen[(aufmass_rechnungen<br/>aufmass_anzahlungen<br/>aufmass_rechnung_counters)]
+    Sign[(aufmass_abnahme_sign_requests)]
+    Email[(aufmass_email_log)]
+  end
+
+  Dashboard --> Modals
+  FormPage --> Modals
+  Modals --> PDF
+  Modals --> API
+  API -->|Vite proxy 5173 to 5001| Auth
+  Auth --> EP
+  EP --> Pool
+  Pool --> Forms
+  Pool --> Rechnungen
+  Pool --> Sign
+  Pool --> Email
+  EP -.->|nodemailer| SMTP[SMTP per branch]
+
+  classDef new fill:#1c2026,stroke:#7fa93d,color:#fff
+  class PDF,Modals,Rechnungen new
+</pre>
+        </div>
+      </section>
+
+      <section id="s9">
+        <h2><span class="num">9</span>Status Karar Ağacı</h2>
+        <p class="desc">Status dropdown'dan ne seçilirse hangi modal/akış tetiklenir?</p>
+        <div class="diagram">
+<pre class="mermaid">
+flowchart TD
+  Pick[User: Status Dropdown'dan seç] --> Q{Hangi status?}
+  Q -->|angebot_versendet| AM[Angebot Modal]
+  Q -->|auftrag_erteilt| DP1[Date Picker]
+  Q -->|rechnung_erstellt| DPR1[Date Picker]
+  Q -->|schluss_rechnung_erstellt| DPR2[Date Picker]
+  Q -->|anzahlung| AzM[AnzahlungForm Modal + status set]
+  Q -->|abnahme| AbM[Abnahme Modal Restbetrag uyarı]
+  Q -->|diğer| DPx[Date Picker plain]
+
+  DPR1 --> CheckA1{Angebot var mı?}
+  DPR2 --> CheckA2{Angebot var mı?}
+  CheckA1 -->|YES| RM1[RechnungForm Anzahlungs]
+  CheckA1 -->|NO| ChainA[Toast + Angebot Modal chain set]
+  CheckA2 -->|YES| RM2[RechnungForm Schluss]
+  CheckA2 -->|NO| ChainA
+  ChainA --> SaveA[Angebot save] --> Resume{chain target var?}
+  Resume -->|YES| RM1
+  Resume -->|NO| End1[End]
+  AbM --> SignReq[sign-request + EmailComposer]
+  RM1 --> CreateR[POST rechnung]
+  RM2 --> CreateR
+  CreateR --> Email{Email checkbox?}
+  Email -->|YES| Composer[EmailComposer]
+  Email -->|NO| End2[End - Entwurf]
+
+  classDef new fill:#1c2026,stroke:#7fa93d,color:#fff
+  class RM1,RM2,AzM new
+</pre>
+        </div>
+      </section>
+
+    </main>
+  </div>
+</div>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    themeVariables: {
+      darkMode: true,
+      background: '#14171c',
+      primaryColor: '#1c2026',
+      primaryBorderColor: '#7fa93d',
+      primaryTextColor: '#e8eaed',
+      lineColor: '#9aa0a6',
+      secondaryColor: '#1c2026',
+      tertiaryColor: '#0b0d11',
+      noteBkgColor: '#1c2026',
+      noteTextColor: '#e8eaed',
+      noteBorderColor: '#38bdf8',
+      actorBkg: '#1c2026',
+      actorBorder: '#7fa93d',
+      actorTextColor: '#e8eaed',
+      signalColor: '#9aa0a6',
+      signalTextColor: '#e8eaed',
+      labelBoxBkgColor: '#1c2026',
+      labelBoxBorderColor: '#7fa93d',
+      labelTextColor: '#e8eaed',
+      activationBorderColor: '#7fa93d',
+      activationBkgColor: '#1c2026',
+    },
+    flowchart: { curve: 'basis', padding: 20 },
+    sequence: { showSequenceNumbers: false, mirrorActors: false }
+  });
+
+  // Sidebar active link tracking
+  const sections = document.querySelectorAll('section');
+  const links = document.querySelectorAll('aside nav a');
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        const id = entry.target.id;
+        links.forEach(a => a.classList.toggle('active', a.getAttribute('href') === '#' + id));
+      }
+    });
+  }, { rootMargin: '-30% 0px -60% 0px' });
+  sections.forEach(s => observer.observe(s));
+</script>
+</body>
+</html>
