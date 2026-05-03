@@ -6,12 +6,15 @@ import {
   deleteAnzahlung,
   getAngebot,
   getRechnung,
+  getRechnungenByForm,
   getRechnungPdfUrl,
   saveRechnungPdf,
   parseRechnungItems,
+  markRechnungPaid,
   uploadTempFile,
   num,
   type Anzahlung,
+  type Rechnung,
 } from '../services/api';
 import { generateRechnungPDF } from '../utils/rechnungPdfGenerator';
 import { useToast } from './Toast';
@@ -30,6 +33,9 @@ const formatPrice = (n: number) =>
 const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
   const toast = useToast();
   const [list, setList] = useState<Anzahlung[]>([]);
+  // All Anzahlungsrechnungen issued for this form — surfaced here so the
+  // back-office can see what has been billed vs what has actually arrived.
+  const [anzahlungsRechnungen, setAnzahlungsRechnungen] = useState<Rechnung[]>([]);
   const [bruttoSumme, setBruttoSumme] = useState<number>(0);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -63,17 +69,66 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
     }
   };
 
+  // User confirms the customer paid the Anzahlungsrechnung. Backend flips
+  // status='bezahlt' and auto-creates an Anzahlung receipt. We refresh only
+  // this modal's local state — onSaved? is intentionally NOT called here
+  // because the parent's onSaved triggers a 494-form reload via loadData(),
+  // which made the modal flicker / appear to re-open.
+  const handleMarkRechnungPaid = async (rechnung: Rechnung) => {
+    if (!confirm(`Anzahlung über ${formatPrice(num(rechnung.brutto_betrag))} EUR als erhalten markieren?`)) return;
+    try {
+      await markRechnungPaid(rechnung.id);
+      const [freshAnz, freshRech] = await Promise.all([
+        getAnzahlungenByForm(formId),
+        getRechnungenByForm(formId),
+      ]);
+      setList(freshAnz);
+      setAnzahlungsRechnungen(freshRech.filter(r => r.type === 'anzahlungsrechnung'));
+      toast.success('Markiert', `${formatPrice(num(rechnung.brutto_betrag))} EUR als erhalten verbucht.`);
+    } catch (err) {
+      toast.error('Fehler', err instanceof Error ? err.message : 'Konnte nicht als bezahlt markiert werden.');
+    }
+  };
+
+  // "Nicht erhalten" → if Zahlungsziel passed, open a Mahnung email modal so
+  // the user can dispatch a friendly reminder. Before the due date, we just
+  // toast — no need to push a reminder yet.
+  const handleRemindRechnung = async (rechnung: Rechnung) => {
+    const todayDate = new Date(); todayDate.setHours(0, 0, 0, 0);
+    const ziel = new Date(rechnung.zahlungsziel); ziel.setHours(0, 0, 0, 0);
+    if (todayDate <= ziel) {
+      const tageOffen = Math.ceil((ziel.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24));
+      toast.info('Zahlungsziel noch offen', `Noch ${tageOffen} Tag(e) bis zum Zahlungsziel (${ziel.toLocaleDateString('de-DE')}).`);
+      return;
+    }
+    try {
+      const r = await getRechnung(rechnung.id);
+      const tageUeberfaellig = Math.floor((todayDate.getTime() - ziel.getTime()) / (1000 * 60 * 60 * 24));
+      setEmailComposer({
+        to: r.kunde_email || '',
+        subject: `Zahlungserinnerung: Anzahlungsrechnung ${r.rechnung_nr}`,
+        body: `Sehr geehrte/r ${r.kunde_vorname || ''} ${r.kunde_nachname || ''},\n\nin unserem System ist Ihre Zahlung zu folgender Rechnung noch nicht eingegangen:\n\n  Rechnungsnummer: ${r.rechnung_nr}\n  Rechnungsdatum: ${new Date(r.rechnungsdatum).toLocaleDateString('de-DE')}\n  Zahlungsziel: ${ziel.toLocaleDateString('de-DE')} (${tageUeberfaellig} Tag(e) überfällig)\n  Offener Betrag: ${formatPrice(num(r.brutto_betrag))} EUR\n\nWir bitten Sie, den ausstehenden Betrag in den nächsten Tagen zu überweisen. Sollten Sie die Zahlung bereits veranlasst haben, betrachten Sie dieses Schreiben bitte als gegenstandslos.\n\nBei Fragen stehen wir Ihnen jederzeit gerne zur Verfügung.\n\nMit freundlichen Grüßen`,
+        rechnungId: r.id,
+        rechnungNr: r.rechnung_nr,
+      });
+    } catch (err) {
+      toast.error('Fehler', err instanceof Error ? err.message : 'Erinnerung konnte nicht vorbereitet werden.');
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [angebot, anzahlungen] = await Promise.all([
+        const [angebot, anzahlungen, rechnungen] = await Promise.all([
           getAngebot(formId).catch(() => null),
           getAnzahlungenByForm(formId).catch(() => []),
+          getRechnungenByForm(formId).catch(() => []),
         ]);
         if (cancelled) return;
         setBruttoSumme(angebot?.summary ? num(angebot.summary.brutto_summe) : 0);
         setList(anzahlungen);
+        setAnzahlungsRechnungen(rechnungen.filter(r => r.type === 'anzahlungsrechnung'));
       } catch (err) {
         console.error('Error loading Anzahlungen:', err);
       } finally {
@@ -84,6 +139,10 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
   }, [formId]);
 
   const totalReceived = list.reduce((sum, a) => sum + num(a.betrag), 0);
+  // Sum of issued Anzahlungsrechnungen (regardless of payment status) — this is
+  // what the customer has been asked to pay so far. Distinct from totalReceived
+  // which only counts cash actually arrived.
+  const totalAusgestellt = anzahlungsRechnungen.reduce((sum, r) => sum + num(r.brutto_betrag), 0);
   const remaining = Math.max(0, bruttoSumme - totalReceived);
 
   const reset = () => {
@@ -196,13 +255,18 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
         }}
       >
         <div style={{
-          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+          display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between',
           padding: '16px 20px', borderBottom: '1px solid var(--border-primary)',
           background: 'var(--bg-secondary)',
         }}>
-          <span style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>
-            Anzahlungen verwalten
-          </span>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+            <span style={{ fontSize: '15px', fontWeight: 600, color: 'var(--text-primary)' }}>
+              Anzahlungen verwalten
+            </span>
+            <span style={{ fontSize: '12px', color: 'var(--text-tertiary)', lineHeight: 1.4 }}>
+              Hier erfassen Sie eingegangene Zahlungen vom Kunden. Die Schlussrechnung über den Restbetrag wird später im Status „Abnahme" erstellt.
+            </span>
+          </div>
           <button onClick={onClose} style={{ background: 'none', border: 'none', cursor: 'pointer', padding: '4px', color: 'var(--text-tertiary)', borderRadius: '6px' }}>
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="18" height="18"><path d="M18 6L6 18M6 6l12 12" /></svg>
           </button>
@@ -212,11 +276,15 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
           <div style={{
             padding: '12px 14px', borderRadius: '10px', marginBottom: '14px',
             background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
-            display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: '10px',
+            display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '10px',
           }}>
             <div>
               <div style={summaryLabel}>Gesamtsumme (Brutto)</div>
               <div style={summaryValue}>{formatPrice(bruttoSumme)} EUR</div>
+            </div>
+            <div>
+              <div style={summaryLabel}>In Rechnung gestellt</div>
+              <div style={{ ...summaryValue, color: '#a78bfa' }}>{formatPrice(totalAusgestellt)} EUR</div>
             </div>
             <div>
               <div style={summaryLabel}>Bisher erhalten</div>
@@ -230,12 +298,97 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
             </div>
           </div>
 
-          <div style={sectionTitle}>Erfasste Anzahlungen</div>
+          {/* Issued Anzahlungsrechnungen — what we've billed the customer for.
+              Distinct from received payments below: an invoice exists once it's
+              been created in the Rechnung-Modal, regardless of whether the
+              customer has paid yet. Two row-actions:
+                ✓ confirm payment received → flips status + auto-creates receipt
+                🔔 send Mahnung → only if Zahlungsziel passed; toast otherwise */}
+          {anzahlungsRechnungen.length > 0 && (
+            <>
+              <div style={sectionTitle}>Anzahlungsrechnungen (ausgestellt)</div>
+              <div style={{ marginBottom: '14px', border: '1px solid var(--border-primary)', borderRadius: '8px', overflow: 'hidden' }}>
+                {anzahlungsRechnungen.map((r, i) => {
+                  const statusInfo = r.status === 'bezahlt'
+                    ? { label: 'Bezahlt', color: '#10b981', bg: 'rgba(16,185,129,0.12)' }
+                    : r.status === 'gesendet'
+                      ? { label: 'Gesendet', color: '#3b82f6', bg: 'rgba(59,130,246,0.12)' }
+                      : { label: 'Entwurf', color: '#f59e0b', bg: 'rgba(245,158,11,0.12)' };
+                  const isPaid = r.status === 'bezahlt';
+                  return (
+                    <div key={r.id} style={{
+                      display: 'grid', gridTemplateColumns: '110px 1fr 90px 110px 28px 28px 28px',
+                      gap: '6px', alignItems: 'center', padding: '8px 12px',
+                      background: i % 2 ? 'var(--bg-secondary)' : 'transparent',
+                      fontSize: '13px',
+                    }}>
+                      <span style={{ color: 'var(--text-secondary)' }}>{new Date(r.rechnungsdatum).toLocaleDateString('de-DE')}</span>
+                      <span style={{ color: 'var(--text-primary)', fontWeight: 500 }}>{r.rechnung_nr}</span>
+                      <span style={{ fontWeight: 600, color: 'var(--text-primary)', textAlign: 'right' }}>{formatPrice(num(r.brutto_betrag))} EUR</span>
+                      <span style={{
+                        textAlign: 'center', padding: '3px 8px', borderRadius: '999px',
+                        fontSize: '11px', fontWeight: 600,
+                        color: statusInfo.color, background: statusInfo.bg,
+                      }}>{statusInfo.label}</span>
+                      {/* Action: mark paid */}
+                      <button
+                        onClick={() => handleMarkRechnungPaid(r)}
+                        disabled={isPaid}
+                        title={isPaid ? 'Bereits als bezahlt markiert' : 'Zahlung erhalten — als bezahlt markieren'}
+                        style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          width: '28px', height: '28px', borderRadius: '6px',
+                          background: isPaid ? 'transparent' : 'rgba(16,185,129,0.1)',
+                          border: `1px solid ${isPaid ? 'var(--border-primary)' : 'rgba(16,185,129,0.3)'}`,
+                          color: isPaid ? 'var(--text-tertiary)' : '#10b981',
+                          cursor: isPaid ? 'not-allowed' : 'pointer',
+                          opacity: isPaid ? 0.4 : 1,
+                          padding: 0,
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" width="14" height="14"><polyline points="20 6 9 17 4 12" /></svg>
+                      </button>
+                      {/* Action: remind / Mahnung */}
+                      <button
+                        onClick={() => handleRemindRechnung(r)}
+                        disabled={isPaid}
+                        title={isPaid ? 'Bereits bezahlt — keine Erinnerung nötig' : 'Zahlung nicht erhalten — Erinnerung senden'}
+                        style={{
+                          display: 'flex', alignItems: 'center', justifyContent: 'center',
+                          width: '28px', height: '28px', borderRadius: '6px',
+                          background: isPaid ? 'transparent' : 'rgba(245,158,11,0.1)',
+                          border: `1px solid ${isPaid ? 'var(--border-primary)' : 'rgba(245,158,11,0.3)'}`,
+                          color: isPaid ? 'var(--text-tertiary)' : '#f59e0b',
+                          cursor: isPaid ? 'not-allowed' : 'pointer',
+                          opacity: isPaid ? 0.4 : 1,
+                          padding: 0,
+                        }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><path d="M18 8A6 6 0 006 8c0 7-3 9-3 9h18s-3-2-3-9" /><path d="M13.73 21a2 2 0 01-3.46 0" /></svg>
+                      </button>
+                      {/* PDF link */}
+                      <a
+                        href={getRechnungPdfUrl(r.id)}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        title="Rechnung-PDF öffnen"
+                        style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', width: '28px', height: '28px', borderRadius: '6px', color: 'var(--text-tertiary)', textDecoration: 'none', border: '1px solid var(--border-primary)' }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                      </a>
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+
+          <div style={sectionTitle}>Erhaltene Zahlungen</div>
           {loading ? (
             <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px' }}>Wird geladen...</div>
           ) : list.length === 0 ? (
             <div style={{ padding: '20px', textAlign: 'center', color: 'var(--text-tertiary)', fontSize: '13px', border: '1px dashed var(--border-primary)', borderRadius: '8px', marginBottom: '14px' }}>
-              Noch keine Anzahlungen erfasst.
+              Noch keine Zahlung vom Kunden eingegangen.
             </div>
           ) : (
             <div style={{ marginBottom: '14px', border: '1px solid var(--border-primary)', borderRadius: '8px', overflow: 'hidden' }}>
@@ -284,7 +437,7 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
             </div>
           )}
 
-          <div style={sectionTitle}>Neue Anzahlung erfassen</div>
+          <div style={sectionTitle}>Eingang einer Zahlung erfassen</div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
             <div>
               <label style={labelStyle}>Betrag (EUR)</label>

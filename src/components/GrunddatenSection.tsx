@@ -1,4 +1,5 @@
 import { motion } from 'framer-motion';
+import { MARKETING_SOURCES } from '../utils/marketingSources';
 import './GrunddatenSection.css';
 import './SectionStyles.css';
 
@@ -11,6 +12,7 @@ interface GrunddatenSectionProps {
     kundeEmail?: string;
     kundeTelefon?: string;
     kundenlokation: string;
+    marketingSource?: string | null;
   };
   updateField: (field: string, value: string) => void;
 }
@@ -159,6 +161,27 @@ const GrunddatenSection = ({ formData, updateField }: GrunddatenSectionProps) =>
             placeholder="Adresse oder Standort"
             required
           />
+        </motion.div>
+
+        <motion.div
+          className="form-group full-width"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, delay: 0.55 }}
+        >
+          <label htmlFor="marketingSource">
+            Wie sind Sie auf uns aufmerksam geworden?
+          </label>
+          <select
+            id="marketingSource"
+            value={formData.marketingSource || ''}
+            onChange={(e) => updateField('marketingSource', e.target.value)}
+          >
+            <option value="">Bitte auswählen...</option>
+            {MARKETING_SOURCES.map((s) => (
+              <option key={s.value} value={s.value}>{s.label}</option>
+            ))}
+          </select>
         </motion.div>
       </div>
     </div>

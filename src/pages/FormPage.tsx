@@ -327,7 +327,8 @@ const FormPage = () => {
             createdAt: apiData.created_at,
             updatedAt: apiData.updated_at,
             customerSignature: apiData.customerSignature || null,
-            signatureName: apiData.signatureName || null
+            signatureName: apiData.signatureName || null,
+            marketingSource: apiData.marketingSource ?? null
           };
 
           setInitialData(formData);
@@ -363,6 +364,7 @@ const FormPage = () => {
         markiseData: (data.specifications as Record<string, unknown>)?.markiseData,
         weitereProdukte: data.weitereProdukte || [],
         bemerkungen: data.bemerkungen || '',
+        marketingSource: data.marketingSource ?? null,
       };
 
       // Always include signature fields to preserve them during edits
@@ -453,7 +455,8 @@ const FormPage = () => {
         specifications: data.specifications || {},
         markiseData: (data.specifications as Record<string, unknown>)?.markiseData,
         weitereProdukte: data.weitereProdukte || [],
-        bemerkungen: data.bemerkungen || ''
+        bemerkungen: data.bemerkungen || '',
+        marketingSource: data.marketingSource ?? null
       };
 
       apiData.status = 'entwurf';
@@ -466,7 +469,7 @@ const FormPage = () => {
       }
 
       toast.success('Gespeichert', 'Entwurf wurde gespeichert.');
-      navigate('/');
+      navigate('/aufmasse');
     } catch (err) {
       console.error('Error saving draft:', err);
       toast.error('Fehler', 'Entwurf konnte nicht gespeichert werden.');
@@ -474,7 +477,7 @@ const FormPage = () => {
   };
 
   const handleCancel = () => {
-    navigate('/');
+    navigate('/aufmasse');
   };
 
   if (loading) {
@@ -511,7 +514,7 @@ const FormPage = () => {
       }}>
         <p style={{ color: 'var(--text-primary)' }}>{error}</p>
         <button
-          onClick={() => navigate('/')}
+          onClick={() => navigate('/aufmasse')}
           style={{
             padding: '0.75rem 1.5rem',
             background: 'var(--primary-color)',

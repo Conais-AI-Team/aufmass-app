@@ -74,6 +74,9 @@ export interface FormData {
   // manual action via the post button on the card). NULL means no postal
   // copy has gone out yet.
   post_sent_at?: string | null;
+  // Marketing source slug ("Wie sind Sie auf uns aufmerksam geworden?")
+  // — see src/utils/marketingSources.ts for the canonical list.
+  marketingSource?: string | null;
 }
 
 export interface ApiForm {
@@ -109,6 +112,7 @@ export interface ApiForm {
   abnahme_sign_pending?: boolean;
   email_sent_at?: string | null;
   post_sent_at?: string | null;
+  marketing_source?: string | null;
 }
 
 export interface Stats {
@@ -348,7 +352,8 @@ function transformApiToFrontend(apiForm: ApiForm): FormData {
     signatureName: apiForm.signature_name || null,
     abnahmeSignPending: Boolean(apiForm.abnahme_sign_pending),
     email_sent_at: apiForm.email_sent_at ?? null,
-    post_sent_at: apiForm.post_sent_at ?? null
+    post_sent_at: apiForm.post_sent_at ?? null,
+    marketingSource: apiForm.marketing_source ?? null
   };
 }
 
@@ -1708,6 +1713,10 @@ export interface CreateRechnungPayload {
   rechnungsdatum: string;
   leistungsdatum?: string | null;
   zahlungsziel: string;
+  // For anzahlungsrechnung: the deposit slice in EUR (brutto). When set, the
+  // backend stores this as the invoice's brutto and replaces items with a
+  // single "Anzahlung" line. Ignored for schlussrechnung.
+  anzahlungsbetrag?: number;
 }
 
 export interface UpdateRechnungPayload {
@@ -1751,6 +1760,12 @@ export const updateRechnung = (id: number, payload: UpdateRechnungPayload): Prom
 
 export const markRechnungSent = (id: number): Promise<{ success: boolean; form_status: string }> =>
   api.post(`/rechnungen/${id}/mark-sent`);
+
+// Confirm customer paid this Anzahlungsrechnung. Backend flips status to
+// 'bezahlt' and auto-creates a matching Anzahlung receipt — no second
+// manual entry needed.
+export const markRechnungPaid = (id: number): Promise<{ success: boolean }> =>
+  api.post(`/rechnungen/${id}/mark-paid`);
 
 export async function saveRechnungPdf(id: number, pdfBlob: Blob): Promise<{ success: boolean; size: number }> {
   const token = getStoredToken();

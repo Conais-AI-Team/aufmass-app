@@ -55,6 +55,8 @@ export interface FormData {
   kundeEmail?: string;
   kundeTelefon?: string;
   kundenlokation: string;
+  // Marketing source slug (Wie sind Sie auf uns aufmerksam geworden?)
+  marketingSource?: string | null;
 
   // Product Selection
   productSelection: ProductSelection;

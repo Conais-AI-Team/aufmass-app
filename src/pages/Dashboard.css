@@ -3354,6 +3354,22 @@
 }
 
 /* ============ STATUS FILTER TABS (Desktop) ============ */
+.status-filter-row {
+  padding: 0 2.5rem 1.25rem;
+}
+
+@media (max-width: 1024px) {
+  .status-filter-row {
+    padding: 0 1.5rem 1rem;
+  }
+}
+
+@media (max-width: 640px) {
+  .status-filter-row {
+    padding: 0 1rem 1rem;
+  }
+}
+
 .status-filter-tabs {
   display: flex;
   gap: 0.5rem;
@@ -4974,7 +4990,8 @@
 
 /* Aufmaß card e-mail status badges */
 .email-sent-badge,
-.email-pending-badge {
+.email-pending-badge,
+.angebot-pending-badge {
   display: inline-flex;
   align-items: center;
   gap: 0.25rem;
@@ -4997,6 +5014,28 @@
   color: #d97706;
   background: rgba(217, 119, 6, 0.12);
   border: 1px solid rgba(217, 119, 6, 0.35);
+}
+
+/* Angebot drafted but not yet e-mailed — uses the brand purple
+   (matches the Angebot Versendet status color) so the visual link
+   to the upcoming status promotion is obvious. */
+.angebot-pending-badge {
+  color: #a78bfa;
+  background: rgba(167, 139, 250, 0.12);
+  border: 1px solid rgba(167, 139, 250, 0.4);
+  margin-left: 0.35rem;
+}
+
+/* Subtle pulse on the e-mail icon when an Angebot is queued for send,
+   so it's the obvious next action on the card. */
+.action-btn.email.angebot-pending {
+  background: rgba(167, 139, 250, 0.12);
+  border-color: rgba(167, 139, 250, 0.5);
+  color: #a78bfa;
+}
+
+.action-btn.email.angebot-pending:hover {
+  background: rgba(167, 139, 250, 0.2);
 }
 
 /* E-Mail / Post sent check overlay on the action button (Dashboard + AusAufmassTab share these styles) */

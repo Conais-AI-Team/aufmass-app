@@ -46,6 +46,10 @@ const RechnungForm = ({ formId, type, onClose, onSaved }: RechnungFormProps) => 
   const [mwstBetrag, setMwstBetrag] = useState<number>(0);
   const [brutto, setBrutto] = useState<number>(0);
   const [anzahlungen, setAnzahlungen] = useState<Anzahlung[]>([]);
+  // Anzahlungsbetrag (deposit-only invoice): the user picks how much of the
+  // Angebot total should appear on this invoice. Empty string = no value yet.
+  // Stored as string to support the partial / "0," typing state.
+  const [anzahlungBetragStr, setAnzahlungBetragStr] = useState<string>('');
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -76,6 +80,12 @@ const RechnungForm = ({ formId, type, onClose, onSaved }: RechnungFormProps) => 
         setMwstBetrag(num(angebot.summary.mwst_betrag));
         setBrutto(num(angebot.summary.brutto_summe));
         setAnzahlungen(az);
+        // Default Anzahlung suggestion: 30% of total brutto (German Markisen-
+        // branche standard). User can override via input or quick-pick chips.
+        if (type === 'anzahlungsrechnung') {
+          const suggested = num(angebot.summary.brutto_summe) * 0.3;
+          setAnzahlungBetragStr(suggested.toFixed(2).replace('.', ','));
+        }
       } catch (err) {
         console.error('Error loading Rechnung context:', err);
         setError(err instanceof Error ? err.message : 'Daten konnten nicht geladen werden.');
@@ -89,9 +99,36 @@ const RechnungForm = ({ formId, type, onClose, onSaved }: RechnungFormProps) => 
   const totalAnzahlungen = anzahlungen.reduce((sum, a) => sum + num(a.betrag), 0);
   const restbetrag = brutto - totalAnzahlungen;
 
+  // Parse the deposit input (de-DE comma format) into a usable number.
+  const anzahlungBetrag = (() => {
+    const raw = anzahlungBetragStr.replace(/\./g, '').replace(',', '.').trim();
+    const n = Number(raw);
+    return Number.isFinite(n) && n > 0 ? n : 0;
+  })();
+  // For anzahlungsrechnung, the displayed totals reflect the deposit slice;
+  // for schlussrechnung we keep the full Angebot brutto.
+  const isAnzahlung = type === 'anzahlungsrechnung';
+  const displayBrutto = isAnzahlung ? anzahlungBetrag : brutto;
+  const displayNetto = displayBrutto / (1 + mwstSatz / 100);
+  const displayMwstBetrag = displayBrutto - displayNetto;
+  const anzahlungProzent = isAnzahlung && brutto > 0
+    ? (anzahlungBetrag / brutto) * 100
+    : 0;
+  const anzahlungInvalid = isAnzahlung && (anzahlungBetrag <= 0 || anzahlungBetrag > brutto + 0.01);
+
   const handleSave = async () => {
     if (!rechnungsdatum) { toast.warning('Datum fehlt', 'Bitte Rechnungsdatum eingeben.'); return; }
     if (!zahlungsziel) { toast.warning('Datum fehlt', 'Bitte Zahlungsziel eingeben.'); return; }
+    if (isAnzahlung) {
+      if (anzahlungBetrag <= 0) {
+        toast.warning('Anzahlung fehlt', 'Bitte einen Anzahlungsbetrag eingeben.');
+        return;
+      }
+      if (anzahlungBetrag > brutto + 0.01) {
+        toast.warning('Anzahlung zu hoch', 'Anzahlung darf den Gesamtbetrag nicht übersteigen.');
+        return;
+      }
+    }
 
     setSaving(true);
     try {
@@ -100,6 +137,7 @@ const RechnungForm = ({ formId, type, onClose, onSaved }: RechnungFormProps) => 
         rechnungsdatum,
         leistungsdatum: leistungsdatum || null,
         zahlungsziel,
+        ...(isAnzahlung ? { anzahlungsbetrag: anzahlungBetrag } : {}),
       });
 
       const pdfRes = await generateRechnungPDF({
@@ -199,18 +237,77 @@ const RechnungForm = ({ formId, type, onClose, onSaved }: RechnungFormProps) => 
                 ))}
               </div>
 
+              {/* Anzahlung: deposit-amount picker. Lets the user invoice only
+                  the deposit slice instead of the full Angebot total — avoids
+                  the "we sent the full bill" trap. */}
+              {isAnzahlung && (
+                <div style={{
+                  padding: '12px 14px', borderRadius: '10px', marginBottom: '14px',
+                  background: 'rgba(127,169,61,0.06)', border: '1px solid rgba(127,169,61,0.25)',
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '12px', color: 'var(--text-tertiary)', marginBottom: '8px' }}>
+                    <span>Gesamtbetrag (brutto)</span>
+                    <span>{formatPrice(brutto)} EUR</span>
+                  </div>
+                  <label style={{ ...labelStyle, marginBottom: '6px' }}>Anzahlungsbetrag (EUR, brutto)</label>
+                  <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+                    {[20, 30, 50].map((pct) => (
+                      <button
+                        key={pct}
+                        type="button"
+                        onClick={() => setAnzahlungBetragStr((brutto * pct / 100).toFixed(2).replace('.', ','))}
+                        style={{
+                          padding: '6px 12px', borderRadius: '6px',
+                          border: '1px solid var(--border-primary)',
+                          background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
+                          fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+                        }}
+                      >{pct}%</button>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setAnzahlungBetragStr(brutto.toFixed(2).replace('.', ','))}
+                      style={{
+                        padding: '6px 12px', borderRadius: '6px',
+                        border: '1px solid var(--border-primary)',
+                        background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
+                        fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+                      }}
+                    >100%</button>
+                  </div>
+                  <input
+                    type="text"
+                    inputMode="decimal"
+                    value={anzahlungBetragStr}
+                    onChange={(e) => setAnzahlungBetragStr(e.target.value)}
+                    placeholder="0,00"
+                    style={{ ...inputStyle, borderColor: anzahlungInvalid ? '#ef4444' : 'var(--border-primary)' }}
+                  />
+                  {anzahlungBetrag > 0 && !anzahlungInvalid && (
+                    <div style={{ marginTop: '6px', fontSize: '12px', color: 'var(--text-tertiary)' }}>
+                      ≈ {anzahlungProzent.toFixed(1).replace('.', ',')}% des Gesamtbetrags
+                    </div>
+                  )}
+                  {anzahlungInvalid && (
+                    <div style={{ marginTop: '6px', fontSize: '12px', color: '#ef4444' }}>
+                      {anzahlungBetrag <= 0 ? 'Bitte einen Betrag eingeben.' : 'Anzahlung darf den Gesamtbetrag nicht übersteigen.'}
+                    </div>
+                  )}
+                </div>
+              )}
+
               <div style={{
                 padding: '12px 14px', borderRadius: '10px', marginBottom: '14px',
                 background: 'var(--bg-secondary)', border: '1px solid var(--border-primary)',
               }}>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                  <span>Nettobetrag:</span><span>{formatPrice(netto)} EUR</span>
+                  <span>Nettobetrag:</span><span>{formatPrice(displayNetto)} EUR</span>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '13px', color: 'var(--text-secondary)', marginTop: '4px' }}>
-                  <span>MwSt {formatPrice(mwstSatz)}%:</span><span>{formatPrice(mwstBetrag)} EUR</span>
+                  <span>MwSt {formatPrice(mwstSatz)}%:</span><span>{formatPrice(displayMwstBetrag)} EUR</span>
                 </div>
                 <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '15px', fontWeight: 700, color: 'var(--text-primary)', marginTop: '6px', paddingTop: '6px', borderTop: '1px solid var(--border-primary)' }}>
-                  <span>Bruttobetrag:</span><span>{formatPrice(brutto)} EUR</span>
+                  <span>{isAnzahlung ? 'Anzahlungsbetrag:' : 'Bruttobetrag:'}</span><span>{formatPrice(displayBrutto)} EUR</span>
                 </div>
 
                 {type === 'schlussrechnung' && (
@@ -267,8 +364,8 @@ const RechnungForm = ({ formId, type, onClose, onSaved }: RechnungFormProps) => 
           <button onClick={onClose} style={btnSecondary}>Abbrechen</button>
           <button
             onClick={handleSave}
-            disabled={saving || loading || !!error}
-            style={{ ...btnPrimary, opacity: (saving || loading || !!error) ? 0.6 : 1, cursor: (saving || loading || !!error) ? 'not-allowed' : 'pointer' }}
+            disabled={saving || loading || !!error || anzahlungInvalid}
+            style={{ ...btnPrimary, opacity: (saving || loading || !!error || anzahlungInvalid) ? 0.6 : 1, cursor: (saving || loading || !!error || anzahlungInvalid) ? 'not-allowed' : 'pointer' }}
           >
             {saving ? 'Erstellt...' : 'Rechnung erstellen'}
           </button>

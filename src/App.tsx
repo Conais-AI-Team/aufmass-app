@@ -1251,7 +1251,8 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
               kundeNachname: formData.kundeNachname,
               kundeEmail: formData.kundeEmail,
               kundeTelefon: formData.kundeTelefon,
-              kundenlokation: formData.kundenlokation
+              kundenlokation: formData.kundenlokation,
+              marketingSource: formData.marketingSource
             }}
             updateField={updateGrunddatenField}
           />

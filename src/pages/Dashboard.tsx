@@ -13,7 +13,7 @@ import LeadFormModal from '../components/LeadFormModal';
 import RechnungForm from '../components/RechnungForm';
 import AnzahlungForm from '../components/AnzahlungForm';
 import type { Rechnung, RechnungType } from '../services/api';
-import { getRechnungenByForm, markRechnungSent, getAnzahlungenByForm, num } from '../services/api';
+import { getRechnungenByForm, markRechnungSent, getAnzahlungenByForm, num, getRechnungPdfUrl } from '../services/api';
 import './Dashboard.css';
 
 // Check if current user is admin or office (both have elevated permissions)
@@ -146,6 +146,9 @@ const Dashboard = () => {
   const [attachmentDropdownOpen, setAttachmentDropdownOpen] = useState<number | null>(null);
   // Lazy-loaded list of available PDF snapshots per form
   const [formSnapshots, setFormSnapshots] = useState<Record<number, FormPdfSnapshot[]>>({});
+  // Lazy-loaded Rechnungen per form — each Rechnung gets its own dropdown
+  // entry so Anzahlungsraten / Schlussrechnungen are individually openable.
+  const [formRechnungen, setFormRechnungen] = useState<Record<number, Rechnung[]>>({});
   // Status history modal
   const [historyModalOpen, setHistoryModalOpen] = useState(false);
   const [selectedFormHistory, setSelectedFormHistory] = useState<StatusHistoryEntry[]>([]);
@@ -378,6 +381,23 @@ const Dashboard = () => {
     return status;
   };
 
+  // Aufmaß-stage = the user has taken measurements and possibly created an
+  // Angebot, but nothing has been sent to the customer yet. Once status moves
+  // past angebot_versendet, the lifecycle is "in flight" and stage badges
+  // shouldn't claim "ausstehend" anymore.
+  const isInAufmassStage = (form: FormData): boolean => {
+    const s = getFormStatus(form);
+    return s === 'entwurf' || s === 'neu' || s === 'aufmass_genommen';
+  };
+
+  // Angebot was drafted (lead_id linked from LeadFormModal save) but the
+  // user didn't tick "send via e-mail" on save — status stays in aufmass
+  // stage and we surface a "Versand ausstehend" badge so back-office can
+  // trigger the send from the e-mail icon.
+  const isAngebotPendingSend = (form: FormData): boolean => {
+    return !!form.lead_id && isInAufmassStage(form);
+  };
+
   const getStatusLabel = (status: string): string => {
     const option = STATUS_OPTIONS.find(o => o.value === status);
     return option?.label || 'Alle Aufmaße';
@@ -568,6 +588,38 @@ const Dashboard = () => {
 
   // Open email composer for the latest Entwurf Rechnung of a form (used by the
   // "Senden" button on cards in *_erstellt status — manual delivery flow).
+  // Build the customer-facing Rechnung e-mail body. For Anzahlungsrechnung
+  // we expose BOTH the deposit slice AND the full Gesamtsumme so the customer
+  // doesn't think they owe the entire project price upfront. Schlussrechnung
+  // already invoices the remaining balance, so that case stays simple.
+  const buildRechnungEmailBody = async (
+    rechnung: Pick<Rechnung, 'type' | 'rechnung_nr' | 'kunde_vorname' | 'kunde_nachname' | 'brutto_betrag' | 'form_id'>,
+  ): Promise<string> => {
+    const greet = `Sehr geehrte/r ${rechnung.kunde_vorname || ''} ${rechnung.kunde_nachname || ''}`.trim() + ',';
+    const labelDe = rechnung.type === 'schlussrechnung' ? 'Schlussrechnung' : 'Anzahlungsrechnung';
+    const fmtEur = (n: number) =>
+      n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) + ' EUR';
+
+    if (rechnung.type === 'anzahlungsrechnung') {
+      const anzahlungBetrag = num(rechnung.brutto_betrag);
+      let gesamtsumme = 0;
+      try {
+        const ang = await getAngebot(rechnung.form_id);
+        gesamtsumme = num(ang?.summary?.brutto_summe || 0);
+      } catch {
+        // Angebot fetch failed — fall back to deposit-only wording rather than block the e-mail.
+      }
+      const restbetrag = gesamtsumme > anzahlungBetrag ? gesamtsumme - anzahlungBetrag : 0;
+      const totalsLine = gesamtsumme > 0
+        ? `\n\nÜbersicht zu Ihrem Auftrag:\n  • Gesamtbetrag (brutto): ${fmtEur(gesamtsumme)}\n  • Anzahlung (diese Rechnung): ${fmtEur(anzahlungBetrag)}\n  • Restbetrag (folgt mit Schlussrechnung): ${fmtEur(restbetrag)}`
+        : `\n\nAnzahlungsbetrag (brutto): ${fmtEur(anzahlungBetrag)}`;
+      return `${greet}\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.${totalsLine}\n\nWir bitten um Überweisung des Anzahlungsbetrags innerhalb des angegebenen Zahlungsziels. Den Restbetrag stellen wir Ihnen nach Abnahme mit der Schlussrechnung in Rechnung.\n\nMit freundlichen Grüßen`;
+    }
+
+    // Schlussrechnung — remaining-balance invoice, kept simple.
+    return `${greet}\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.\n\nFälliger Restbetrag (brutto): ${fmtEur(num(rechnung.brutto_betrag))}\n\nMit freundlichen Grüßen`;
+  };
+
   const handleResendRechnungEmail = async (formId: number) => {
     try {
       const rechnungen = await getRechnungenByForm(formId);
@@ -577,10 +629,11 @@ const Dashboard = () => {
         return;
       }
       const labelDe = target.type === 'schlussrechnung' ? 'Schlussrechnung' : 'Anzahlungsrechnung';
+      const body = await buildRechnungEmailBody(target);
       setEmailComposer({
         to: target.kunde_email || '',
         subject: `${labelDe} ${target.rechnung_nr}`,
-        body: `Sehr geehrte/r ${target.kunde_vorname || ''} ${target.kunde_nachname || ''},\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${target.rechnung_nr}.\n\nMit freundlichen Grüßen`,
+        body,
         rechnungId: target.id,
         emailType: target.type === 'schlussrechnung' ? 'rechnung_schluss' : 'rechnung_anzahlung',
         attachmentName: `Rechnung_${target.rechnung_nr}.pdf`,
@@ -590,17 +643,18 @@ const Dashboard = () => {
     }
   };
 
-  const handleRechnungSaved = (rechnung: Rechnung, opts: { sendEmail: boolean }) => {
+  const handleRechnungSaved = async (rechnung: Rechnung, opts: { sendEmail: boolean }) => {
     setRechnungModalOpen(false);
     // Backend bumps form.status to *_erstellt (Entwurf). Email send (or admin
     // mark-sent) advances it to gesendet / rest_rechnung_erstellt.
     loadData();
     if (opts.sendEmail && rechnung.kunde_email) {
       const labelDe = rechnung.type === 'schlussrechnung' ? 'Schlussrechnung' : 'Anzahlungsrechnung';
+      const body = await buildRechnungEmailBody(rechnung);
       setEmailComposer({
         to: rechnung.kunde_email,
         subject: `${labelDe} ${rechnung.rechnung_nr}`,
-        body: `Sehr geehrte/r ${rechnung.kunde_vorname || ''} ${rechnung.kunde_nachname || ''},\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.\n\nMit freundlichen Grüßen`,
+        body,
         rechnungId: rechnung.id,
         emailType: rechnung.type === 'schlussrechnung' ? 'rechnung_schluss' : 'rechnung_anzahlung',
         attachmentName: `Rechnung_${rechnung.rechnung_nr}.pdf`,
@@ -685,6 +739,22 @@ const Dashboard = () => {
 
     let subject = '';
     let body = '';
+
+    // Angebot wartet auf Versand: lead drafted via LeadFormModal but the
+    // user didn't trigger e-mail send during save. Surface the right
+    // template so the icon-button send promotes the status afterwards.
+    if (isAngebotPendingSend(form) || status === 'angebot_versendet') {
+      subject = 'Ihr Angebot — AYLUX';
+      body = `Sehr geehrte/r ${kundenName},
+
+anbei erhalten Sie Ihr persönliches Angebot.
+
+Bei Rückfragen oder Wünschen zur Anpassung stehen wir Ihnen gerne zur Verfügung.
+
+Mit freundlichen Grüßen
+Ihr AYLUX Team`;
+      return { to: form.kundeEmail || '', subject, body };
+    }
 
     switch (status) {
       case 'anzahlung':
@@ -1271,6 +1341,25 @@ Aylux Team`;
       }
       return;
     }
+    // Abnahme: prefer the customer-signed BoldSign PDF over the unsigned
+    // snapshot. The unsigned version is only meaningful before the customer
+    // confirms — once signed, the e-signed copy is the source of truth.
+    if (docType === 'abnahme') {
+      const sig = getSignatureByType(formId, 'abnahme');
+      if (sig?.status === 'signed' && sig.boldsign_document_id) {
+        try {
+          const blob = await downloadBoldSignDocument(sig.boldsign_document_id);
+          const url = URL.createObjectURL(blob);
+          window.open(url, '_blank');
+          // Revoke after the new tab has had time to load — keeps memory clean.
+          setTimeout(() => URL.revokeObjectURL(url), 60_000);
+          return;
+        } catch (e) {
+          console.error('Failed to open signed Abnahme PDF, falling back to snapshot:', e);
+          // fall through to snapshot
+        }
+      }
+    }
     if (existing) {
       window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
       return;
@@ -1399,6 +1488,17 @@ Aylux Team`;
     } catch (e) {
       console.warn('Failed to load snapshots:', e);
       setFormSnapshots((prev) => ({ ...prev, [formId]: [] }));
+    }
+  };
+
+  const ensureRechnungenLoaded = async (formId: number) => {
+    if (formRechnungen[formId]) return;
+    try {
+      const list = await getRechnungenByForm(formId);
+      setFormRechnungen((prev) => ({ ...prev, [formId]: list }));
+    } catch (e) {
+      console.warn('Failed to load rechnungen:', e);
+      setFormRechnungen((prev) => ({ ...prev, [formId]: [] }));
     }
   };
 
@@ -1569,6 +1669,11 @@ Aylux Team`;
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
             </button>
           </div>
+        </div>
+      </div>
+
+      {/* Status filter row — separate from controls so chips wrap on their own line */}
+      <div className="status-filter-row">
           {/* Desktop: Horizontal tabs */}
           <div className="status-filter-tabs desktop-only">
             {STATUS_OPTIONS.map((option) => (
@@ -1629,7 +1734,6 @@ Aylux Team`;
               )}
             </AnimatePresence>
           </div>
-        </div>
       </div>
 
       {/* Forms Grid */}
@@ -1646,7 +1750,7 @@ Aylux Team`;
           <div className={`forms-${viewMode}`}>
             <AnimatePresence mode="popLayout">
               {filteredForms.map((form, index) => (
-                <motion.div key={form.id} className={`form-card-modern ${viewMode}`} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ delay: index * 0.03 }} layout>
+                <motion.div key={form.id} className={`form-card-modern ${viewMode}`} initial={{ opacity: 0, y: 20 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0 }} transition={{ delay: Math.min(index, 12) * 0.03 }}>
                   <div className="card-status-indicator" data-status={form.status || 'draft'} />
                   <div className="card-main">
                     <div className="card-header-modern">
@@ -1657,22 +1761,34 @@ Aylux Team`;
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0118 0z" /><circle cx="12" cy="10" r="3" /></svg>
                           {form.kundenlokation || 'Keine Adresse'}
                         </p>
-                        {/* E-Mail status badge: green when an Aufmaß PDF was
-                            sent (form's "E-Mail senden" or Dashboard icon),
-                            yellow "ausstehend" otherwise. */}
+                        {/* Aufmaß-stage e-mail status badge — once stamped it stays
+                            forever as a historic indicator that the Aufmaß-PDF
+                            was delivered to the customer. The icon-button tick
+                            below is the live "current stage" indicator. */}
                         {form.email_sent_at ? (
                           <span
                             className="email-sent-badge"
-                            title={`E-Mail versendet: ${new Date(form.email_sent_at).toLocaleString('de-DE')}`}
+                            title={`Aufmaß E-Mail versendet: ${new Date(form.email_sent_at).toLocaleString('de-DE')}`}
                           >
-                            ✓ E-Mail versendet
+                            ✓ Aufmaß E-Mail versendet
                           </span>
                         ) : (
                           <span
                             className="email-pending-badge"
-                            title="Es wurde noch keine E-Mail versendet"
+                            title="Es wurde noch keine Aufmaß-E-Mail versendet"
                           >
-                            📧 E-Mail ausstehend
+                            📧 Aufmaß E-Mail ausstehend
+                          </span>
+                        )}
+                        {/* Angebot drafted but not yet sent — surfaced so back-office
+                            can trigger the e-mail send from the icon button. Disappears
+                            once the form is promoted past angebot_versendet. */}
+                        {isAngebotPendingSend(form) && (
+                          <span
+                            className="angebot-pending-badge"
+                            title="Ein Angebot wurde erstellt, aber noch nicht an den Kunden versendet."
+                          >
+                            📋 Angebot wartet auf Versand
                           </span>
                         )}
                         {/* Postal status — admin-only manual flag. Same UX
@@ -1939,7 +2055,10 @@ Aylux Team`;
                           e.stopPropagation();
                           const willOpen = attachmentDropdownOpen !== form.id;
                           setAttachmentDropdownOpen(willOpen ? form.id! : null);
-                          if (willOpen) ensureSnapshotsLoaded(form.id!);
+                          if (willOpen) {
+                            ensureSnapshotsLoaded(form.id!);
+                            ensureRechnungenLoaded(form.id!);
+                          }
                         }}
                         title="Dateien"
                       >
@@ -1955,7 +2074,10 @@ Aylux Team`;
                             exit={{ opacity: 0, y: -10 }}
                             onClick={(e) => e.stopPropagation()}
                           >
-                            {/* PDF Vorschau list — frozen snapshots per document type */}
+                            {/* PDF Vorschau list — frozen snapshots per document type.
+                                Rechnung is excluded here and rendered as one entry per
+                                Rechnung record below, since a single form can have
+                                multiple Rechnungen (Anzahlungsraten + Schlussrechnung). */}
                             <div className="attachment-divider">PDF Vorschau</div>
                             {(() => {
                               const snapshots = formSnapshots[form.id!] || [];
@@ -1963,19 +2085,26 @@ Aylux Team`;
                               const types: { type: FormPdfDocType; label: string }[] = [
                                 { type: 'aufmass', label: 'Aufmaß-PDF' },
                                 { type: 'angebot', label: 'Angebot-PDF' },
-                                { type: 'abnahme', label: 'Abnahme-PDF' },
-                                { type: 'rechnung', label: 'Rechnung-PDF' }
+                                { type: 'abnahme', label: 'Abnahme-PDF' }
                               ];
                               return types.map(({ type, label }) => {
                                 const snap = snapshots.find((s) => s.document_type === type);
                                 const availableByStatus = isPdfTypeAvailableForStatus(formStatus, type);
-                                // Rechnung needs a real saved snapshot to be openable —
-                                // we don't auto-render it from form data (no generator yet).
-                                const enabled = type === 'rechnung' ? !!snap : (!!snap || availableByStatus);
+                                const enabled = !!snap || availableByStatus;
+
+                                // Abnahme: when a customer-signed copy exists, the
+                                // Abnahme-PDF entry transparently opens the signed PDF.
+                                const abnahmeSig = type === 'abnahme'
+                                  ? getSignatureByType(form.id!, 'abnahme')
+                                  : null;
+                                const isSignedAbnahme = !!(abnahmeSig?.status === 'signed' && abnahmeSig.boldsign_document_id);
+                                const displayLabel = type === 'abnahme' && isSignedAbnahme
+                                  ? `${label} (signiert)`
+                                  : label;
 
                                 let titleText = '';
-                                if (snap) titleText = `Erstellt am ${new Date(snap.created_at).toLocaleDateString('de-DE')}`;
-                                else if (type === 'rechnung') titleText = 'Bitte zuerst eine Rechnung erstellen';
+                                if (isSignedAbnahme) titleText = 'Vom Kunden signierte Abnahme öffnen';
+                                else if (snap) titleText = `Erstellt am ${new Date(snap.created_at).toLocaleDateString('de-DE')}`;
                                 else if (availableByStatus) titleText = 'Wird beim Klick erstellt und gespeichert';
                                 else titleText = 'In diesem Status nicht verfügbar';
 
@@ -1993,11 +2122,52 @@ Aylux Team`;
                                     title={titleText}
                                   >
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14,2 14,8 20,8" /><path d="M12 11v6M9 14h6" /></svg>
-                                    <span>{label}</span>
+                                    <span>{displayLabel}</span>
                                     {snap && (
                                       <span className="upload-hint">{new Date(snap.created_at).toLocaleDateString('de-DE')}</span>
                                     )}
                                   </button>
+                                );
+                              });
+                            })()}
+                            {/* Rechnungen — one entry per record. Anzahlungsrechnung
+                                gets numbered when there are multiple, Schlussrechnung
+                                stays singular (there's only ever one). Sorted by
+                                rechnungsdatum so the chronological order matches
+                                what the back-office expects. */}
+                            {(() => {
+                              const rechnungen = formRechnungen[form.id!] || [];
+                              if (rechnungen.length === 0) return null;
+                              const sorted = [...rechnungen].sort((a, b) =>
+                                new Date(a.rechnungsdatum).getTime() - new Date(b.rechnungsdatum).getTime()
+                              );
+                              const anzahlungCount = sorted.filter(r => r.type === 'anzahlungsrechnung').length;
+                              let anzahlungIdx = 0;
+                              return sorted.map((r) => {
+                                let label = '';
+                                if (r.type === 'schlussrechnung') {
+                                  label = 'Schlussrechnung';
+                                } else {
+                                  anzahlungIdx += 1;
+                                  label = anzahlungCount > 1
+                                    ? `Anzahlungsrechnung ${anzahlungIdx}`
+                                    : 'Anzahlungsrechnung';
+                                }
+                                const dateStr = new Date(r.rechnungsdatum).toLocaleDateString('de-DE');
+                                return (
+                                  <a
+                                    key={`rechnung-${r.id}`}
+                                    href={getRechnungPdfUrl(r.id)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="attachment-option generate-pdf"
+                                    onClick={() => setAttachmentDropdownOpen(null)}
+                                    title={`${label} ${r.rechnung_nr} — ${dateStr}`}
+                                  >
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14,2 14,8 20,8" /><path d="M12 11v6M9 14h6" /></svg>
+                                    <span>{label} ({r.rechnung_nr})</span>
+                                    <span className="upload-hint">{dateStr}</span>
+                                  </a>
                                 );
                               });
                             })()}
@@ -2196,30 +2366,45 @@ Aylux Team`;
                         )}
                       </>
                     )}
-                    {form.kundeEmail && (
-                      <button
-                        className={`action-btn email ${form.email_sent_at ? 'sent' : ''}`}
-                        title={form.email_sent_at
-                          ? `E-Mail an ${form.kundeEmail} (versendet: ${new Date(form.email_sent_at).toLocaleString('de-DE')})`
-                          : `E-Mail an ${form.kundeEmail}`}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          const template = getEmailTemplate(form);
-                          setEmailComposer({
-                            to: template.to || form.kundeEmail || '',
-                            subject: template.subject || '',
-                            body: template.body || '',
-                            formId: form.id,
-                            emailType: getFormStatus(form)
-                          });
-                        }}
-                      >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" /><polyline points="22,6 12,13 2,6" /></svg>
-                        {form.email_sent_at && (
-                          <span className="email-sent-check" aria-hidden="true">✓</span>
-                        )}
-                      </button>
-                    )}
+                    {form.kundeEmail && (() => {
+                      // Stage-scoped icon tick: email_sent_at captures the Aufmaß-stage
+                      // e-mail. Show the green check on the icon ONLY while in aufmass
+                      // stage AND no Angebot is waiting to be sent. The text badge above
+                      // the card stays forever — that's the historic record.
+                      const stage = getFormStatus(form);
+                      const angebotPending = isAngebotPendingSend(form);
+                      const stageEmailSent = !!form.email_sent_at && isInAufmassStage(form) && !angebotPending;
+                      // When an Angebot is awaiting send, the icon's primary action
+                      // becomes "send Angebot" — emailType drives the post-send promotion.
+                      const emailType = angebotPending ? 'angebot' : stage;
+                      const titleText = angebotPending
+                        ? `Angebot per E-Mail an ${form.kundeEmail} senden`
+                        : stageEmailSent
+                          ? `E-Mail an ${form.kundeEmail} (versendet: ${new Date(form.email_sent_at!).toLocaleString('de-DE')})`
+                          : `E-Mail an ${form.kundeEmail}`;
+                      return (
+                        <button
+                          className={`action-btn email ${stageEmailSent ? 'sent' : ''} ${angebotPending ? 'angebot-pending' : ''}`}
+                          title={titleText}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            const template = getEmailTemplate(form);
+                            setEmailComposer({
+                              to: template.to || form.kundeEmail || '',
+                              subject: template.subject || '',
+                              body: template.body || '',
+                              formId: form.id,
+                              emailType
+                            });
+                          }}
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z" /><polyline points="22,6 12,13 2,6" /></svg>
+                          {stageEmailSent && (
+                            <span className="email-sent-check" aria-hidden="true">✓</span>
+                          )}
+                        </button>
+                      );
+                    })()}
                     {/* Admin-only postal "mark sent" button. Hidden once the
                         flag is set so the action surface stays clean (the
                         badge + button overlay still reflect the state).
@@ -2959,10 +3144,14 @@ Aylux Team`;
                             type="file"
                             accept="image/*"
                             multiple
-                            onChange={(e) => {
-                              const files = Array.from(e.target.files || []);
-                              setMaengelImageFiles([...maengelImageFiles, ...files]);
+                            onChange={async (e) => {
+                              const picked = Array.from(e.target.files || []);
                               e.target.value = '';
+                              // Compress before stashing into form state — same
+                              // pattern as the main Aufmaß bilder upload.
+                              const { compressImages } = await import('../utils/imageCompress');
+                              const processed = await compressImages(picked);
+                              setMaengelImageFiles([...maengelImageFiles, ...processed]);
                             }}
                           />
                           📷 Fotos hinzufügen
@@ -2992,90 +3181,6 @@ Aylux Team`;
                     onChange={(e) => setAbnahmeData({ ...abnahmeData, kundeName: e.target.value })}
                     placeholder="Vor- und Nachname"
                   />
-                </div>
-
-                {/* E-Signature Section */}
-                <div className="abnahme-row">
-                  <label>E-Signatur Status</label>
-                  {(() => {
-                    const abnahmeSig = abnahmeFormId ? getSignatureByType(abnahmeFormId, 'abnahme') : null;
-                    const aufmassSig = abnahmeFormId ? getSignatureByType(abnahmeFormId, 'aufmass') : null;
-
-                    return (
-                      <div className="esignature-status-section">
-                        {/* Aufmass Signature Status */}
-                        <div className="signature-item">
-                          <span className="signature-label">Aufmaß:</span>
-                          {aufmassSig ? (
-                            <div className="signature-status-row">
-                              <span
-                                className="signature-status-badge"
-                                style={{ backgroundColor: getSignatureStatusDisplay(aufmassSig.status).color }}
-                              >
-                                {getSignatureStatusDisplay(aufmassSig.status).label}
-                              </span>
-                              {aufmassSig.status === 'signed' && aufmassSig.boldsign_document_id && (
-                                <button
-                                  className="btn-download-signed"
-                                  onClick={() => handleDownloadSignedDocument(aufmassSig.boldsign_document_id!, 'aufmass')}
-                                >
-                                  Download
-                                </button>
-                              )}
-                            </div>
-                          ) : (
-                            <span className="signature-status-badge" style={{ backgroundColor: '#6b7280' }}>Nicht gesendet</span>
-                          )}
-                        </div>
-
-                        {/* Abnahme Signature Status */}
-                        <div className="signature-item">
-                          <span className="signature-label">Abnahme:</span>
-                          {abnahmeSig ? (
-                            <div className="signature-status-row">
-                              <span
-                                className="signature-status-badge"
-                                style={{ backgroundColor: getSignatureStatusDisplay(abnahmeSig.status).color }}
-                              >
-                                {getSignatureStatusDisplay(abnahmeSig.status).label}
-                              </span>
-                              {abnahmeSig.status === 'signed' && abnahmeSig.boldsign_document_id && (
-                                <button
-                                  className="btn-download-signed"
-                                  onClick={() => handleDownloadSignedDocument(abnahmeSig.boldsign_document_id!, 'abnahme')}
-                                >
-                                  Download
-                                </button>
-                              )}
-                            </div>
-                          ) : (
-                            <div className="signature-status-row">
-                              <span className="signature-status-badge" style={{ backgroundColor: '#6b7280' }}>Nicht gesendet</span>
-                              {branchFeatures?.esignature_enabled && (
-                                <button
-                                  className="btn-send-signature"
-                                  onClick={handleSendAbnahmeSignature}
-                                  disabled={abnahmeSignatureLoading}
-                                >
-                                  {abnahmeSignatureLoading ? 'Senden...' : 'Signatur anfordern'}
-                                </button>
-                              )}
-                            </div>
-                          )}
-                          {abnahmeSig && ['declined', 'expired', 'failed'].includes(abnahmeSig.status) && branchFeatures?.esignature_enabled && (
-                            <button
-                              className="btn-send-signature"
-                              onClick={handleSendAbnahmeSignature}
-                              disabled={abnahmeSignatureLoading}
-                              style={{ marginTop: '8px' }}
-                            >
-                              {abnahmeSignatureLoading ? 'Senden...' : 'Erneut senden'}
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    );
-                  })()}
                 </div>
 
                 {/* Legacy checkbox - hidden but keeps validation working */}
@@ -3125,7 +3230,30 @@ Aylux Team`;
             emailType={emailComposer.emailType}
             attachmentName={emailComposer.attachmentName}
             onClose={() => setEmailComposer(null)}
-            onSent={() => loadData()}
+            onSent={async () => {
+              // When the user sent the icon-button "Angebot wartet auf Versand"
+              // e-mail, promote the form to angebot_versendet so the badge
+              // disappears and downstream stages (Auftrag, Rechnung) become
+              // available without a manual status pick.
+              const sentFormId = emailComposer?.formId;
+              const sentEmailType = emailComposer?.emailType;
+              if (sentEmailType === 'angebot' && sentFormId) {
+                const form = forms.find(f => f.id === sentFormId);
+                if (form?.lead_id) {
+                  try {
+                    await markLeadAngebotAsSent(form.lead_id);
+                    setForms(prev => prev.map(f =>
+                      f.id === sentFormId
+                        ? { ...f, status: 'angebot_versendet', statusDate: new Date().toISOString().split('T')[0] }
+                        : f
+                    ));
+                  } catch (err) {
+                    console.error('Promote to angebot_versendet after e-mail failed:', err);
+                  }
+                }
+              }
+              loadData();
+            }}
           />
         )}
       </AnimatePresence>
@@ -3236,13 +3364,16 @@ Aylux Team`;
         )}
       </AnimatePresence>
 
-      {/* Anzahlung Modal (Modul C) */}
+      {/* Anzahlung Modal (Modul C) — onSaved intentionally omitted: this
+          modal manages its own state, and Anzahlung receipts don't change
+          the form status that the dashboard cards display. The previous
+          loadData() call refetched all 494 forms on every action, which
+          caused the modal to flicker / appear to re-open. */}
       <AnimatePresence>
         {anzahlungModalOpen && anzahlungFormId !== null && (
           <AnzahlungForm
             formId={anzahlungFormId}
             onClose={() => setAnzahlungModalOpen(false)}
-            onSaved={() => loadData()}
           />
         )}
       </AnimatePresence>

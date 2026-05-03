@@ -391,6 +391,13 @@ async function initializeTables() {
     await pool.query(`ALTER TABLE aufmass_leads ADD COLUMN IF NOT EXISTS angebot_sent_at TIMESTAMP NULL`);
     console.log('aufmass_leads.angebot_sent_at column ready');
 
+    // Marketing source ("Wie sind Sie auf uns aufmerksam geworden?") —
+    // captured on the customer-info step of both Aufmaß and Schnellangebot.
+    // Stored as stable slug so historic data survives label tweaks.
+    await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS marketing_source VARCHAR(50)`);
+    await pool.query(`ALTER TABLE aufmass_leads ADD COLUMN IF NOT EXISTS marketing_source VARCHAR(50)`);
+    console.log('marketing_source columns ready (forms + leads)');
+
     // ============ EMAIL SMTP SETTINGS ============
     await pool.query(`ALTER TABLE aufmass_branch_settings ADD COLUMN IF NOT EXISTS smtp_host VARCHAR(255)`);
     await pool.query(`ALTER TABLE aufmass_branch_settings ADD COLUMN IF NOT EXISTS smtp_port INT DEFAULT 587`);
@@ -1376,7 +1383,7 @@ app.get('/api/forms', authenticateToken, async (req, res) => {
           f.id, f.datum, f.aufmasser, f.kunde_vorname, f.kunde_nachname, f.kunde_email, f.kunde_telefon,
           f.kundenlokation, f.category, f.product_type, f.model, f.specifications,
           f.markise_data, f.bemerkungen, f.status, f.created_by, f.created_at, f.updated_at,
-          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at,
+          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at, f.marketing_source,
           EXISTS(
             SELECT 1
             FROM aufmass_abnahme_sign_requests sr
@@ -1397,7 +1404,7 @@ app.get('/api/forms', authenticateToken, async (req, res) => {
           f.id, f.datum, f.aufmasser, f.kunde_vorname, f.kunde_nachname, f.kunde_email, f.kunde_telefon,
           f.kundenlokation, f.category, f.product_type, f.model, f.specifications,
           f.markise_data, f.bemerkungen, f.status, f.created_by, f.created_at, f.updated_at,
-          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at,
+          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at, f.marketing_source,
           EXISTS(
             SELECT 1
             FROM aufmass_abnahme_sign_requests sr
@@ -1476,14 +1483,14 @@ app.get('/api/forms/:id', authenticateToken, async (req, res) => {
       query = `SELECT id, datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon,
                kundenlokation, category, product_type, model, specifications,
                markise_data, bemerkungen, status, created_by, created_at, updated_at,
-               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id
+               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id, marketing_source
                FROM aufmass_forms WHERE id = $1 AND branch_id = $2`;
       params = [id, req.branchId];
     } else {
       query = `SELECT id, datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon,
                kundenlokation, category, product_type, model, specifications,
                markise_data, bemerkungen, status, created_by, created_at, updated_at,
-               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id
+               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id, marketing_source
                FROM aufmass_forms WHERE id = $1`;
       params = [id];
     }
@@ -1546,7 +1553,8 @@ app.post('/api/forms', authenticateToken, async (req, res) => {
       weitereProdukte,
       leadId,
       customerSignature,
-      signatureName
+      signatureName,
+      marketingSource
     } = req.body;
 
     // Auto-set status_date to form datum (Aufmass date) when form is created
@@ -1558,15 +1566,15 @@ app.post('/api/forms', authenticateToken, async (req, res) => {
 
     const result = await pool.query(
       `INSERT INTO aufmass_forms
-       (datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, category, product_type, model, specifications, markise_data, bemerkungen, status, status_date, branch_id, created_by, lead_id, customer_signature, signature_name)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+       (datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, category, product_type, model, specifications, markise_data, bemerkungen, status, status_date, branch_id, created_by, lead_id, customer_signature, signature_name, marketing_source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
        RETURNING id`,
       [
         datum, aufmasser, kundeVorname, kundeNachname, kundeEmail || null, kundeTelefon || null,
         kundenlokation, category, productType, model,
         JSON.stringify(specifications || {}), JSON.stringify(markiseData || null),
         bemerkungen || '', status || 'neu', datum, req.branchId || null, req.user.id, leadId || null,
-        customerSignature || null, signatureName || null
+        customerSignature || null, signatureName || null, marketingSource || null
       ]
     );
 
@@ -1616,7 +1624,8 @@ app.put('/api/forms/:id', authenticateToken, async (req, res) => {
       statusDate: { column: 'status_date' },
       papierkorbDate: { column: 'papierkorb_date' },
       customerSignature: { column: 'customer_signature' },
-      signatureName: { column: 'signature_name' }
+      signatureName: { column: 'signature_name' },
+      marketingSource: { column: 'marketing_source' }
     };
 
     // Auto-set papierkorb_date when moving to trash, clear when restoring
@@ -2402,13 +2411,18 @@ app.post('/api/forms/:id/images', authenticateToken, upload.array('images', 10),
       return res.status(400).json({ error: 'No images provided' });
     }
 
-    for (const file of files) {
-      await pool.query(
-        `INSERT INTO aufmass_bilder (form_id, file_name, file_data, file_type)
-         VALUES ($1, $2, $3, $4)`,
-        [id, file.originalname, file.buffer, file.mimetype]
-      );
-    }
+    // Parallel INSERTs — pg.Pool fans these out across its connection pool so
+    // the wall-clock cost approaches max(insert) instead of sum(insert).
+    // Same data, same table, same order-independent rows as before.
+    await Promise.all(
+      files.map((file) =>
+        pool.query(
+          `INSERT INTO aufmass_bilder (form_id, file_name, file_data, file_type)
+           VALUES ($1, $2, $3, $4)`,
+          [id, file.originalname, file.buffer, file.mimetype]
+        )
+      )
+    );
 
     res.json({ message: `${files.length} images uploaded successfully` });
   } catch (err) {
@@ -2433,13 +2447,17 @@ app.post('/api/forms/:id/abnahme-images', authenticateToken, upload.array('image
       return res.status(400).json({ error: 'No images provided' });
     }
 
-    for (const file of files) {
-      await pool.query(
-        `INSERT INTO aufmass_abnahme_bilder (form_id, file_name, file_data, file_type)
-         VALUES ($1, $2, $3, $4)`,
-        [id, file.originalname, file.buffer, file.mimetype]
-      );
-    }
+    // Parallel INSERTs across the pg.Pool — same trade-off as the regular
+    // /images endpoint: order doesn't matter, wall-clock cost drops to max(insert).
+    await Promise.all(
+      files.map((file) =>
+        pool.query(
+          `INSERT INTO aufmass_abnahme_bilder (form_id, file_name, file_data, file_type)
+           VALUES ($1, $2, $3, $4)`,
+          [id, file.originalname, file.buffer, file.mimetype]
+        )
+      )
+    );
 
     res.json({ message: `${files.length} Maengel images uploaded successfully` });
   } catch (err) {
@@ -2751,12 +2769,18 @@ app.post('/api/forms/:id/rechnung', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Form not found' });
     }
 
-    const { type, rechnungsdatum, leistungsdatum, zahlungsziel } = req.body;
+    const { type, rechnungsdatum, leistungsdatum, zahlungsziel, anzahlungsbetrag } = req.body;
     if (!['anzahlungsrechnung', 'schlussrechnung'].includes(type)) {
       return res.status(400).json({ error: 'Invalid type' });
     }
     if (!rechnungsdatum || !zahlungsziel) {
       return res.status(400).json({ error: 'rechnungsdatum and zahlungsziel are required' });
+    }
+    const anzahlungAmount = type === 'anzahlungsrechnung' && anzahlungsbetrag != null
+      ? Number(anzahlungsbetrag)
+      : null;
+    if (anzahlungAmount !== null && (!Number.isFinite(anzahlungAmount) || anzahlungAmount <= 0)) {
+      return res.status(400).json({ error: 'Invalid anzahlungsbetrag' });
     }
 
     // Snapshot form (kunde_*) and angebot (totals + items)
@@ -2828,10 +2852,36 @@ app.post('/api/forms/:id/rechnung', authenticateToken, async (req, res) => {
 
     // For Schlussrechnung the displayed totals stay the full Angebot brutto;
     // the "Restbetrag" is computed at PDF render time from anzahlungen.
-    const netto = parseFloat(angebotRow.netto_summe);
+    const angebotNetto = parseFloat(angebotRow.netto_summe);
     const mwstSatz = parseFloat(angebotRow.mwst_satz);
-    const mwstBetrag = parseFloat(angebotRow.mwst_betrag);
-    const brutto = parseFloat(angebotRow.brutto_summe);
+    const angebotMwstBetrag = parseFloat(angebotRow.mwst_betrag);
+    const angebotBrutto = parseFloat(angebotRow.brutto_summe);
+
+    // Anzahlungsrechnung override: invoice the deposit slice only. Replace the
+    // itemised lines with a single "Anzahlung X% gemäß Angebot" entry so the
+    // PDF totals are internally consistent (no item × price conflict with the
+    // header brutto). Schlussrechnung path keeps the full Angebot snapshot.
+    let netto, mwstBetrag, brutto, finalItems;
+    if (anzahlungAmount !== null) {
+      brutto = anzahlungAmount;
+      netto = brutto / (1 + mwstSatz / 100);
+      mwstBetrag = brutto - netto;
+      const pct = angebotBrutto > 0 ? Math.round((brutto / angebotBrutto) * 100) : 0;
+      finalItems = [{
+        bezeichnung: pct > 0
+          ? `Anzahlung ${pct}% gemäß bestehendem Angebot`
+          : 'Anzahlung gemäß bestehendem Angebot',
+        menge: 1,
+        einzelpreis: Number(netto.toFixed(2)),
+        gesamtpreis: Number(netto.toFixed(2)),
+        sort_order: 0,
+      }];
+    } else {
+      netto = angebotNetto;
+      mwstBetrag = angebotMwstBetrag;
+      brutto = angebotBrutto;
+      finalItems = itemsRows;
+    }
 
     const rechnungNr = await generateNextRechnungNummer(req.branchId);
 
@@ -2851,7 +2901,7 @@ app.post('/api/forms/:id/rechnung', authenticateToken, async (req, res) => {
        formRow.kunde_vorname, formRow.kunde_nachname, formRow.kunde_email, formRow.kunde_telefon, formRow.kundenlokation,
        netto, mwstSatz, mwstBetrag, brutto,
        rechnungsdatum, leistungsdatum || null, zahlungsziel,
-       JSON.stringify(itemsRows), req.user.id]
+       JSON.stringify(finalItems), req.user.id]
     );
 
     // Advance the parent form to "Entwurf" workflow status
@@ -2941,6 +2991,56 @@ app.put('/api/rechnungen/:id', authenticateToken, async (req, res) => {
   } catch (err) {
     console.error('Error updating Rechnung:', err);
     res.status(500).json({ error: 'Failed to update Rechnung' });
+  }
+});
+
+// POST /api/rechnungen/:id/mark-paid — user confirms the customer has paid
+// this Anzahlungsrechnung. Flips the invoice to status='bezahlt' AND auto-
+// creates a matching Anzahlung receipt so the running totals on the
+// Anzahlungen-Modal update without a second manual entry. Idempotent: if
+// status is already 'bezahlt' or a receipt already exists, the duplicate
+// is skipped instead of erroring.
+app.post('/api/rechnungen/:id/mark-paid', authenticateToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const existing = await verifyRechnungBranch(id, req.branchId);
+    if (!existing) return res.status(404).json({ error: 'Rechnung not found' });
+
+    const r = await pool.query(
+      `SELECT id, type, status, brutto_betrag, form_id, branch_id
+         FROM aufmass_rechnungen WHERE id = $1`, [id]);
+    if (r.rows.length === 0) return res.status(404).json({ error: 'Rechnung not found' });
+    const rechnung = r.rows[0];
+    if (rechnung.type !== 'anzahlungsrechnung') {
+      return res.status(400).json({ error: 'Only Anzahlungsrechnungen can be marked paid here' });
+    }
+
+    if (rechnung.status !== 'bezahlt') {
+      await pool.query(
+        `UPDATE aufmass_rechnungen
+           SET status = 'bezahlt', paid_at = COALESCE(paid_at, NOW())
+         WHERE id = $1`, [id]);
+    }
+
+    // Mirror the payment into aufmass_anzahlungen so the totals reflect the
+    // received cash. Skip if a receipt for this rechnung already exists
+    // (user clicked twice, or admin pre-recorded the receipt).
+    const dup = await pool.query(
+      'SELECT id FROM aufmass_anzahlungen WHERE rechnung_id = $1', [id]);
+    if (dup.rows.length === 0) {
+      await pool.query(
+        `INSERT INTO aufmass_anzahlungen
+           (form_id, rechnung_id, betrag, zahlungsdatum, zahlungsmethode, notiz, branch_id, created_by)
+         VALUES ($1, $2, $3, CURRENT_DATE, 'überweisung', $4, $5, $6)`,
+        [rechnung.form_id, id, rechnung.brutto_betrag,
+         `Bestätigt aus Anzahlungsrechnung`, rechnung.branch_id, req.user.id]
+      );
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('Error marking Rechnung paid:', err);
+    res.status(500).json({ error: 'Failed to mark as paid' });
   }
 });
 
@@ -5518,7 +5618,7 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
   console.log('=== CREATE LEAD START ===');
   console.log('Body:', JSON.stringify(req.body, null, 2));
   try {
-    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price, aufmass_form_id } = req.body;
+    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price, aufmass_form_id, marketing_source } = req.body;
 
     // Use provided total_price or calculate fallback
     let finalTotal = total_price;
@@ -5538,11 +5638,11 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
 
     // Insert lead with discount fields, angebot_nummer and kunden_nummer
     const leadResult = await pool.query(
-      `INSERT INTO aufmass_leads (customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, subtotal, total_discount, total_price, status, branch_id, created_by, angebot_nummer, kunden_nummer)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'unbearbeitet', $10, $11, $12, $13) RETURNING id, angebot_nummer, kunden_nummer`,
+      `INSERT INTO aufmass_leads (customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, subtotal, total_discount, total_price, status, branch_id, created_by, angebot_nummer, kunden_nummer, marketing_source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'unbearbeitet', $10, $11, $12, $13, $14) RETURNING id, angebot_nummer, kunden_nummer`,
       [customer_firstname, customer_lastname, customer_email || null, customer_phone || null,
        customer_address || null, notes || null, subtotal || 0, total_discount || 0, finalTotal,
-       req.branchId || null, req.user.id, angebotNummer, kundenNummer]
+       req.branchId || null, req.user.id, angebotNummer, kundenNummer, marketing_source || null]
     );
 
     const leadId = leadResult.rows[0].id;
@@ -5849,9 +5949,11 @@ app.get('/api/leads/:id', authenticateToken, async (req, res) => {
 app.put('/api/leads/:id', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price, angebot_id } = req.body;
+    const { customer_firstname, customer_lastname, customer_email, customer_phone, customer_address, notes, items, extras, subtotal, total_discount, total_price, angebot_id, marketing_source } = req.body;
 
-    // Update customer info on lead (including notes/Beschreibung — was previously omitted)
+    // Update customer info on lead (including notes/Beschreibung — was previously omitted).
+    // marketing_source uses COALESCE so partial updates that omit it preserve the
+    // existing value instead of clobbering it to NULL.
     let result;
     if (req.branchId) {
       result = await pool.query(
@@ -5860,12 +5962,13 @@ app.put('/api/leads/:id', authenticateToken, async (req, res) => {
              customer_email = $3, customer_phone = $4,
              customer_address = $5, notes = $6,
              subtotal = $7, total_discount = $8, total_price = $9,
+             marketing_source = COALESCE($12, marketing_source),
              updated_at = NOW()
          WHERE id = $10 AND branch_id = $11`,
         [customer_firstname, customer_lastname, customer_email || null, customer_phone || null,
          customer_address || null, notes || null,
          subtotal || 0, total_discount || 0, total_price,
-         id, req.branchId]
+         id, req.branchId, marketing_source || null]
       );
     } else {
       result = await pool.query(
@@ -5874,12 +5977,13 @@ app.put('/api/leads/:id', authenticateToken, async (req, res) => {
              customer_email = $3, customer_phone = $4,
              customer_address = $5, notes = $6,
              subtotal = $7, total_discount = $8, total_price = $9,
+             marketing_source = COALESCE($11, marketing_source),
              updated_at = NOW()
          WHERE id = $10`,
         [customer_firstname, customer_lastname, customer_email || null, customer_phone || null,
          customer_address || null, notes || null,
          subtotal || 0, total_discount || 0, total_price,
-         id]
+         id, marketing_source || null]
       );
     }
 

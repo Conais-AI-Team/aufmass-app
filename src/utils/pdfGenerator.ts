@@ -526,9 +526,33 @@ export const generatePDF = async (
           yPos += imgHeight + imgGap;
         }
       } else if (hasServerImages && abnahme.maengelBilder) {
-        // Fetch images from server (authenticated)
-        for (let i = 0; i < abnahme.maengelBilder.length; i++) {
-          const img = abnahme.maengelBilder[i];
+        // Parallel fetch all Mängel images, then draw sequentially.
+        // Same network-overlap optimisation as the main bilder loop above.
+        const token = getStoredToken();
+        const fetched = await Promise.all(
+          abnahme.maengelBilder.map(async (img) => {
+            try {
+              const response = await fetch(getAbnahmeImageUrl(img.id), {
+                headers: token ? { Authorization: `Bearer ${token}` } : {},
+              });
+              if (!response.ok) return null;
+              const blob = await response.blob();
+              const base64 = await new Promise<string>((resolve) => {
+                const reader = new FileReader();
+                reader.onloadend = () => resolve(reader.result as string);
+                reader.readAsDataURL(blob);
+              });
+              const format: 'PNG' | 'JPEG' = img.file_type?.includes('png') ? 'PNG' : 'JPEG';
+              return { base64, format };
+            } catch (err) {
+              console.error('Error loading abnahme image:', err);
+              return null;
+            }
+          }),
+        );
+
+        for (let i = 0; i < fetched.length; i++) {
+          const data = fetched[i];
           const col = i % imagesPerRow;
           const xPos = margin + col * (imgWidth + imgGap);
 
@@ -537,26 +561,12 @@ export const generatePDF = async (
             yPos = margin;
           }
 
-          try {
-            const token = getStoredToken();
-            const imgUrl = getAbnahmeImageUrl(img.id);
-            const response = await fetch(imgUrl, {
-              headers: token ? { 'Authorization': `Bearer ${token}` } : {}
-            });
-
-            if (response.ok) {
-              const blob = await response.blob();
-              const base64 = await new Promise<string>((resolve) => {
-                const reader = new FileReader();
-                reader.onloadend = () => resolve(reader.result as string);
-                reader.readAsDataURL(blob);
-              });
-
-              const format = img.file_type?.includes('png') ? 'PNG' : 'JPEG';
-              pdf.addImage(base64, format, xPos, yPos, imgWidth, imgHeight);
+          if (data) {
+            try {
+              pdf.addImage(data.base64, data.format, xPos, yPos, imgWidth, imgHeight);
+            } catch (err) {
+              console.error('Error adding abnahme image to PDF:', err);
             }
-          } catch (err) {
-            console.error('Error loading abnahme image:', err);
           }
 
           if (col === imagesPerRow - 1) {
@@ -1787,83 +1797,103 @@ export const generatePDF = async (
       pdf.setTextColor(0, 0, 0);
       pdf.setFontSize(10);
 
-      // Process each image (both File and ServerImage)
-      for (let i = 0; i < imageItems.length; i++) {
-        const item = imageItems[i];
-        let base64: string;
-        let fileName: string;
+      // PHASE 1 — fetch + EXIF orient + measure all images in parallel.
+      // Network-bound (server fetches) and CPU-bound (canvas re-encodes) work
+      // overlaps across images, turning N×latency into ~max(latency).
+      // PHASE 2 below draws into the PDF sequentially because jsPDF's cursor /
+      // page state is shared and must advance in deterministic order.
+      type PreparedImage =
+        | { ok: true; base64: string; fileName: string; width: number; height: number }
+        | { ok: false; fileName: string };
 
-        try {
-          if (item instanceof File) {
-            // It's a File object - get EXIF orientation and fix if needed
-            base64 = await fileToBase64(item);
-            try {
-              const orientation = await getExifOrientation(item);
-              base64 = await fixImageOrientation(base64, orientation);
-            } catch {
-              // Use original base64 if orientation fix fails
+      const prepared: PreparedImage[] = await Promise.all(
+        imageItems.map(async (item): Promise<PreparedImage> => {
+          const fileName =
+            item instanceof File
+              ? item.name
+              : isServerImage(item)
+                ? item.file_name
+                : 'Unbekannt';
+          try {
+            let base64: string;
+            if (item instanceof File) {
+              base64 = await fileToBase64(item);
+              try {
+                const orientation = await getExifOrientation(item);
+                base64 = await fixImageOrientation(base64, orientation);
+              } catch {
+                // Use original base64 if orientation fix fails
+              }
+            } else if (isServerImage(item)) {
+              base64 = await fetchServerImageAsBase64(item.id);
+              try {
+                base64 = await fixImageOrientationAuto(base64);
+              } catch {
+                // Use original base64 if orientation fix fails
+              }
+            } else {
+              return { ok: false, fileName };
             }
-            fileName = item.name;
-          } else if (isServerImage(item)) {
-            // It's a server image - fetch from server and fix orientation
-            base64 = await fetchServerImageAsBase64(item.id);
-            // Try to fix orientation for server images too (non-critical)
-            try {
-              base64 = await fixImageOrientationAuto(base64);
-            } catch {
-              // Use original base64 if orientation fix fails
-            }
-            fileName = item.file_name;
-          } else {
-            continue;
+            const dimensions = await getImageDimensions(base64);
+            return {
+              ok: true,
+              base64,
+              fileName,
+              width: dimensions.width,
+              height: dimensions.height,
+            };
+          } catch {
+            return { ok: false, fileName };
           }
+        }),
+      );
 
-          const dimensions = await getImageDimensions(base64);
-
-          // Calculate image size to fit on page
-          const maxWidth = pageWidth - 2 * margin;
-          const maxHeight = 80; // Max height per image
-
-          let imgWidth = dimensions.width;
-          let imgHeight = dimensions.height;
-
-          // Scale to fit
-          if (imgWidth > maxWidth) {
-            const ratio = maxWidth / imgWidth;
-            imgWidth = maxWidth;
-            imgHeight = imgHeight * ratio;
-          }
-
-          if (imgHeight > maxHeight) {
-            const ratio = maxHeight / imgHeight;
-            imgHeight = maxHeight;
-            imgWidth = imgWidth * ratio;
-          }
-
-          // Check if we need a new page
-          if (yPos + imgHeight + 15 > pageHeight - 20) {
-            pdf.addPage();
-            yPos = 20;
-          }
-
-          // Add image label
-          pdf.setFont('helvetica', 'bold');
-          pdf.text(`Bild ${i + 1}: ${fileName}`, margin, yPos);
-          yPos += 5;
-
-          // Add image - center it horizontally
-          const xPos = margin + (maxWidth - imgWidth) / 2;
-          pdf.addImage(base64, 'JPEG', xPos, yPos, imgWidth, imgHeight);
-
-          yPos += imgHeight + 15;
-
-        } catch (error) {
-          // If image fails to load, add a placeholder message
-          const name = item instanceof File ? item.name : (isServerImage(item) ? item.file_name : 'Unbekannt');
+      // PHASE 2 — sequential draw. Identical layout / scaling math to the prior
+      // implementation; only the prep work was parallelised.
+      for (let i = 0; i < prepared.length; i++) {
+        const p = prepared[i];
+        if (!p.ok) {
           pdf.setFont('helvetica', 'italic');
-          pdf.text(`Bild ${i + 1}: ${name} - Konnte nicht geladen werden`, margin, yPos);
+          pdf.text(`Bild ${i + 1}: ${p.fileName} - Konnte nicht geladen werden`, margin, yPos);
           yPos += 10;
+          continue;
         }
+
+        const maxWidth = pageWidth - 2 * margin;
+        const maxHeight = 80;
+        let imgWidth = p.width;
+        let imgHeight = p.height;
+
+        if (imgWidth > maxWidth) {
+          const ratio = maxWidth / imgWidth;
+          imgWidth = maxWidth;
+          imgHeight = imgHeight * ratio;
+        }
+        if (imgHeight > maxHeight) {
+          const ratio = maxHeight / imgHeight;
+          imgHeight = maxHeight;
+          imgWidth = imgWidth * ratio;
+        }
+
+        if (yPos + imgHeight + 15 > pageHeight - 20) {
+          pdf.addPage();
+          yPos = 20;
+        }
+
+        pdf.setFont('helvetica', 'bold');
+        pdf.text(`Bild ${i + 1}: ${p.fileName}`, margin, yPos);
+        yPos += 5;
+
+        const xPos = margin + (maxWidth - imgWidth) / 2;
+        try {
+          pdf.addImage(p.base64, 'JPEG', xPos, yPos, imgWidth, imgHeight);
+        } catch {
+          pdf.setFont('helvetica', 'italic');
+          pdf.text(`Bild ${i + 1}: ${p.fileName} - Konnte nicht geladen werden`, margin, yPos);
+          yPos += 10;
+          continue;
+        }
+        yPos += imgHeight + 15;
       }
     }
 
