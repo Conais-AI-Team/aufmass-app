@@ -1810,3 +1810,45 @@ export function num(v: number | string | null | undefined): number {
   return typeof v === 'string' ? parseFloat(v) : v;
 }
 
+// ============ SUPPORT ============
+export interface SupportTicketPayload {
+  subject: string;
+  category: string;
+  message: string;
+}
+
+// Creates a support ticket (persisted to DB + best-effort notification mail).
+export const submitSupportTicket = (
+  payload: SupportTicketPayload
+): Promise<{ success: boolean; ticketId: number; slaHours: number; message: string }> =>
+  api.post('/support/ticket', payload);
+
+export type SupportTicketStatus = 'offen' | 'in_arbeit' | 'geloest';
+
+export interface SupportTicket {
+  id: number;
+  branch_slug: string | null;
+  user_id: number | null;
+  user_name: string | null;
+  user_email: string | null;
+  category: string | null;
+  subject: string;
+  message: string;
+  status: SupportTicketStatus;
+  resolution_message: string | null;
+  resolved_by: number | null;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+// Admin-branch only: list all tickets across branches.
+export const getSupportTickets = (status?: SupportTicketStatus): Promise<SupportTicket[]> =>
+  api.get(`/support/tickets${status ? `?status=${status}` : ''}`);
+
+// Admin-branch only: change status / resolve (resolving e-mails the requester).
+export const updateSupportTicket = (
+  id: number,
+  payload: { status: SupportTicketStatus; resolution_message?: string }
+): Promise<{ success: boolean; mailed: boolean }> =>
+  api.put(`/support/tickets/${id}`, payload);
+

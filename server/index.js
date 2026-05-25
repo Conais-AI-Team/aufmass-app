@@ -457,6 +457,30 @@ async function initializeTables() {
     await pool.query(`CREATE INDEX IF NOT EXISTS ix_email_log_form ON aufmass_email_log(form_id)`);
     console.log('Email log table ready');
 
+    // === Support-Tickets ===
+    // Anfragen aus allen Filialen landen hier und werden zentral (Admin-Branch)
+    // verwaltet. status: offen | in_arbeit | geloest.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS aufmass_support_tickets (
+        id SERIAL PRIMARY KEY,
+        branch_slug VARCHAR(50),
+        user_id INT,
+        user_name VARCHAR(255),
+        user_email VARCHAR(255),
+        category VARCHAR(100),
+        subject VARCHAR(500) NOT NULL,
+        message TEXT NOT NULL,
+        status VARCHAR(20) NOT NULL DEFAULT 'offen',
+        resolution_message TEXT,
+        resolved_by INT,
+        resolved_at TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      )
+    `);
+    await pool.query(`CREATE INDEX IF NOT EXISTS ix_support_tickets_status ON aufmass_support_tickets(status)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS ix_support_tickets_branch ON aufmass_support_tickets(branch_slug)`);
+    console.log('Support tickets table ready');
+
     // === MODÜL F: PDF Şablon Sistemi ===
     await pool.query(`
       CREATE TABLE IF NOT EXISTS aufmass_product_images (
@@ -6871,6 +6895,202 @@ app.post('/api/email/test', authenticateToken, requireAdmin, async (req, res) =>
     else if (err.code === 'ETIMEDOUT') errorMessage = 'Zeitüberschreitung - Server nicht erreichbar';
     else if (err.message) errorMessage = err.message;
     res.status(400).json({ error: errorMessage });
+  }
+});
+
+// ===== Support-Tickets =====
+// Anfragen aus allen Filialen werden zentral gespeichert und im Admin-Branch
+// verwaltet (sehen/lösen/schließen). Beim Anlegen geht zusätzlich eine
+// Benachrichtigung an den zentralen Support (best effort — das Ticket ist
+// in jedem Fall gespeichert, auch wenn kein SMTP konfiguriert ist).
+const SUPPORT_RECIPIENT = 'fkeles@conais.com';
+const SUPPORT_SLA_HOURS = 48;
+const escapeHtml = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+// POST /api/support/ticket — Ticket anlegen (aus jeder Filiale).
+app.post('/api/support/ticket', authenticateToken, async (req, res) => {
+  try {
+    const { subject, category, message } = req.body;
+    if (!subject || !message) {
+      return res.status(400).json({ error: 'Betreff und Nachricht sind erforderlich.' });
+    }
+
+    const userRes = await pool.query(
+      `SELECT name, email, role, branch_id FROM aufmass_users WHERE id = $1`,
+      [req.user.id]
+    );
+    const u = userRes.rows[0] || {};
+
+    // Branch, aus der das Ticket kommt: echter Request-Ursprung (Subdomain/Query)
+    // -> Filiale des Nutzers -> Zentrale. Keine erfundenen Defaults.
+    const requestBranch = req.branchId || (req.query && (req.query.branch || req.query.branchSlug)) || null;
+    // Branch der Anfrage = ECHTER Ursprung (Subdomain/Query). Aus dem Admin-Bereich/
+    // localhost gibt es keine Filiale -> "Zentrale". NICHT die zugewiesene Filiale des
+    // Admin-Users verwenden (sonst steht fälschlich z.B. "koblenz" im Ticket).
+    const branchTag = requestBranch || 'Zentrale';
+    const cat = category || 'Allgemein';
+
+    // 1) Ticket IMMER speichern — es darf nie verloren gehen und erscheint im Admin-Panel.
+    const ins = await pool.query(
+      `INSERT INTO aufmass_support_tickets
+         (branch_slug, user_id, user_name, user_email, category, subject, message)
+       VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id, created_at`,
+      [branchTag, req.user.id, u.name || null, u.email || null, cat, subject, message]
+    );
+    const ticketId = ins.rows[0].id;
+
+    // 2) Benachrichtigung an den zentralen Support — best effort.
+    try {
+      const smtpBranch = requestBranch || u.branch_id || null;
+      const smtpConfig = await getSmtpConfig(req.user.id, smtpBranch);
+      if (smtpConfig) {
+        const branchLabel = requestBranch || 'Zentrale / Admin';
+        const submittedAt = new Date().toLocaleString('de-DE', { timeZone: 'Europe/Berlin' });
+        const transporter = createTransporter(smtpConfig);
+        await transporter.sendMail({
+          from: `"${smtpConfig.fromName}" <${smtpConfig.fromEmail}>`,
+          to: SUPPORT_RECIPIENT,
+          replyTo: u.email || smtpConfig.fromEmail,
+          subject: `[Support · ${branchTag}] #${ticketId} ${subject}`,
+          text:
+            `Neue Support-Anfrage (#${ticketId})\n\n` +
+            `Filiale:   ${branchLabel}\n` +
+            `Von:       ${u.name || '-'} (${u.email || '-'}) · Rolle: ${u.role || '-'}\n` +
+            `Kategorie: ${cat}\n` +
+            `Datum:     ${submittedAt}\n\n` +
+            `Betreff: ${subject}\n\n` +
+            `Nachricht:\n${message}\n`,
+          html: `<div style="font-family:Arial,sans-serif;max-width:640px;margin:0 auto;padding:20px;color:#222">
+            <h2 style="color:#7fa93d;margin:0 0 16px">Neue Support-Anfrage <span style="color:#999">#${ticketId}</span></h2>
+            <table style="border-collapse:collapse;width:100%;font-size:14px;margin-bottom:16px">
+              <tr><td style="padding:6px 10px;background:#f5f5f5;font-weight:bold;width:120px">Filiale</td><td style="padding:6px 10px">${escapeHtml(branchLabel)}</td></tr>
+              <tr><td style="padding:6px 10px;background:#f5f5f5;font-weight:bold">Von</td><td style="padding:6px 10px">${escapeHtml(u.name)} &lt;${escapeHtml(u.email)}&gt; · ${escapeHtml(u.role)}</td></tr>
+              <tr><td style="padding:6px 10px;background:#f5f5f5;font-weight:bold">Kategorie</td><td style="padding:6px 10px">${escapeHtml(cat)}</td></tr>
+              <tr><td style="padding:6px 10px;background:#f5f5f5;font-weight:bold">Datum</td><td style="padding:6px 10px">${escapeHtml(submittedAt)}</td></tr>
+            </table>
+            <h3 style="margin:0 0 8px">${escapeHtml(subject)}</h3>
+            <div style="white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:6px;padding:14px;font-size:14px;line-height:1.5">${escapeHtml(message)}</div>
+            <hr style="border:none;border-top:1px solid #eee;margin:20px 0">
+            <small style="color:#999">Verwaltung im Admin-Bereich · Zugesagte Rückmeldung innerhalb von ${SUPPORT_SLA_HOURS} Stunden.</small>
+          </div>`
+        });
+      }
+    } catch (mailErr) {
+      // Ticket ist gespeichert — die Benachrichtigung ist nur ein Extra.
+      console.error('Support notification mail failed (ticket saved anyway):', mailErr.message);
+    }
+
+    res.json({
+      success: true,
+      ticketId,
+      slaHours: SUPPORT_SLA_HOURS,
+      message: `Ihre Anfrage wurde aufgenommen. Wir melden uns innerhalb von ${SUPPORT_SLA_HOURS} Stunden.`
+    });
+  } catch (err) {
+    console.error('Support ticket create failed:', err);
+    res.status(500).json({ error: 'Anfrage konnte nicht gespeichert werden. Bitte versuchen Sie es später erneut.' });
+  }
+});
+
+// Ticket-Verwaltung darf NUR im Admin-Branch (ohne Filial-Subdomain) erfolgen.
+// Aus einer Filiale (req.branchId gesetzt) ist sie gesperrt — so sieht eine
+// einzelne Filiale niemals die Tickets anderer Filialen.
+function requireAdminBranch(req, res, next) {
+  if (req.branchId) {
+    return res.status(403).json({ error: 'Ticket-Verwaltung ist nur im Admin-Bereich verfügbar.' });
+  }
+  next();
+}
+
+// GET /api/support/tickets — Liste aller Tickets (nur Admin-Branch, nur Admin-Rolle).
+app.get('/api/support/tickets', authenticateToken, requireAdmin, requireAdminBranch, async (req, res) => {
+  try {
+    const { status } = req.query;
+    const params = [];
+    let where = '';
+    if (status && ['offen', 'in_arbeit', 'geloest'].includes(status)) {
+      params.push(status);
+      where = `WHERE status = $1`;
+    }
+    const result = await pool.query(
+      `SELECT id, branch_slug, user_id, user_name, user_email, category, subject, message,
+              status, resolution_message, resolved_by, resolved_at, created_at
+       FROM aufmass_support_tickets
+       ${where}
+       ORDER BY (status = 'geloest') ASC, created_at DESC
+       LIMIT 500`,
+      params
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error listing support tickets:', err);
+    res.status(500).json({ error: 'Tickets konnten nicht geladen werden.' });
+  }
+});
+
+// PUT /api/support/tickets/:id — Status ändern / lösen. Beim Lösen geht eine
+// Antwort-Mail an den Ersteller (best effort).
+app.put('/api/support/tickets/:id', authenticateToken, requireAdmin, requireAdminBranch, async (req, res) => {
+  try {
+    const ticketId = parseInt(req.params.id, 10);
+    const { status, resolution_message } = req.body;
+    if (!['offen', 'in_arbeit', 'geloest'].includes(status)) {
+      return res.status(400).json({ error: 'Ungültiger Status.' });
+    }
+    if (status === 'geloest' && (!resolution_message || !resolution_message.trim())) {
+      return res.status(400).json({ error: 'Bitte eine Lösungsnachricht angeben.' });
+    }
+
+    const tRes = await pool.query(`SELECT * FROM aufmass_support_tickets WHERE id = $1`, [ticketId]);
+    if (tRes.rows.length === 0) return res.status(404).json({ error: 'Ticket nicht gefunden.' });
+    const ticket = tRes.rows[0];
+
+    await pool.query(
+      `UPDATE aufmass_support_tickets
+       SET status = $2,
+           resolution_message = $3,
+           resolved_by = CASE WHEN $2 = 'geloest' THEN $4 ELSE NULL END,
+           resolved_at = CASE WHEN $2 = 'geloest' THEN NOW() ELSE NULL END
+       WHERE id = $1`,
+      [ticketId, status, resolution_message || null, req.user.id]
+    );
+
+    // Beim Lösen: Antwort-Mail an den Ersteller.
+    let mailed = false;
+    if (status === 'geloest' && ticket.user_email) {
+      try {
+        const smtpConfig = await getSmtpConfig(req.user.id, ticket.branch_slug);
+        if (smtpConfig) {
+          const transporter = createTransporter(smtpConfig);
+          await transporter.sendMail({
+            from: `"${smtpConfig.fromName}" <${smtpConfig.fromEmail}>`,
+            to: ticket.user_email,
+            subject: `Ihre Support-Anfrage #${ticketId} wurde gelöst`,
+            text:
+              `Hallo ${ticket.user_name || ''},\n\n` +
+              `Ihre Anfrage „${ticket.subject}" wurde bearbeitet.\n\n` +
+              `Antwort des Supports:\n${resolution_message}\n\n` +
+              `Mit freundlichen Grüßen\nIhr Support-Team`,
+            html: `<div style="font-family:Arial,sans-serif;max-width:600px;margin:0 auto;padding:20px;color:#222">
+              <h2 style="color:#7fa93d;margin:0 0 8px">Ihre Anfrage wurde gelöst</h2>
+              <p style="color:#555;margin:0 0 16px">Betreff: <strong>${escapeHtml(ticket.subject)}</strong> · Ticket #${ticketId}</p>
+              <div style="white-space:pre-wrap;background:#fafafa;border:1px solid #eee;border-radius:6px;padding:14px;font-size:14px;line-height:1.5">${escapeHtml(resolution_message)}</div>
+              <hr style="border:none;border-top:1px solid #eee;margin:20px 0">
+              <small style="color:#999">Bei weiteren Fragen antworten Sie einfach auf diese E-Mail.</small>
+            </div>`
+          });
+          mailed = true;
+        }
+      } catch (mailErr) {
+        console.error('Resolution mail failed (status updated anyway):', mailErr.message);
+      }
+    }
+
+    res.json({ success: true, mailed });
+  } catch (err) {
+    console.error('Error updating support ticket:', err);
+    res.status(500).json({ error: 'Ticket konnte nicht aktualisiert werden.' });
   }
 });
 
