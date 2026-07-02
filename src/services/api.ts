@@ -144,12 +144,21 @@ export function clearAuthData(): void {
   localStorage.removeItem(USER_KEY);
 }
 
+function getRuntimeBranchSlug(): string | null {
+  if (typeof window === 'undefined') return null;
+  const hostname = window.location.hostname;
+  const match = hostname.match(/^([a-z0-9-]+)\.cnsform\.com$/i) || hostname.match(/^([a-z0-9-]+)\.localhost$/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
 // Helper to get auth headers
 function getAuthHeaders(): HeadersInit {
   const token = getStoredToken();
+  const branchSlug = getRuntimeBranchSlug();
   return {
     'Content-Type': 'application/json',
-    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    ...(branchSlug ? { 'X-Branch-Slug': branchSlug } : {})
   };
 }
 
@@ -702,6 +711,7 @@ export interface MontageteamStats {
   created_at: string;
   count: number;
   completed: number;
+  reklamation: number;
   draft: number;
 }
 

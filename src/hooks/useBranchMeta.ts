@@ -34,7 +34,7 @@ function detectBranch(): BranchInfo {
   const hostname = window.location.hostname;
 
   // Check for branch subdomain: {branch}.cnsform.com
-  const match = hostname.match(/^([a-z0-9-]+)\.cnsform\.com$/i);
+  const match = hostname.match(/^([a-z0-9-]+)\.cnsform\.com$/i) || hostname.match(/^([a-z0-9-]+)\.localhost$/i);
   if (match) {
     const slug = match[1].toLowerCase();
     return branchConfig[slug] || { slug, name: slug.charAt(0).toUpperCase() + slug.slice(1), title: `AYLUX ${slug.charAt(0).toUpperCase() + slug.slice(1)} - Aufmaß System` };
@@ -66,13 +66,16 @@ export function useBranchMeta() {
 
 export function getBranchSlug(): string | null {
   const hostname = window.location.hostname;
-  const match = hostname.match(/^([a-z0-9-]+)\.cnsform\.com$/i);
+  const match = hostname.match(/^([a-z0-9-]+)\.cnsform\.com$/i) || hostname.match(/^([a-z0-9-]+)\.localhost$/i);
   return match ? match[1].toLowerCase() : null;
 }
 
 // Check if current domain is admin branch (can manage all branches)
 export function isAdminBranch(): boolean {
   const hostname = window.location.hostname;
+  if (hostname.match(/^([a-z0-9-]+)\.cnsform\.com$/i) || hostname.match(/^([a-z0-9-]+)\.localhost$/i)) {
+    return false;
+  }
   const adminDomains = ['localhost', 'aufmass-api.conais.com', 'aufmass-app.vercel.app'];
-  return adminDomains.some(d => hostname.includes(d));
+  return adminDomains.some(d => hostname === d || hostname.includes(d));
 }

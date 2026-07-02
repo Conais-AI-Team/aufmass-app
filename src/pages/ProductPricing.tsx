@@ -1,5 +1,6 @@
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useRef } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
+import * as XLSX from 'xlsx';
 import {
   api, getProductImages, uploadProductImage, deleteProductImage, setProductImageCoverFlag,
   getProductCoverPdf, uploadProductCoverPdf, setCoverPdfPages, deleteProductCoverPdf,
@@ -51,11 +52,31 @@ interface PendingRow {
   prices: Record<number, string>; // breite -> price
 }
 
+interface ImportProductPayload {
+  category?: string | null;
+  product_type?: string | null;
+  product_name: string;
+  pricing_type: 'dimension' | 'unit';
+  breite: number;
+  tiefe: number;
+  price: number;
+  unit_label?: string | null;
+  description?: string | null;
+  custom_fields?: string | null;
+}
+
+interface ImportPreviewRow {
+  rowNumber: number;
+  payload: ImportProductPayload;
+  errors: string[];
+}
+
 export default function ProductPricing() {
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+  const importFileRef = useRef<HTMLInputElement | null>(null);
 
   // Filter state
   const [filterCategory, setFilterCategory] = useState('');
@@ -253,6 +274,12 @@ export default function ProductPricing() {
 
   // Custom fields for new product modal
   const [newProductCustomFields, setNewProductCustomFields] = useState<CustomField[]>([]);
+
+  // Excel/CSV import preview
+  const [importPreviewOpen, setImportPreviewOpen] = useState(false);
+  const [importRows, setImportRows] = useState<ImportPreviewRow[]>([]);
+  const [importFileName, setImportFileName] = useState('');
+  const [importResult, setImportResult] = useState<string | null>(null);
 
   useEffect(() => {
     loadProducts();
@@ -996,6 +1023,342 @@ export default function ProductPricing() {
     }
   };
 
+  // ========== EXCEL / CSV IMPORT + CSV EXPORT ==========
+  const csvEscape = (value: unknown): string => {
+    if (value === null || value === undefined) return '';
+    const text = String(value);
+    return /[",\r\n;]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text;
+  };
+
+  const formatCsvPrice = (value: unknown): string => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return '';
+    return n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  };
+
+  const exportProductCsv = (productName: string) => {
+    const data = productMatrices[productName];
+    const firstProduct = data?.products[0];
+    if (!data || !firstProduct) return;
+
+    const makeLine = (values: unknown[]) => values.map(csvEscape).join(';');
+    const lines: string[] = [];
+
+    if (data.pricing_type === 'unit') {
+      lines.push(makeLine(['Einheit', 'Preis']));
+      data.products.forEach(product => {
+        lines.push(makeLine([product.unit_label || data.unit_label || 'Stk.', formatCsvPrice(product.price)]));
+      });
+    } else {
+      lines.push(makeLine(['Tiefe \\ Breite', ...data.breiteValues]));
+      data.tiefeValues.forEach(tiefe => {
+        lines.push(makeLine([
+          tiefe,
+          ...data.breiteValues.map(breite => formatCsvPrice(data.matrix[breite]?.[tiefe]?.price))
+        ]));
+      });
+    }
+
+    const blob = new Blob([`\ufeff${lines.join('\r\n')}`], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = `${productName.replace(/[^a-z0-9_-]+/gi, '_')}-${new Date().toISOString().slice(0, 10)}.csv`;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    URL.revokeObjectURL(link.href);
+  };
+
+  const normalizeHeader = (value: string) =>
+    value
+      .toLowerCase()
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+
+  const getImportValue = (row: Record<string, unknown>, aliases: string[]): unknown => {
+    const normalizedAliases = aliases.map(normalizeHeader);
+    for (const [key, value] of Object.entries(row)) {
+      if (normalizedAliases.includes(normalizeHeader(key))) return value;
+    }
+    return '';
+  };
+
+  const parseImportNumber = (value: unknown): number | null => {
+    if (value === null || value === undefined || value === '') return null;
+    let normalized = String(value).replace(/\s/g, '').replace(/[€$]/g, '');
+    if (normalized.includes(',') && normalized.includes('.')) {
+      normalized = normalized.replace(/\./g, '').replace(',', '.');
+    } else if (normalized.includes(',')) {
+      normalized = normalized.replace(/\./g, '').replace(',', '.');
+    } else if ((normalized.match(/\./g) || []).length > 1) {
+      normalized = normalized.replace(/\./g, '');
+    }
+    const n = Number(normalized);
+    return Number.isFinite(n) ? n : null;
+  };
+
+  const parseImportText = (value: unknown): string | null => {
+    if (value === null || value === undefined) return null;
+    const text = String(value).trim();
+    return text || null;
+  };
+
+  const getImportProductNameFromFile = (fileName: string): string => {
+    return fileName
+      .replace(/\.[^.]+$/, '')
+      .replace(/^\d+[-_\s]*/, '')
+      .replace(/[-_]+/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
+  };
+
+  const parseMatrixImportRows = (sheetRows: unknown[][], fileName: string): ImportPreviewRow[] | null => {
+    const metadata: Record<string, string> = {};
+    let headerIndex = -1;
+
+    sheetRows.forEach((row, index) => {
+      const first = parseImportText(row[0]);
+      const second = parseImportText(row[1]);
+      const normalizedFirst = first ? normalizeHeader(first) : '';
+
+      if (first && second && ['produkt', 'product', 'product_name', 'modell', 'model', 'kategorie', 'category', 'produkttyp', 'product_type', 'typ', 'type', 'preismodell', 'pricing_type', 'beschreibung', 'description'].includes(normalizedFirst)) {
+        metadata[normalizedFirst] = second;
+      }
+
+      if (
+        headerIndex === -1 &&
+        row.length > 1 &&
+        (normalizedFirst.includes('tiefe') || normalizedFirst.includes('depth')) &&
+        row.slice(1).some(cell => parseImportNumber(cell) !== null)
+      ) {
+        headerIndex = index;
+      }
+    });
+
+    if (headerIndex === -1) return null;
+
+    const headerRow = sheetRows[headerIndex];
+    const breiteHeaders = headerRow.slice(1).map(parseImportNumber);
+    const productName = metadata.produkt || metadata.product || metadata.product_name || metadata.modell || metadata.model || getImportProductNameFromFile(fileName);
+    const category = metadata.kategorie || metadata.category || null;
+    const productType = metadata.produkttyp || metadata.product_type || metadata.typ || metadata.type || null;
+    const description = metadata.beschreibung || metadata.description || null;
+
+    const previewRows: ImportPreviewRow[] = [];
+    sheetRows.slice(headerIndex + 1).forEach((row, rowOffset) => {
+      const tiefe = parseImportNumber(row[0]);
+      if (tiefe === null && row.every(cell => !parseImportText(cell))) return;
+
+      breiteHeaders.forEach((breite, colOffset) => {
+        const price = parseImportNumber(row[colOffset + 1]);
+        if (breite === null && price === null) return;
+
+        const payload: ImportProductPayload = {
+          category,
+          product_type: productType,
+          product_name: productName,
+          pricing_type: 'dimension',
+          breite: breite || 0,
+          tiefe: tiefe || 0,
+          price: price ?? 0,
+          unit_label: null,
+          description,
+          custom_fields: null
+        };
+
+        const errors: string[] = [];
+        if (!payload.product_name) errors.push('Produktname fehlt');
+        if (!breite || !tiefe) errors.push('Breite/Tiefe fehlt');
+        if (price === null || price < 0) errors.push('Preis fehlt oder ist ungültig');
+
+        previewRows.push({ rowNumber: headerIndex + rowOffset + 2, payload, errors });
+      });
+    });
+
+    return previewRows.length > 0 ? previewRows : null;
+  };
+
+  const parseUnitImportRows = (sheetRows: unknown[][], fileName: string): ImportPreviewRow[] | null => {
+    const metadata: Record<string, string> = {};
+    let headerIndex = -1;
+
+    sheetRows.forEach((row, index) => {
+      const first = parseImportText(row[0]);
+      const second = parseImportText(row[1]);
+      const normalizedFirst = first ? normalizeHeader(first) : '';
+
+      if (first && second && ['produkt', 'product', 'product_name', 'modell', 'model', 'kategorie', 'category', 'produkttyp', 'product_type', 'typ', 'type', 'beschreibung', 'description'].includes(normalizedFirst)) {
+        metadata[normalizedFirst] = second;
+      }
+
+      const normalizedRow = row.map(cell => normalizeHeader(String(cell || '')));
+      if (headerIndex === -1 && normalizedRow.includes('einheit') && (normalizedRow.includes('preis') || normalizedRow.includes('price'))) {
+        headerIndex = index;
+      }
+    });
+
+    if (headerIndex === -1) return null;
+
+    const headerRow = sheetRows[headerIndex].map(cell => normalizeHeader(String(cell || '')));
+    const unitIndex = headerRow.indexOf('einheit');
+    const priceIndex = headerRow.includes('preis') ? headerRow.indexOf('preis') : headerRow.indexOf('price');
+    const productName = metadata.produkt || metadata.product || metadata.product_name || metadata.modell || metadata.model || getImportProductNameFromFile(fileName);
+    const category = metadata.kategorie || metadata.category || null;
+    const productType = metadata.produkttyp || metadata.product_type || metadata.typ || metadata.type || null;
+    const description = metadata.beschreibung || metadata.description || null;
+
+    const previewRows: ImportPreviewRow[] = [];
+    sheetRows.slice(headerIndex + 1).forEach((row, rowOffset) => {
+      if (row.every(cell => !parseImportText(cell))) return;
+      const unitLabel = parseImportText(row[unitIndex]);
+      const price = parseImportNumber(row[priceIndex]);
+      const payload: ImportProductPayload = {
+        category,
+        product_type: productType,
+        product_name: productName,
+        pricing_type: 'unit',
+        breite: 0,
+        tiefe: 0,
+        price: price ?? 0,
+        unit_label: unitLabel,
+        description,
+        custom_fields: null
+      };
+
+      const errors: string[] = [];
+      if (!payload.product_name) errors.push('Produktname fehlt');
+      if (!unitLabel) errors.push('Einheit fehlt');
+      if (price === null || price < 0) errors.push('Preis fehlt oder ist ungültig');
+
+      previewRows.push({ rowNumber: headerIndex + rowOffset + 2, payload, errors });
+    });
+
+    return previewRows.length > 0 ? previewRows : null;
+  };
+
+  const parseRowBasedImportRows = (rawRows: Record<string, unknown>[], fileName: string): ImportPreviewRow[] => {
+    const detectedNames = [...new Set(rawRows
+      .map(row => parseImportText(getImportValue(row, ['product_name', 'produktname', 'produkt_name', 'produkt', 'modell', 'model', 'name'])))
+      .filter((name): name is string => Boolean(name))
+    )];
+    const singleProductError = detectedNames.length > 1
+      ? `Eine Importdatei darf nur ein Produkt enthalten. Gefunden: ${detectedNames.join(', ')}`
+      : null;
+    const fallbackProductName = detectedNames[0] || getImportProductNameFromFile(fileName);
+
+    return rawRows.map((row, index) => {
+      const category = parseImportText(getImportValue(row, ['category', 'kategorie']));
+      const productType = parseImportText(getImportValue(row, ['product_type', 'produkttyp', 'produkt_typ', 'type', 'typ']));
+      const productName = parseImportText(getImportValue(row, ['product_name', 'produktname', 'produkt_name', 'produkt', 'modell', 'model', 'name'])) || fallbackProductName;
+      const rawPricingType = parseImportText(getImportValue(row, ['pricing_type', 'preismodell', 'preis_typ', 'price_type']));
+      const unitLabel = parseImportText(getImportValue(row, ['unit_label', 'einheit', 'unit', 'einheit_label']));
+      const breiteValue = parseImportNumber(getImportValue(row, ['breite', 'width', 'genislik', 'genişlik']));
+      const tiefeValue = parseImportNumber(getImportValue(row, ['tiefe', 'depth', 'derinlik']));
+      const priceValue = parseImportNumber(getImportValue(row, ['price', 'preis', 'betrag', 'fiyat', 'netto', 'brutto']));
+      const description = parseImportText(getImportValue(row, ['description', 'beschreibung', 'aciklama', 'açıklama']));
+      const customFields = parseImportText(getImportValue(row, ['custom_fields', 'formularfelder', 'fields']));
+      const pricingType: 'dimension' | 'unit' =
+        rawPricingType && ['unit', 'einheit', 'einheitspreis', 'piece', 'stuck', 'stueck'].includes(normalizeHeader(rawPricingType))
+          ? 'unit'
+          : (!breiteValue && !tiefeValue && unitLabel ? 'unit' : 'dimension');
+
+      const payload: ImportProductPayload = {
+        category,
+        product_type: productType,
+        product_name: productName,
+        pricing_type: pricingType,
+        breite: pricingType === 'unit' ? 0 : (breiteValue || 0),
+        tiefe: pricingType === 'unit' ? 0 : (tiefeValue || 0),
+        price: priceValue ?? 0,
+        unit_label: unitLabel,
+        description,
+        custom_fields: customFields
+      };
+
+      const errors: string[] = [];
+      if (singleProductError) errors.push(singleProductError);
+      if (!payload.product_name) errors.push('Produktname fehlt');
+      if (pricingType === 'dimension' && (!breiteValue || !tiefeValue)) errors.push('Breite/Tiefe fehlt');
+      if (priceValue === null || priceValue < 0) errors.push('Preis fehlt oder ist ungültig');
+
+      return { rowNumber: index + 2, payload, errors };
+    });
+  };
+
+  const parseProductImportRows = (sheetRows: unknown[][], rawRows: Record<string, unknown>[], fileName: string): ImportPreviewRow[] => {
+    return parseMatrixImportRows(sheetRows, fileName)
+      || parseUnitImportRows(sheetRows, fileName)
+      || parseRowBasedImportRows(rawRows, fileName);
+  };
+
+  const handleImportFile = async (file: File) => {
+    try {
+      setImportResult(null);
+      setError('');
+      const buffer = await file.arrayBuffer();
+      const workbook = XLSX.read(buffer, { type: 'array' });
+      const firstSheetName = workbook.SheetNames[0];
+      if (!firstSheetName) {
+        setError('Die Datei enthält kein Tabellenblatt');
+        return;
+      }
+      const sheet = workbook.Sheets[firstSheetName];
+      const sheetRows = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, defval: '', raw: false });
+      const rawRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: false });
+      if (rawRows.length === 0 && sheetRows.length === 0) {
+        setError('Keine Produktzeilen gefunden');
+        return;
+      }
+      setImportFileName(file.name);
+      setImportRows(parseProductImportRows(sheetRows, rawRows, file.name));
+      setImportPreviewOpen(true);
+    } catch (err) {
+      console.error('Import parse error:', err);
+      setError(err instanceof Error ? err.message : 'Datei konnte nicht gelesen werden');
+    } finally {
+      if (importFileRef.current) importFileRef.current.value = '';
+    }
+  };
+
+  const saveImportedProducts = async () => {
+    const validRows = importRows.filter(row => row.errors.length === 0);
+    if (validRows.length === 0) {
+      setImportResult('Keine gültigen Zeilen zum Importieren.');
+      return;
+    }
+    const importedProductNames = [...new Set(validRows.map(row => row.payload.product_name).filter(Boolean))];
+    setSaving(true);
+    setImportResult(null);
+    try {
+      const result = await api.post<{
+        inserted: number;
+        updated: number;
+        skipped: number;
+        errors?: { row: number; error: string }[];
+      }>('/lead-products/import', {
+        products: validRows.map(row => row.payload)
+      });
+      setImportResult(`Import abgeschlossen: ${result.inserted} neu, ${result.updated} aktualisiert, ${result.skipped} übersprungen.`);
+      await loadProducts();
+      setFilterCategory('');
+      setFilterProductType('');
+      setFilterModel('');
+      if (importedProductNames.length > 0) {
+        setExpandedProducts(new Set(importedProductNames));
+      }
+      if (result.inserted + result.updated > 0) {
+        setImportPreviewOpen(false);
+      }
+    } catch (err) {
+      console.error('Import save error:', err);
+      setImportResult(err instanceof Error ? err.message : 'Import fehlgeschlagen');
+    } finally {
+      setSaving(false);
+    }
+  };
+
   // ========== RENDER ==========
   return (
     <div className="product-pricing-page">
@@ -1005,6 +1368,29 @@ export default function ProductPricing() {
           <span className="product-count">{filteredProductNames.length} Produkte</span>
         </div>
         <div className="header-right">
+          <input
+            ref={importFileRef}
+            type="file"
+            accept=".xlsx,.xls,.csv"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const file = e.target.files?.[0];
+              if (file) void handleImportFile(file);
+            }}
+          />
+          <motion.button
+            className="btn-toolbar"
+            onClick={() => importFileRef.current?.click()}
+            whileHover={{ scale: 1.02 }}
+            whileTap={{ scale: 0.98 }}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" aria-hidden="true">
+              <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+              <polyline points="17 8 12 3 7 8" />
+              <line x1="12" y1="3" x2="12" y2="15" />
+            </svg>
+            Excel/CSV Import
+          </motion.button>
           <motion.button
             className="btn-primary"
             onClick={openNewProductModal}
@@ -1186,6 +1572,18 @@ export default function ProductPricing() {
                     </span>
                   </div>
                   <div className="accordion-actions" onClick={e => e.stopPropagation()}>
+                    <button
+                      className="btn-icon-small export"
+                      onClick={() => exportProductCsv(productName)}
+                      title={`${productName} als CSV exportieren`}
+                    >
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
+                        <polyline points="7 10 12 15 17 10" />
+                        <line x1="12" y1="15" x2="12" y2="3" />
+                      </svg>
+                      CSV
+                    </button>
                     {data.pricing_type !== 'unit' && (
                       <>
                         <button className="btn-icon-small" onClick={() => addPendingColumn(productName)}>
@@ -2067,6 +2465,100 @@ export default function ProductPricing() {
                 <button className="btn-cancel" onClick={closeNewProductModal}>Abbrechen</button>
                 <button className="btn-save" onClick={saveNewProduct} disabled={saving}>
                   {saving ? 'Speichern...' : 'Produkt erstellen'}
+                </button>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Import Preview Modal */}
+      <AnimatePresence>
+        {importPreviewOpen && (
+          <motion.div
+            className="modal-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => !saving && setImportPreviewOpen(false)}
+          >
+            <motion.div
+              className="product-modal import-preview-modal"
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="modal-header">
+                <div>
+                  <h2>Import Vorschau</h2>
+                  <p className="import-file-name">{importFileName}</p>
+                </div>
+                <button className="close-btn" onClick={() => !saving && setImportPreviewOpen(false)} disabled={saving}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+
+              <div className="modal-body">
+                <div className="import-summary">
+                  <span>{importRows.length} Zeilen</span>
+                  <span className="ok">{importRows.filter(r => r.errors.length === 0).length} gültig</span>
+                  <span className="bad">{importRows.filter(r => r.errors.length > 0).length} fehlerhaft</span>
+                </div>
+
+                {importResult && <div className="modal-info">{importResult}</div>}
+
+                <div className="import-preview-table-wrap">
+                  <table className="import-preview-table">
+                    <thead>
+                      <tr>
+                        <th>Zeile</th>
+                        <th>Status</th>
+                        <th>Kategorie</th>
+                        <th>Typ</th>
+                        <th>Produkt</th>
+                        <th>Preismodell</th>
+                        <th>Breite</th>
+                        <th>Tiefe</th>
+                        <th>Preis</th>
+                        <th>Fehler</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {importRows.slice(0, 300).map(row => (
+                        <tr key={row.rowNumber} className={row.errors.length > 0 ? 'has-error' : ''}>
+                          <td>{row.rowNumber}</td>
+                          <td>{row.errors.length === 0 ? 'OK' : 'Fehler'}</td>
+                          <td>{row.payload.category || '-'}</td>
+                          <td>{row.payload.product_type || '-'}</td>
+                          <td>{row.payload.product_name || '-'}</td>
+                          <td>{row.payload.pricing_type}</td>
+                          <td>{row.payload.pricing_type === 'unit' ? '-' : row.payload.breite}</td>
+                          <td>{row.payload.pricing_type === 'unit' ? '-' : row.payload.tiefe}</td>
+                          <td>{row.payload.price.toLocaleString('de-DE', { minimumFractionDigits: 2 })}</td>
+                          <td>{row.errors.join(', ')}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {importRows.length > 300 && (
+                    <div className="import-preview-limit">Es werden die ersten 300 Zeilen angezeigt.</div>
+                  )}
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                <button className="btn-cancel" onClick={() => setImportPreviewOpen(false)} disabled={saving}>
+                  Abbrechen
+                </button>
+                <button
+                  className="btn-save"
+                  onClick={saveImportedProducts}
+                  disabled={saving || importRows.filter(r => r.errors.length === 0).length === 0}
+                >
+                  {saving ? 'Importiert...' : 'Gültige Zeilen speichern'}
                 </button>
               </div>
             </motion.div>

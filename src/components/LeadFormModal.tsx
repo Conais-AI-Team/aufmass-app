@@ -1194,10 +1194,27 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                         )}
                       </div>
                     )}
-                    {row.pricing_type !== 'unit' && row.breite && row.tiefe && row.price === 0 && Object.keys(row.dimensions).length > 0 && (
-                      <div className="product-row-warning">
-                        Keine Preisdaten für diese Größe verfügbar
-                      </div>
+                    {/* No catalog price could be resolved — explain WHY, derived
+                        live from the row state (not the stale lookup_status flag,
+                        which updateRow never refreshes) so it stays correct after
+                        manual edits. Covers three cases the old warning missed:
+                        model not in catalog, size not priced, unit price missing. */}
+                    {row.product_name && !(row.price > 0) && (
+                      row.pricing_type === 'unit' ? (
+                        <div className="product-row-warning">
+                          Kein Preis im Katalog hinterlegt — bitte in „Produkte &amp; Preise" ergänzen
+                        </div>
+                      ) : (row.breite && row.tiefe) ? (
+                        Object.keys(row.dimensions).length > 0 ? (
+                          <div className="product-row-warning">
+                            Keine Preisdaten für diese Größe verfügbar
+                          </div>
+                        ) : (
+                          <div className="product-row-warning">
+                            Modell nicht im Katalog — bitte in „Produkte &amp; Preise" anlegen
+                          </div>
+                        )
+                      ) : null
                     )}
 
                     {/* Custom Fields */}

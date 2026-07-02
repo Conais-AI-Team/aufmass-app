@@ -26,11 +26,18 @@ app.use(cors({
       'https://aufmass-app.vercel.app',
       'https://aufmass-api.conais.com',
       'http://localhost:5173',
-      'http://localhost:5174'
+      'http://localhost:5174',
+      'http://127.0.0.1:5173',
+      'http://127.0.0.1:5174'
     ];
 
     // Allow *.cnsform.com domains (branch subdomains)
     if (origin.match(/^https?:\/\/[a-z0-9-]+\.cnsform\.com$/i)) {
+      return callback(null, true);
+    }
+
+    // Local branch dev: http://koblenz.localhost:5173
+    if (origin.match(/^https?:\/\/[a-z0-9-]+\.localhost(?::\d+)?$/i)) {
       return callback(null, true);
     }
 
@@ -869,10 +876,10 @@ const detectBranch = (req, res, next) => {
     hostToCheck = host.split(':')[0];
   }
 
-  // Dev/admin domains - no branch filter (sees all data, full admin access)
-  const adminDomains = ['localhost', '127.0.0.1', 'aufmass-api.conais.com', 'aufmass-app.vercel.app'];
-  if (adminDomains.some(d => hostToCheck === d || hostToCheck.includes(d))) {
-    req.branchId = null;
+  // Local branch dev: {branch}.localhost
+  const localhostBranchMatch = hostToCheck.match(/^([a-z0-9-]+)\.localhost$/i);
+  if (localhostBranchMatch) {
+    req.branchId = localhostBranchMatch[1].toLowerCase();
     return next();
   }
 
@@ -880,6 +887,25 @@ const detectBranch = (req, res, next) => {
   const cnsformMatch = hostToCheck.match(/^([a-z0-9-]+)\.cnsform\.com$/i);
   if (cnsformMatch) {
     req.branchId = cnsformMatch[1].toLowerCase();
+    return next();
+  }
+
+  const headerBranch = typeof req.headers['x-branch-slug'] === 'string'
+    ? req.headers['x-branch-slug'].toLowerCase().trim()
+    : null;
+  if (
+    headerBranch &&
+    /^[a-z0-9-]+$/.test(headerBranch) &&
+    (hostToCheck === 'localhost' || hostToCheck === '127.0.0.1' || hostToCheck.endsWith('.localhost'))
+  ) {
+    req.branchId = headerBranch;
+    return next();
+  }
+
+  // Dev/admin domains - no branch filter (sees all data, full admin access)
+  const adminDomains = ['localhost', '127.0.0.1', 'aufmass-api.conais.com', 'aufmass-app.vercel.app'];
+  if (adminDomains.some(d => hostToCheck === d || hostToCheck.includes(d))) {
+    req.branchId = null;
     return next();
   }
 
@@ -903,8 +929,18 @@ app.use('/api', detectBranch);
 // (caller MUST `return` immediately when null).
 function resolveBranchSlug(req, res, action = 'access') {
   if (req.branchId) return req.branchId;
+  const headerBranch = typeof req.headers['x-branch-slug'] === 'string'
+    ? req.headers['x-branch-slug'].toLowerCase().trim()
+    : null;
+  if (headerBranch && /^[a-z0-9-]+$/.test(headerBranch)) return headerBranch;
   const q = req.query && (req.query.branch || req.query.branchSlug);
   if (q && typeof q === 'string') return q.toLowerCase();
+  // Fall back to the authenticated user's OWN branch. This is NOT the old
+  // silent 'koblenz' default (which corrupted a real branch) — it's the branch
+  // the logged-in user actually belongs to, so branch-scoped accounts work even
+  // without a subdomain/header (e.g. plain localhost, cross-origin API, proxy
+  // that strips the header). Global admins have branch_id NULL and still 400.
+  if (req.user && req.user.branch_id) return req.user.branch_id;
   res.status(400).json({
     error: `Branch context required. Bitte über die Filiale-Subdomain (z.B. koblenz.cnsform.com) ${action === 'write' ? 'speichern' : 'aufrufen'} oder ?branch=<slug> Parameter angeben.`
   });
@@ -1027,7 +1063,7 @@ app.post('/api/auth/login', async (req, res) => {
     await pool.query('UPDATE aufmass_users SET last_login = NOW() WHERE id = $1', [user.id]);
 
     const token = jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role },
+      { id: user.id, email: user.email, name: user.name, role: user.role, branch_id: user.branch_id || null },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
@@ -1038,7 +1074,8 @@ app.post('/api/auth/login', async (req, res) => {
         id: user.id,
         email: user.email,
         name: user.name,
-        role: user.role
+        role: user.role,
+        branch_id: user.branch_id || null
       }
     });
   } catch (err) {
@@ -1260,7 +1297,7 @@ app.post('/api/auth/register', async (req, res) => {
 
     const userId = result.rows[0].id;
     const jwtToken = jwt.sign(
-      { id: userId, email: invite.email, name, role: invite.role },
+      { id: userId, email: invite.email, name, role: invite.role, branch_id: invite.branch_id || null },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '7d' }
     );
@@ -3451,18 +3488,21 @@ app.get('/api/stats/montageteam', authenticateToken, async (req, res) => {
           m.is_active,
           m.created_at,
           COALESCE(f.count, 0) as count,
-          COALESCE(f.neu, 0) as neu,
-          COALESCE(f.abgeschlossen, 0) as abgeschlossen
+          COALESCE(f.completed, 0) as completed,
+          COALESCE(f.reklamation, 0) as reklamation,
+          COALESCE(f.draft, 0) as draft
         FROM aufmass_montageteams m
         LEFT JOIN (
           SELECT
             specifications::jsonb->>'montageteam' as team_name,
             COUNT(*) as count,
-            SUM(CASE WHEN status IN ('neu', 'draft', 'completed') THEN 1 ELSE 0 END) as neu,
-            SUM(CASE WHEN status = 'abgeschlossen' THEN 1 ELSE 0 END) as abgeschlossen
+            SUM(CASE WHEN status IN ('abnahme', 'schluss_rechnung_erstellt', 'rest_rechnung_erstellt') THEN 1 ELSE 0 END) as completed,
+            SUM(CASE WHEN status IN ('reklamation_eingegangen', 'reklamation_bestellt', 'reklamation_abgelehnt') THEN 1 ELSE 0 END) as reklamation,
+            SUM(CASE WHEN status IN ('entwurf', 'neu') THEN 1 ELSE 0 END) as draft
           FROM aufmass_forms
           WHERE specifications::jsonb->>'montageteam' IS NOT NULL
             AND specifications::jsonb->>'montageteam' != ''
+            AND status != 'papierkorb'
             AND branch_id = $1
           GROUP BY specifications::jsonb->>'montageteam'
         ) f ON m.name = f.team_name
@@ -3478,18 +3518,21 @@ app.get('/api/stats/montageteam', authenticateToken, async (req, res) => {
           m.is_active,
           m.created_at,
           COALESCE(f.count, 0) as count,
-          COALESCE(f.neu, 0) as neu,
-          COALESCE(f.abgeschlossen, 0) as abgeschlossen
+          COALESCE(f.completed, 0) as completed,
+          COALESCE(f.reklamation, 0) as reklamation,
+          COALESCE(f.draft, 0) as draft
         FROM aufmass_montageteams m
         LEFT JOIN (
           SELECT
             specifications::jsonb->>'montageteam' as team_name,
             COUNT(*) as count,
-            SUM(CASE WHEN status IN ('neu', 'draft', 'completed') THEN 1 ELSE 0 END) as neu,
-            SUM(CASE WHEN status = 'abgeschlossen' THEN 1 ELSE 0 END) as abgeschlossen
+            SUM(CASE WHEN status IN ('abnahme', 'schluss_rechnung_erstellt', 'rest_rechnung_erstellt') THEN 1 ELSE 0 END) as completed,
+            SUM(CASE WHEN status IN ('reklamation_eingegangen', 'reklamation_bestellt', 'reklamation_abgelehnt') THEN 1 ELSE 0 END) as reklamation,
+            SUM(CASE WHEN status IN ('entwurf', 'neu') THEN 1 ELSE 0 END) as draft
           FROM aufmass_forms
           WHERE specifications::jsonb->>'montageteam' IS NOT NULL
             AND specifications::jsonb->>'montageteam' != ''
+            AND status != 'papierkorb'
           GROUP BY specifications::jsonb->>'montageteam'
         ) f ON m.name = f.team_name
         WHERE m.is_active = true
@@ -5224,14 +5267,20 @@ app.get('/api/lead-products', authenticateToken, async (req, res) => {
     // MODÜL B v3: Admin domain'inden gelen istekte de tek branch göster.
     // Aksi halde ProductPricing matrix farkli branch'lerin satirlarini karistirir
     // ve save yanlis ID'ye yazar.
-    const branchSlug = resolveBranchSlug(req, res);
-    if (!branchSlug) return;
-    const result = await pool.query(
-      `SELECT * FROM aufmass_lead_products
-       WHERE branch_id = $1
-       ORDER BY product_name, breite, tiefe`,
-      [branchSlug]
-    );
+    const q = req.query && (req.query.branch || req.query.branchSlug);
+    const branchSlug = req.branchId || (typeof q === 'string' ? q.toLowerCase() : null)
+      || (req.user && req.user.branch_id) || null;
+    const result = branchSlug
+      ? await pool.query(
+          `SELECT * FROM aufmass_lead_products
+           WHERE branch_id = $1
+           ORDER BY product_name, breite, tiefe`,
+          [branchSlug]
+        )
+      : await pool.query(
+          `SELECT * FROM aufmass_lead_products
+           ORDER BY branch_id NULLS FIRST, product_name, breite, tiefe`
+        );
     res.json(result.rows);
   } catch (err) {
     console.error('Get lead products error:', err);
@@ -5342,11 +5391,12 @@ app.put('/api/lead-products/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const { product_name, breite, tiefe, price, pricing_type, unit_label } = req.body;
 
-    // Verify product belongs to this branch (admin domain falls back to koblenz)
-    const branchSlug = resolveBranchSlug(req, res);
-    if (!branchSlug) return;
-    const checkQuery = 'SELECT * FROM aufmass_lead_products WHERE id = $1 AND branch_id = $2';
-    const checkParams = [id, branchSlug];
+    const q = req.query && (req.query.branch || req.query.branchSlug);
+    const branchSlug = req.branchId || (typeof q === 'string' ? q.toLowerCase() : null);
+    const checkQuery = branchSlug
+      ? 'SELECT * FROM aufmass_lead_products WHERE id = $1 AND branch_id = $2'
+      : 'SELECT * FROM aufmass_lead_products WHERE id = $1';
+    const checkParams = branchSlug ? [id, branchSlug] : [id];
 
     const existing = await pool.query(checkQuery, checkParams);
 
@@ -6610,32 +6660,135 @@ app.get('/api/leads/:id/pdf', authenticateToken, async (req, res) => {
 
 // Import products from price matrix (admin only)
 app.post('/api/lead-products/import', authenticateToken, async (req, res) => {
+  const client = await pool.connect();
   try {
-    if (req.user.role !== 'admin') {
-      return res.status(403).json({ error: 'Admin access required' });
+    if (req.user.role !== 'admin' && req.user.role !== 'office') {
+      return res.status(403).json({ error: 'Admin or office access required' });
     }
 
-    const { products } = req.body; // Array of { product_name, breite, tiefe, price }
+    const q = req.query && (req.query.branch || req.query.branchSlug);
+    const branchSlug = req.branchId || (typeof q === 'string' ? q.toLowerCase() : null);
 
-    let imported = 0;
-    for (const product of products) {
-      await pool.query(
-        `INSERT INTO aufmass_lead_products (product_name, breite, tiefe, price, branch_id)
-         SELECT $1, $2, $3, $4, $5
-         WHERE NOT EXISTS (
-           SELECT 1 FROM aufmass_lead_products
-           WHERE product_name = $1 AND breite = $2 AND tiefe = $3
-           AND (branch_id = $5 OR (branch_id IS NULL AND $5 IS NULL))
-         )`,
-        [product.product_name, product.breite, product.tiefe, product.price, req.branchId || null]
+    const { products } = req.body;
+    if (!Array.isArray(products)) {
+      return res.status(400).json({ error: 'products array required' });
+    }
+
+    const normalizeText = (value) => {
+      if (value === undefined || value === null) return null;
+      const text = String(value).trim();
+      return text === '' ? null : text;
+    };
+    const normalizeNumber = (value) => {
+      if (value === undefined || value === null || value === '') return null;
+      const n = Number(String(value).replace(/\s/g, '').replace(',', '.'));
+      return Number.isFinite(n) ? n : null;
+    };
+    const normalizeJsonText = (value) => {
+      if (value === undefined || value === null || value === '') return null;
+      if (typeof value === 'object') return JSON.stringify(value);
+      const text = String(value).trim();
+      if (!text) return null;
+      try {
+        JSON.parse(text);
+        return text;
+      } catch {
+        return null;
+      }
+    };
+
+    let inserted = 0;
+    let updated = 0;
+    let skipped = 0;
+    const errors = [];
+
+    await client.query('BEGIN');
+
+    for (let i = 0; i < products.length; i++) {
+      const input = products[i] || {};
+      const productName = normalizeText(input.product_name || input.productName);
+      const pricingType = normalizeText(input.pricing_type || input.pricingType) === 'unit' ? 'unit' : 'dimension';
+      const isUnit = pricingType === 'unit';
+      const breite = isUnit ? 0 : normalizeNumber(input.breite);
+      const tiefe = isUnit ? 0 : normalizeNumber(input.tiefe);
+      const price = normalizeNumber(input.price);
+
+      if (!productName) {
+        skipped++;
+        errors.push({ row: i + 1, error: 'product_name required' });
+        continue;
+      }
+      if (!isUnit && (breite === null || tiefe === null || breite <= 0 || tiefe <= 0)) {
+        skipped++;
+        errors.push({ row: i + 1, product_name: productName, error: 'breite and tiefe required for dimension products' });
+        continue;
+      }
+      if (price === null || price < 0) {
+        skipped++;
+        errors.push({ row: i + 1, product_name: productName, error: 'valid price required' });
+        continue;
+      }
+
+      const category = normalizeText(input.category);
+      const productType = normalizeText(input.product_type || input.productType);
+      const unitLabel = normalizeText(input.unit_label || input.unitLabel);
+      const description = normalizeText(input.description);
+      const customFields = normalizeJsonText(input.custom_fields || input.customFields);
+      const sizeProfile = normalizeText(input.size_profile || input.sizeProfile);
+      const sizeValues = input.size_values || input.sizeValues || (isUnit ? {} : { breite, tiefe });
+      const sizeValuesJson = normalizeJsonText(sizeValues) || JSON.stringify(sizeValues);
+
+      const existing = await client.query(
+        `SELECT id FROM aufmass_lead_products
+         WHERE branch_id IS NOT DISTINCT FROM $1 AND product_name = $2 AND breite = $3 AND tiefe = $4
+         ORDER BY id ASC LIMIT 1`,
+        [branchSlug, productName, breite, tiefe]
       );
-      imported++;
+
+      if (existing.rows.length > 0) {
+        await client.query(
+          `UPDATE aufmass_lead_products
+           SET price = $2,
+               category = COALESCE($3, category),
+               product_type = COALESCE($4, product_type),
+               pricing_type = $5,
+               unit_label = $6,
+               description = COALESCE($7, description),
+               custom_fields = COALESCE($8, custom_fields),
+               size_values = $9::jsonb,
+               size_profile = COALESCE($10, size_profile)
+           WHERE id = $1`,
+          [existing.rows[0].id, price, category, productType, pricingType, unitLabel, description, customFields, sizeValuesJson, sizeProfile]
+        );
+        updated++;
+      } else {
+        await client.query(
+          `INSERT INTO aufmass_lead_products
+           (branch_id, category, product_type, product_name, breite, tiefe, price, pricing_type, unit_label, description, custom_fields, size_values, size_profile)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)`,
+          [branchSlug, category, productType, productName, breite, tiefe, price, pricingType, unitLabel, description, customFields, sizeValuesJson, sizeProfile]
+        );
+        inserted++;
+      }
     }
 
-    res.json({ message: `Imported ${imported} products` });
+    await client.query('COMMIT');
+
+    res.json({
+      success: true,
+      branch: branchSlug,
+      total: products.length,
+      inserted,
+      updated,
+      skipped,
+      errors
+    });
   } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
     console.error('Import products error:', err);
-    res.status(500).json({ error: 'Failed to import products' });
+    res.status(500).json({ error: 'Failed to import products', details: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -6773,8 +6926,8 @@ app.put('/api/email/my-settings', authenticateToken, async (req, res) => {
 // GET /api/email/status - Check which SMTP is active for current user (any user)
 app.get('/api/email/status', authenticateToken, async (req, res) => {
   try {
-    const branchSlug = resolveBranchSlug(req, res);
-    if (!branchSlug) return;
+    const q = req.query && (req.query.branch || req.query.branchSlug);
+    const branchSlug = req.branchId || (typeof q === 'string' ? q.toLowerCase() : null);
     const config = await getSmtpConfig(req.user.id, branchSlug);
     if (!config) {
       return res.json({ configured: false, source: null, from_email: null });

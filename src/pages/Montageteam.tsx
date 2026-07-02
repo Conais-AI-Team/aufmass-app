@@ -6,6 +6,34 @@ import type { MontageteamStats, FormData, Montageteam } from '../services/api';
 import { useAuth } from '../contexts/AuthContext';
 import './Dashboard.css';
 
+// Canonical status → { label, color }. Mirrors Dashboard STATUS_OPTIONS so each
+// project in the drawer shows its real workflow stage instead of a vague
+// "Laufend" that collapsed a dozen distinct statuses into one word.
+const STATUS_META: Record<string, { label: string; color: string }> = {
+  entwurf: { label: 'Entwurf', color: '#f97316' },
+  auftrag_abgelehnt: { label: 'Auftrag Abgelehnt', color: '#6b7280' },
+  neu: { label: 'Aufmaß Genommen', color: '#8b5cf6' },
+  angebot_versendet: { label: 'Angebot Versendet', color: '#a78bfa' },
+  auftrag_erteilt: { label: 'Auftrag Erteilt', color: '#3b82f6' },
+  rechnung_erstellt: { label: 'Rechnung Entwurf', color: '#38bdf8' },
+  gesendet: { label: 'Rechnung Gesendet', color: '#0ea5e9' },
+  bauantrag: { label: 'Bauantrag', color: '#2563eb' },
+  anzahlung: { label: 'Anzahlung Erhalten', color: '#06b6d4' },
+  bestellt: { label: 'Bestellt', color: '#f59e0b' },
+  montage_geplant: { label: 'Montage Geplant', color: '#a855f7' },
+  montage_gestartet: { label: 'Montage Gestartet', color: '#ec4899' },
+  abnahme: { label: 'Abnahme', color: '#10b981' },
+  schluss_rechnung_erstellt: { label: 'Schlussrechnung Entwurf', color: '#22d3ee' },
+  rest_rechnung_erstellt: { label: 'Schlussrechnung Gesendet', color: '#0891b2' },
+  reklamation_eingegangen: { label: 'Reklamation Eingegangen', color: '#ef4444' },
+  reklamation_bestellt: { label: 'Reklamation Bestellt', color: '#dc2626' },
+  reklamation_abgelehnt: { label: 'Reklamation Abgelehnt', color: '#b91c1c' },
+  papierkorb: { label: 'Papierkorb', color: '#71717a' },
+};
+
+const statusMeta = (status?: string) =>
+  STATUS_META[status || ''] || { label: status || 'Unbekannt', color: '#6b7280' };
+
 const MontageteamPage = () => {
   const navigate = useNavigate();
   const { isAdminOrOffice } = useAuth();
@@ -49,7 +77,7 @@ const MontageteamPage = () => {
   const getTeamForms = (teamName: string) => {
     return forms.filter(f => {
       const specs = f.specifications as Record<string, unknown>;
-      return specs?.montageteam === teamName;
+      return specs?.montageteam === teamName && f.status !== 'papierkorb';
     });
   };
 
@@ -215,9 +243,9 @@ const MontageteamPage = () => {
                   <span className="stat-value">{team.completed}</span>
                   <span className="stat-label">Fertig</span>
                 </div>
-                <div className="team-stat draft">
-                  <span className="stat-value">{team.draft}</span>
-                  <span className="stat-label">Entwurf</span>
+                <div className="team-stat reklamation">
+                  <span className="stat-value">{team.reklamation}</span>
+                  <span className="stat-label">Mängel</span>
                 </div>
                 <div className="team-stat percentage">
                   <span className="stat-value">{team.count > 0 ? Math.round((team.completed / team.count) * 100) : 0}%</span>
@@ -231,45 +259,13 @@ const MontageteamPage = () => {
 
               <button
                 className="team-expand-btn"
-                onClick={() => setSelectedTeam(selectedTeam === team.montageteam ? null : team.montageteam)}
+                onClick={() => setSelectedTeam(team.montageteam)}
               >
-                {selectedTeam === team.montageteam ? 'Projekte ausblenden' : 'Projekte anzeigen'}
-                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ transform: selectedTeam === team.montageteam ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform 0.2s' }}>
-                  <path d="M19 9l-7 7-7-7" />
+                Projekte anzeigen
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M9 18l6-6-6-6" />
                 </svg>
               </button>
-
-              <AnimatePresence>
-                {selectedTeam === team.montageteam && (
-                  <motion.div
-                    className="team-projects-inline"
-                    initial={{ height: 0, opacity: 0 }}
-                    animate={{ height: 'auto', opacity: 1 }}
-                    exit={{ height: 0, opacity: 0 }}
-                    transition={{ duration: 0.2 }}
-                  >
-                    {getTeamForms(team.montageteam).length > 0 ? (
-                      getTeamForms(team.montageteam).map((form) => (
-                        <div
-                          key={form.id}
-                          className="inline-project-row"
-                          onClick={() => navigate(`/form/${form.id}`)}
-                        >
-                          <div className="project-info">
-                            <span className="project-customer">{form.kundeVorname} {form.kundeNachname}</span>
-                            <span className="project-location">{form.kundenlokation}</span>
-                          </div>
-                          <span className={`project-status-badge ${form.status || 'draft'}`}>
-                            {form.status === 'completed' ? 'Fertig' : 'Entwurf'}
-                          </span>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="no-projects">Keine Projekte zugewiesen</div>
-                    )}
-                  </motion.div>
-                )}
-              </AnimatePresence>
             </motion.div>
           ))
         ) : allTeams.length > 0 ? (
@@ -316,9 +312,9 @@ const MontageteamPage = () => {
                   <span className="stat-value">0</span>
                   <span className="stat-label">Fertig</span>
                 </div>
-                <div className="team-stat draft">
+                <div className="team-stat reklamation">
                   <span className="stat-value">0</span>
-                  <span className="stat-label">Entwurf</span>
+                  <span className="stat-label">Mängel</span>
                 </div>
                 <div className="team-stat percentage">
                   <span className="stat-value">0%</span>
@@ -454,6 +450,76 @@ const MontageteamPage = () => {
               </div>
             </motion.div>
           </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Projects Slide-over Drawer — keeps the grid layout untouched no matter
+          how many projects a team has (an inline expansion would stretch the
+          whole grid row and leave empty gaps under the neighbouring cards). */}
+      <AnimatePresence>
+        {selectedTeam && (
+          <>
+            <motion.div
+              className="drawer-overlay"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setSelectedTeam(null)}
+            />
+            <motion.div
+              className="projects-drawer"
+              initial={{ x: '100%' }}
+              animate={{ x: 0 }}
+              exit={{ x: '100%' }}
+              transition={{ type: 'spring', damping: 30, stiffness: 300 }}
+            >
+              {(() => {
+                const teamForms = getTeamForms(selectedTeam);
+                return (
+                  <>
+                    <div className="drawer-header">
+                      <div>
+                        <h3>{selectedTeam}</h3>
+                        <span className="drawer-subtitle">{teamForms.length} Projekte</span>
+                      </div>
+                      <button className="drawer-close" onClick={() => setSelectedTeam(null)} title="Schließen">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M18 6L6 18M6 6l12 12" /></svg>
+                      </button>
+                    </div>
+                    <div className="drawer-body">
+                      {teamForms.length === 0 ? (
+                        <div className="no-projects">Keine Projekte zugewiesen</div>
+                      ) : (
+                        teamForms.map((form) => (
+                          <div
+                            key={form.id}
+                            className="inline-project-row"
+                            onClick={() => navigate(`/form/${form.id}`)}
+                          >
+                            <div className="project-info">
+                              <span className="project-customer">{form.kundeVorname} {form.kundeNachname}</span>
+                              <span className="project-location">{form.kundenlokation}</span>
+                            </div>
+                            {(() => {
+                              const m = statusMeta(form.status);
+                              return (
+                                <span
+                                  className="project-status-badge"
+                                  style={{ background: `${m.color}22`, color: m.color, whiteSpace: 'nowrap' }}
+                                >
+                                  {m.label}
+                                </span>
+                              );
+                            })()}
+                          </div>
+                        ))
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
+            </motion.div>
+          </>
         )}
       </AnimatePresence>
     </>

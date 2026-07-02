@@ -40,9 +40,9 @@ const STATUS_OPTIONS = [
   { value: 'bestellt', label: 'Bestellt/In Bearbeitung', color: '#f59e0b' },
   { value: 'montage_geplant', label: 'Montage Geplant', color: '#a855f7' },
   { value: 'montage_gestartet', label: 'Montage Gestartet', color: '#ec4899' },
-  { value: 'abnahme', label: 'Abnahme', color: '#10b981' },
   { value: 'schluss_rechnung_erstellt', label: 'Schlussrechnung Entwurf', color: '#22d3ee' },
   { value: 'rest_rechnung_erstellt', label: 'Schlussrechnung Gesendet', color: '#0891b2' },
+  { value: 'abnahme', label: 'Abnahme', color: '#10b981' },
   { value: 'reklamation_eingegangen', label: 'Reklamation Eingegangen', color: '#ef4444' },
   { value: 'reklamation_bestellt', label: 'Reklamation Bestellt', color: '#dc2626' },
   { value: 'reklamation_abgelehnt', label: 'Reklamation Abgelehnt', color: '#b91c1c' },
@@ -107,6 +107,16 @@ const Dashboard = () => {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [formToDelete, setFormToDelete] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 640px)');
+    const forceGridOnMobile = () => {
+      if (media.matches) setViewMode('grid');
+    };
+
+    forceGridOnMobile();
+    media.addEventListener('change', forceGridOnMobile);
+    return () => media.removeEventListener('change', forceGridOnMobile);
+  }, []);
   // Sort order for the Aufmaß list. Default mirrors the existing backend
   // ordering ("Neueste zuerst" / created_at DESC). Persisted only in this
   // session — fresh navigation resets to default.
@@ -615,8 +625,19 @@ const Dashboard = () => {
       return `${greet}\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.${totalsLine}\n\nWir bitten um Überweisung des Anzahlungsbetrags innerhalb des angegebenen Zahlungsziels. Den Restbetrag stellen wir Ihnen nach Abnahme mit der Schlussrechnung in Rechnung.\n\nMit freundlichen Grüßen`;
     }
 
-    // Schlussrechnung — remaining-balance invoice, kept simple.
-    return `${greet}\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.\n\nFälliger Restbetrag (brutto): ${fmtEur(num(rechnung.brutto_betrag))}\n\nMit freundlichen Grüßen`;
+    // Schlussrechnung — remaining-balance invoice. brutto_betrag holds the full
+    // project total; the amount actually due is that minus the Anzahlungen the
+    // customer has already paid, mirroring the PDF's Restbetrag calculation.
+    const bruttoTotal = num(rechnung.brutto_betrag);
+    let anzSum = 0;
+    try {
+      const anzahlungen = await getAnzahlungenByForm(rechnung.form_id);
+      anzSum = (anzahlungen || []).reduce((s, a) => s + num(a.betrag), 0);
+    } catch {
+      // Anzahlungen fetch failed — fall back to full brutto rather than block the e-mail.
+    }
+    const faellig = Math.max(0, bruttoTotal - anzSum);
+    return `${greet}\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.\n\nFälliger Restbetrag (brutto): ${fmtEur(faellig)}\n\nMit freundlichen Grüßen`;
   };
 
   const handleResendRechnungEmail = async (formId: number) => {
@@ -1615,10 +1636,19 @@ Aylux Team`;
             </div>
           )}
           <div className="view-toggle">
-            <button className={`view-btn ${viewMode === 'grid' ? 'active' : ''}`} onClick={() => setViewMode('grid')}>
+            <button className={`view-btn grid-view-btn ${viewMode === 'grid' ? 'active' : ''}`} onClick={() => setViewMode('grid')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
             </button>
-            <button className={`view-btn ${viewMode === 'list' ? 'active' : ''}`} onClick={() => setViewMode('list')}>
+            <button
+              className={`view-btn list-view-btn ${viewMode === 'list' ? 'active' : ''}`}
+              onClick={() => {
+                if (window.matchMedia('(max-width: 640px)').matches) {
+                  setViewMode('grid');
+                  return;
+                }
+                setViewMode('list');
+              }}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
             </button>
           </div>
