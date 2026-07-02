@@ -493,13 +493,23 @@
   align-items: end;
 }
 
-.extra-row .extra-desc {
+/* NOTE: these need the .lead-modal prefix to out-specify the global
+   `.lead-modal input[type="number"] { width: 100% }` rule (0,2,1).
+   Without it the price input stays 100% wide + flex-shrink:0 and crushes
+   the Bezeichnung field down to nothing. */
+.lead-modal .extra-row .extra-desc {
   flex: 1;
   min-width: 0;
+  width: auto;
 }
 
-.extra-row .extra-price {
+.lead-modal .extra-row .extra-price {
   width: 140px;
+  flex-shrink: 0;
+}
+
+.lead-modal .extra-row .extra-assign {
+  width: 160px;
   flex-shrink: 0;
 }
 
@@ -769,20 +779,32 @@
   }
 
   .extra-row {
+    display: grid;
     grid-template-columns: 1fr 40px;
+    gap: 8px 12px;
+    align-items: center;
   }
 
-  .extra-row .extra-desc {
+  .lead-modal .extra-row .extra-desc {
     grid-column: 1 / -1;
     grid-row: 1;
+    width: auto;
   }
 
-  .extra-row .extra-price {
+  .lead-modal .extra-row .extra-price {
     grid-column: 1;
     grid-row: 2;
+    width: auto;
+  }
+
+  .lead-modal .extra-row .extra-assign {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    width: auto;
   }
 
   .extra-row .btn-remove-extra {
+    grid-column: 2;
     grid-row: 2;
   }
 }

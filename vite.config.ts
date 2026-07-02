@@ -7,6 +7,9 @@ export default defineConfig({
   server: {
     port: 5173,
     strictPort: true,
+    // Allow branch-subdomain dev hosts like http://demo.localhost:5173
+    // (Chrome resolves *.localhost to loopback automatically).
+    allowedHosts: ['.localhost'],
     proxy: {
       '/api': {
         target: 'http://localhost:5001',

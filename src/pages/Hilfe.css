@@ -1,0 +1,474 @@
+/* ============================================================================
+   Hilfe & Support — Help-Center
+   GitHub-dark Palette (#0D1117 / #161B22 / #21262D) + grüner Akzent (#7FA93D).
+   Atmosphärischer Such-Hero, zweispaltiges Layout mit Scroll-Spy, Ticket-Modal.
+   ============================================================================ */
+
+.hilfe-wrap {
+  position: relative;
+  padding-top: 1.75rem;
+}
+
+/* ---------- HERO ---------- */
+.hilfe-hero {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--border-color);
+  border-radius: 20px;
+  background:
+    radial-gradient(120% 140% at 50% -20%, rgba(127, 169, 61, 0.10) 0%, transparent 55%),
+    var(--bg-secondary);
+  padding: 3rem 2.5rem 2.75rem;
+  margin-bottom: 2rem;
+}
+.hilfe-hero-glow {
+  position: absolute;
+  top: -45%;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 720px;
+  height: 720px;
+  background: radial-gradient(circle, rgba(127, 169, 61, 0.22) 0%, rgba(127, 169, 61, 0) 62%);
+  filter: blur(8px);
+  pointer-events: none;
+}
+.hilfe-hero-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.025) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.025) 1px, transparent 1px);
+  background-size: 38px 38px;
+  -webkit-mask-image: radial-gradient(120% 90% at 50% 0%, #000 30%, transparent 75%);
+  mask-image: radial-gradient(120% 90% at 50% 0%, #000 30%, transparent 75%);
+  pointer-events: none;
+}
+.hilfe-hero-inner {
+  position: relative;
+  z-index: 1;
+  max-width: 720px;
+}
+.hilfe-eyebrow {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--primary-color);
+  background: rgba(127, 169, 61, 0.12);
+  border: 1px solid rgba(127, 169, 61, 0.25);
+  padding: 0.3rem 0.7rem;
+  border-radius: 999px;
+  margin-bottom: 1rem;
+}
+.hilfe-hero h2 {
+  margin: 0 0 1.5rem;
+  font-size: 2.1rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+  color: var(--text-primary);
+}
+
+/* Suche */
+.hilfe-search {
+  display: flex;
+  align-items: center;
+  gap: 0.85rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  padding: 0 1.1rem;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.hilfe-search:focus-within {
+  border-color: var(--primary-color);
+  box-shadow: 0 0 0 4px rgba(127, 169, 61, 0.15);
+}
+.hilfe-search > svg { width: 20px; height: 20px; color: var(--text-secondary); flex-shrink: 0; }
+.hilfe-search input {
+  flex: 1;
+  border: none;
+  background: transparent;
+  outline: none;
+  padding: 1.05rem 0;
+  font-size: 1rem;
+  color: var(--text-primary);
+}
+.hilfe-search input::placeholder { color: var(--text-secondary); }
+.hilfe-search-clear {
+  background: rgba(127, 169, 61, 0.12);
+  border: none;
+  color: var(--primary-color);
+  font-size: 0.78rem;
+  font-weight: 600;
+  border-radius: 999px;
+  padding: 0.3rem 0.7rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+/* Quick-Chips */
+.hilfe-hero-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin-top: 1.25rem;
+}
+.hilfe-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 999px;
+  padding: 0.45rem 0.9rem;
+  font-size: 0.82rem;
+  font-weight: 500;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all 0.18s ease;
+}
+.hilfe-chip:hover { border-color: var(--primary-color); color: var(--text-primary); transform: translateY(-1px); }
+.hilfe-chip-icon { display: inline-flex; }
+.hilfe-chip-icon svg { width: 14px; height: 14px; color: var(--primary-color); }
+
+/* ---------- LAYOUT ---------- */
+.hilfe-layout {
+  display: grid;
+  grid-template-columns: 248px 1fr;
+  gap: 2.25rem;
+  align-items: start;
+}
+
+/* Sticky Navigation */
+.hilfe-nav {
+  position: sticky;
+  top: 6.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+.hilfe-nav-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+  padding: 0 0.85rem 0.6rem;
+}
+.hilfe-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  width: 100%;
+  background: transparent;
+  border: none;
+  border-radius: 10px;
+  padding: 0.65rem 0.85rem;
+  cursor: pointer;
+  text-align: left;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  font-weight: 500;
+  position: relative;
+  transition: background 0.18s ease, color 0.18s ease;
+}
+.hilfe-nav-item:hover { background: var(--bg-secondary); color: var(--text-primary); }
+.hilfe-nav-item.active { background: var(--bg-secondary); color: var(--text-primary); }
+.hilfe-nav-item.active::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 18%;
+  bottom: 18%;
+  width: 3px;
+  border-radius: 2px;
+  background: var(--primary-color);
+}
+.hilfe-nav-icon { display: inline-flex; flex-shrink: 0; }
+.hilfe-nav-icon svg { width: 17px; height: 17px; color: currentColor; opacity: 0.85; }
+.hilfe-nav-item.active .hilfe-nav-icon svg { color: var(--primary-color); opacity: 1; }
+.hilfe-nav-text { flex: 1; }
+.hilfe-nav-count {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  background: var(--bg-tertiary);
+  border-radius: 999px;
+  padding: 0.05rem 0.5rem;
+  min-width: 1.4rem;
+  text-align: center;
+}
+.hilfe-nav-item.active .hilfe-nav-count { color: var(--primary-color); }
+
+/* Footer-Support — bewusst zurückhaltend, erst am Ende der Inhalte */
+.hilfe-footer-support {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+  margin-top: 0.5rem;
+  padding: 1.4rem 1.6rem;
+  border: 1px dashed var(--border-color);
+  border-radius: 14px;
+  background: transparent;
+}
+.hilfe-footer-text h4 { margin: 0 0 0.3rem; font-size: 0.98rem; font-weight: 700; color: var(--text-primary); }
+.hilfe-footer-text p { margin: 0; font-size: 0.85rem; line-height: 1.55; color: var(--text-secondary); max-width: 58ch; }
+.hilfe-footer-btn {
+  flex-shrink: 0;
+  background: transparent;
+  border: 1px solid var(--border-color);
+  color: var(--text-secondary);
+  border-radius: 10px;
+  padding: 0.6rem 1.15rem;
+  font-size: 0.86rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: border-color 0.18s ease, color 0.18s ease;
+}
+.hilfe-footer-btn:hover { border-color: var(--primary-color); color: var(--primary-color); }
+
+/* ---------- CONTENT SECTIONS ---------- */
+.hilfe-content { display: flex; flex-direction: column; gap: 1.5rem; }
+.hilfe-section {
+  scroll-margin-top: 6.75rem;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 18px;
+  padding: 1.6rem 1.75rem;
+  position: relative;
+  overflow: hidden;
+}
+.hilfe-section-head {
+  display: flex;
+  align-items: center;
+  gap: 0.9rem;
+  padding-bottom: 1.1rem;
+  margin-bottom: 0.4rem;
+  border-bottom: 1px solid var(--border-color);
+  position: relative;
+}
+.hilfe-section-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: rgba(127, 169, 61, 0.12);
+  border: 1px solid rgba(127, 169, 61, 0.22);
+  flex-shrink: 0;
+}
+.hilfe-section-icon svg { width: 20px; height: 20px; color: var(--primary-color); }
+.hilfe-section-head h3 { margin: 0; font-size: 1.15rem; font-weight: 700; color: var(--text-primary); }
+.hilfe-section-head p { margin: 0.15rem 0 0; font-size: 0.84rem; color: var(--text-secondary); }
+.hilfe-section-num {
+  margin-left: auto;
+  font-size: 2.4rem;
+  font-weight: 800;
+  line-height: 1;
+  color: var(--text-primary);
+  opacity: 0.06;
+  letter-spacing: -0.04em;
+}
+
+/* Accordion */
+.hilfe-items { display: flex; flex-direction: column; }
+.hilfe-item { border-bottom: 1px solid var(--border-color); }
+.hilfe-item:last-child { border-bottom: none; }
+.hilfe-q {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 1rem 0.25rem;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  font-size: 0.94rem;
+  font-weight: 600;
+  color: var(--text-primary);
+  border-radius: 8px;
+  transition: color 0.15s ease, padding-left 0.18s ease;
+}
+.hilfe-q:hover { color: var(--primary-color); padding-left: 0.6rem; }
+.hilfe-chevron { width: 18px; height: 18px; flex-shrink: 0; color: var(--text-secondary); transition: transform 0.25s ease, color 0.15s ease; }
+.hilfe-item.open .hilfe-q { color: var(--primary-color); }
+.hilfe-item.open .hilfe-chevron { transform: rotate(180deg); color: var(--primary-color); }
+.hilfe-a-wrap { overflow: hidden; }
+.hilfe-a {
+  margin: 0;
+  padding: 0 2.5rem 1.1rem 0.25rem;
+  font-size: 0.9rem;
+  line-height: 1.68;
+  color: var(--text-secondary);
+  max-width: 72ch;
+}
+
+/* ---------- SUCHERGEBNISSE ---------- */
+.hilfe-results { display: flex; flex-direction: column; gap: 1.25rem; max-width: 820px; }
+.hilfe-result-group {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 0.5rem 1.5rem;
+}
+.hilfe-result-cat {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.9rem 0.25rem 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--primary-color);
+}
+.hilfe-result-icon { display: inline-flex; }
+.hilfe-result-icon svg { width: 15px; height: 15px; }
+.hilfe-empty {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 16px;
+  padding: 3rem 1.5rem;
+  text-align: center;
+  color: var(--text-secondary);
+}
+.hilfe-empty p { margin: 0 0 1rem; font-size: 0.95rem; }
+.hilfe-text-btn {
+  background: transparent;
+  border: 1px solid var(--primary-color);
+  color: var(--primary-color);
+  border-radius: 10px;
+  padding: 0.6rem 1.2rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.18s ease;
+}
+.hilfe-text-btn:hover { background: rgba(127, 169, 61, 0.1); }
+
+/* ---------- MODAL ---------- */
+.hilfe-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(1, 4, 9, 0.7);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 1.5rem;
+  z-index: 1000;
+}
+.hilfe-modal {
+  position: relative;
+  width: 100%;
+  max-width: 520px;
+  background:
+    radial-gradient(120% 90% at 50% 0%, rgba(127, 169, 61, 0.08) 0%, transparent 55%),
+    var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: 18px;
+  padding: 1.85rem;
+  box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
+}
+.hilfe-modal-close {
+  position: absolute;
+  top: 1.1rem;
+  right: 1.1rem;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-color);
+  border-radius: 9px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: color 0.15s ease, border-color 0.15s ease;
+}
+.hilfe-modal-close:hover { color: var(--text-primary); border-color: var(--primary-color); }
+.hilfe-modal-close svg { width: 16px; height: 16px; }
+.hilfe-modal-head { margin-bottom: 1.4rem; padding-right: 2.5rem; }
+.hilfe-modal-head h3 { margin: 0 0 0.4rem; font-size: 1.25rem; font-weight: 700; color: var(--text-primary); }
+.hilfe-modal-head p { margin: 0; font-size: 0.88rem; line-height: 1.5; color: var(--text-secondary); }
+
+/* Formular */
+.hilfe-form { display: flex; flex-direction: column; gap: 1rem; }
+.hilfe-form-row { display: flex; flex-direction: column; gap: 0.4rem; }
+.hilfe-form-row label { font-size: 0.82rem; font-weight: 600; color: var(--text-primary); }
+.hilfe-form-row input,
+.hilfe-form-row select,
+.hilfe-form-row textarea {
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  padding: 0.72rem 0.9rem;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+  outline: none;
+  font-family: inherit;
+  transition: border-color 0.18s ease, box-shadow 0.18s ease;
+}
+.hilfe-form-row input:focus,
+.hilfe-form-row select:focus,
+.hilfe-form-row textarea:focus { border-color: var(--primary-color); box-shadow: 0 0 0 3px rgba(127, 169, 61, 0.13); }
+.hilfe-form-row textarea { resize: vertical; min-height: 6.5rem; line-height: 1.5; }
+
+.hilfe-sla-note {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  background: rgba(127, 169, 61, 0.1);
+  border: 1px solid rgba(127, 169, 61, 0.28);
+  border-radius: 10px;
+  padding: 0.7rem 0.9rem;
+  font-size: 0.84rem;
+  color: var(--text-primary);
+}
+.hilfe-sla-note svg { width: 17px; height: 17px; color: var(--primary-color); flex-shrink: 0; }
+.hilfe-sla-note strong { color: var(--primary-color); }
+
+.hilfe-form-actions { display: flex; align-items: center; justify-content: flex-end; gap: 1rem; margin-top: 0.25rem; }
+
+/* Erfolg */
+.hilfe-sent { text-align: center; padding: 0.5rem 0; }
+.hilfe-sent-icon {
+  width: 3.5rem; height: 3.5rem; margin: 0 auto 1rem;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(127, 169, 61, 0.15);
+  border: 1px solid rgba(127, 169, 61, 0.3);
+}
+.hilfe-sent-icon svg { width: 1.8rem; height: 1.8rem; color: var(--primary-color); }
+.hilfe-sent h3 { font-size: 1.25rem; color: var(--text-primary); margin: 0 0 0.5rem; }
+.hilfe-sent p { color: var(--text-secondary); font-size: 0.9rem; margin: 0 0 1.4rem; }
+.hilfe-sent strong { color: var(--primary-color); }
+
+/* ---------- RESPONSIVE ---------- */
+@media (max-width: 980px) {
+  .hilfe-layout { grid-template-columns: 1fr; gap: 1.25rem; }
+  .hilfe-nav {
+    position: static;
+    flex-direction: row;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  .hilfe-nav-label { width: 100%; padding-left: 0.25rem; }
+  .hilfe-nav-item { width: auto; background: var(--bg-secondary); border: 1px solid var(--border-color); }
+  .hilfe-nav-item.active::before { display: none; }
+  .hilfe-nav-item.active { border-color: var(--primary-color); }
+  .hilfe-nav-count { display: none; }
+  .hilfe-footer-support { flex-direction: column; align-items: flex-start; gap: 1rem; }
+  .hilfe-footer-btn { width: 100%; }
+}
+@media (max-width: 640px) {
+  .hilfe-hero { padding: 2rem 1.5rem; }
+  .hilfe-hero h2 { font-size: 1.6rem; }
+  .hilfe-section { padding: 1.25rem; }
+  .hilfe-form-actions .btn-primary-new { width: 100%; justify-content: center; }
+}

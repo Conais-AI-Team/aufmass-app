@@ -144,12 +144,21 @@ export function clearAuthData(): void {
   localStorage.removeItem(USER_KEY);
 }
 
+function getRuntimeBranchSlug(): string | null {
+  if (typeof window === 'undefined') return null;
+  const hostname = window.location.hostname;
+  const match = hostname.match(/^([a-z0-9-]+)\.cnsform\.com$/i) || hostname.match(/^([a-z0-9-]+)\.localhost$/i);
+  return match ? match[1].toLowerCase() : null;
+}
+
 // Helper to get auth headers
 function getAuthHeaders(): HeadersInit {
   const token = getStoredToken();
+  const branchSlug = getRuntimeBranchSlug();
   return {
     'Content-Type': 'application/json',
-    ...(token ? { 'Authorization': `Bearer ${token}` } : {})
+    ...(token ? { 'Authorization': `Bearer ${token}` } : {}),
+    ...(branchSlug ? { 'X-Branch-Slug': branchSlug } : {})
   };
 }
 
@@ -702,6 +711,7 @@ export interface MontageteamStats {
   created_at: string;
   count: number;
   completed: number;
+  reklamation: number;
   draft: number;
 }
 
@@ -1809,4 +1819,46 @@ export function num(v: number | string | null | undefined): number {
   if (v === null || v === undefined) return 0;
   return typeof v === 'string' ? parseFloat(v) : v;
 }
+
+// ============ SUPPORT ============
+export interface SupportTicketPayload {
+  subject: string;
+  category: string;
+  message: string;
+}
+
+// Creates a support ticket (persisted to DB + best-effort notification mail).
+export const submitSupportTicket = (
+  payload: SupportTicketPayload
+): Promise<{ success: boolean; ticketId: number; slaHours: number; message: string }> =>
+  api.post('/support/ticket', payload);
+
+export type SupportTicketStatus = 'offen' | 'in_arbeit' | 'geloest';
+
+export interface SupportTicket {
+  id: number;
+  branch_slug: string | null;
+  user_id: number | null;
+  user_name: string | null;
+  user_email: string | null;
+  category: string | null;
+  subject: string;
+  message: string;
+  status: SupportTicketStatus;
+  resolution_message: string | null;
+  resolved_by: number | null;
+  resolved_at: string | null;
+  created_at: string;
+}
+
+// Admin-branch only: list all tickets across branches.
+export const getSupportTickets = (status?: SupportTicketStatus): Promise<SupportTicket[]> =>
+  api.get(`/support/tickets${status ? `?status=${status}` : ''}`);
+
+// Admin-branch only: change status / resolve (resolving e-mails the requester).
+export const updateSupportTicket = (
+  id: number,
+  payload: { status: SupportTicketStatus; resolution_message?: string }
+): Promise<{ success: boolean; mailed: boolean }> =>
+  api.put(`/support/tickets/${id}`, payload);
 
