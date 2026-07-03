@@ -927,7 +927,12 @@ app.use('/api', detectBranch);
 //
 // Returns the slug string on success, or null after sending a 400 response
 // (caller MUST `return` immediately when null).
-function resolveBranchSlug(req, res, action = 'access') {
+// Pure branch resolver — NO res, NO side effects. Returns the slug or null.
+// Order: subdomain (req.branchId) → X-Branch-Slug header → ?branch query →
+// the authenticated user's OWN branch (branch-scoped accounts work without a
+// subdomain). Safe to call from contexts where `res` is not in scope, e.g.
+// multer storage callbacks (whose signature is (req, file, cb)).
+function branchFromReq(req) {
   if (req.branchId) return req.branchId;
   const headerBranch = typeof req.headers['x-branch-slug'] === 'string'
     ? req.headers['x-branch-slug'].toLowerCase().trim()
@@ -935,12 +940,13 @@ function resolveBranchSlug(req, res, action = 'access') {
   if (headerBranch && /^[a-z0-9-]+$/.test(headerBranch)) return headerBranch;
   const q = req.query && (req.query.branch || req.query.branchSlug);
   if (q && typeof q === 'string') return q.toLowerCase();
-  // Fall back to the authenticated user's OWN branch. This is NOT the old
-  // silent 'koblenz' default (which corrupted a real branch) — it's the branch
-  // the logged-in user actually belongs to, so branch-scoped accounts work even
-  // without a subdomain/header (e.g. plain localhost, cross-origin API, proxy
-  // that strips the header). Global admins have branch_id NULL and still 400.
   if (req.user && req.user.branch_id) return req.user.branch_id;
+  return null;
+}
+
+function resolveBranchSlug(req, res, action = 'access') {
+  const slug = branchFromReq(req);
+  if (slug) return slug;
   res.status(400).json({
     error: `Branch context required. Bitte über die Filiale-Subdomain (z.B. koblenz.cnsform.com) ${action === 'write' ? 'speichern' : 'aufrufen'} oder ?branch=<slug> Parameter angeben.`
   });
@@ -7857,8 +7863,12 @@ app.put('/api/branch/terms', authenticateToken, requireAdmin, async (req, res) =
 const branchPdfUpload = multer({
   storage: multer.diskStorage({
     destination: (req, file, cb) => {
-      const branchSlug = resolveBranchSlug(req, res);
-    if (!branchSlug) return;
+      // `res` is NOT in scope inside a multer storage callback — referencing it
+      // (as the old resolveBranchSlug(req, res) did) threw ReferenceError and
+      // crashed every upload (500 local / 502 live). Resolve the branch purely
+      // and signal errors via cb().
+      const branchSlug = branchFromReq(req);
+      if (!branchSlug) return cb(new Error('Branch-Kontext erforderlich — bitte über die Filiale-Subdomain hochladen'));
       const dir = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       cb(null, dir);
