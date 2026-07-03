@@ -170,7 +170,12 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
         const { getLeadPdfUrl } = await import('../services/api');
         window.open(getLeadPdfUrl(leadId), '_blank', 'noopener');
       }
-      toast.success('Per Post', 'PDF zum Drucken geöffnet. Status bleibt unverändert.');
+      toast.success('Per Post', 'PDF zum Drucken geöffnet.');
+      // Postal delivery is a real "sent" action too — run the same post-send
+      // promotion as e-mail (e.g. Angebot → angebot_versendet), so status progress
+      // no longer depends on SMTP being configured. onSent only advances the
+      // relevant types (Angebot); for others it just refreshes the list.
+      onSent?.();
       onClose();
       return;
     }
