@@ -1338,11 +1338,19 @@ Aylux Team`;
       window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
       return;
     }
-    // No snapshot yet — render once, store as snapshot, then open it
+    // No snapshot yet — render once, store as snapshot, then open it. If nothing
+    // could be generated (e.g. an Angebot-PDF was requested but this form has no
+    // linked Angebot/lead), tell the user instead of opening a 404 snapshot URL.
     setPdfGenerating(formId);
     try {
-      await captureSnapshot(formId, docType);
-      window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
+      const created = await captureSnapshot(formId, docType);
+      if (created) {
+        window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
+      } else if (docType === 'angebot') {
+        toast.warning('Kein Angebot', 'Für diesen Vorgang wurde noch kein Angebot erstellt.');
+      } else {
+        toast.error('Fehler', 'PDF konnte nicht erstellt werden');
+      }
     } catch (e) {
       console.error('Failed to render snapshot on demand:', e);
       toast.error('Fehler', 'PDF konnte nicht erstellt werden');
@@ -1353,10 +1361,10 @@ Aylux Team`;
 
   // Generate the current state's PDF and store it as an immutable snapshot.
   // Best-effort — failures are logged, never block the status update.
-  const captureSnapshot = async (formId: number, docType: FormPdfDocType): Promise<void> => {
+  const captureSnapshot = async (formId: number, docType: FormPdfDocType): Promise<boolean> => {
     if (docType === 'rechnung') {
       // Rechnung-PDF generator yet to be built (handled by separate branch).
-      return;
+      return false;
     }
     try {
       let pdfBlob: Blob | undefined;
@@ -1366,8 +1374,8 @@ Aylux Team`;
         // Aufmaß generator. Find the linked lead → fetch its angebote → render.
         const formData = await getForm(formId);
         if (!formData.lead_id) {
-          // No lead linked yet — nothing to snapshot
-          return;
+          // No lead linked yet — no Angebot exists → caller shows a clear message
+          return false;
         }
         const { generateAngebotPDF } = await import('../utils/angebotPdfGenerator');
         const leadDetail = await api.get<{
@@ -1447,9 +1455,12 @@ Aylux Team`;
           [formId]: [...(prev[formId] || []).filter(s => s.document_type !== docType),
                      { document_type: docType, created_at: new Date().toISOString() }]
         }));
+        return true;
       }
+      return false;
     } catch (err) {
       console.warn(`Snapshot capture failed (${docType}):`, err);
+      return false;
     }
   };
 
