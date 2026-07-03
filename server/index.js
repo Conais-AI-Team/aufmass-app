@@ -939,7 +939,10 @@ function branchFromReq(req) {
     : null;
   if (headerBranch && /^[a-z0-9-]+$/.test(headerBranch)) return headerBranch;
   const q = req.query && (req.query.branch || req.query.branchSlug);
-  if (q && typeof q === 'string') return q.toLowerCase();
+  // Validate the query-param slug with the same regex as the header — it flows
+  // into filesystem paths (branch-uploads/<slug>), so an unchecked value like
+  // "../.." would be a path-traversal sink.
+  if (q && typeof q === 'string' && /^[a-z0-9-]+$/.test(q.toLowerCase())) return q.toLowerCase();
   if (req.user && req.user.branch_id) return req.user.branch_id;
   return null;
 }
@@ -7869,6 +7872,9 @@ const branchPdfUpload = multer({
       // and signal errors via cb().
       const branchSlug = branchFromReq(req);
       if (!branchSlug) return cb(new Error('Branch-Kontext erforderlich — bitte über die Filiale-Subdomain hochladen'));
+      // Defense-in-depth: the slug is a path segment — never let a stray value
+      // escape the base upload directory.
+      if (!/^[a-z0-9-]+$/.test(branchSlug)) return cb(new Error('Ungültiger Branch'));
       const dir = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       cb(null, dir);
