@@ -1,4 +1,5 @@
 import { jsPDF } from 'jspdf';
+import { drawAyluxPdfLogo, loadAyluxPdfLogo } from './pdfLogo';
 import { FormData } from '../types';
 import productConfigData from '../config/productConfig.json';
 import type { ProductConfig, FieldConfig } from '../types/productConfig';
@@ -270,6 +271,7 @@ export const generatePDF = async (
   const companyInfo = options?.companyInfo || (await getCompanyInfoForPdf()) || undefined;
   const companyName = companyInfo?.company_name || 'AYLUX Sonnenschutzsysteme';
   const pdf = new jsPDF();
+  const brandLogo = await loadAyluxPdfLogo();
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const margin = 20;
@@ -287,14 +289,7 @@ export const generatePDF = async (
 
   // ============ MODERN LETTERHEAD HEADER ============
   // Logo (sabit) — sağ üst
-  pdf.setFillColor(127, 169, 61);
-  pdf.rect(pageWidth - 60, 10, 40, 20, 'F');
-  pdf.setTextColor(255, 255, 255);
-  pdf.setFontSize(15);
-  pdf.setFont('helvetica', 'bold');
-  pdf.text('AYLUX', pageWidth - 52, 21);
-  pdf.setFontSize(6);
-  pdf.text('SONNENSCHUTZSYSTEME', pageWidth - 56, 26);
+  drawAyluxPdfLogo(pdf, brandLogo, pageWidth - 65, 12, 45);
 
   // Big bold company name — top-left
   if (companyInfo && companyInfo.company_name) {

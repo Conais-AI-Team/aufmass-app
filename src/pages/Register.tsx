@@ -69,6 +69,7 @@ const Register = () => {
         <div className="login-container">
           <div className="login-header">
             <div className="login-logo">
+              <img src="/aylux-sidebar-logo.png" alt="AYLUX Sonnenschutzsysteme" />
               <div className="logo-icon">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                   <path d="M12 2L2 7l10 5 10-5-10-5z" />
@@ -93,6 +94,7 @@ const Register = () => {
         <div className="login-container">
           <div className="login-header">
             <div className="login-logo">
+              <img src="/aylux-sidebar-logo.png" alt="AYLUX Sonnenschutzsysteme" />
               <div className="logo-icon" style={{ background: 'rgba(239, 68, 68, 0.2)' }}>
                 <svg viewBox="0 0 24 24" fill="none" stroke="#ef4444" strokeWidth="2">
                   <circle cx="12" cy="12" r="10" />
@@ -121,6 +123,7 @@ const Register = () => {
       <div className="login-container">
         <div className="login-header">
           <div className="login-logo">
+            <img src="/aylux-sidebar-logo.png" alt="AYLUX Sonnenschutzsysteme" />
             <div className="logo-icon">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M12 2L2 7l10 5 10-5-10-5z" />

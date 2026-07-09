@@ -176,6 +176,7 @@ const AbnahmeSignPage = () => {
         <div className="abnahme-sign-header">
           <div className="abnahme-logo-bar">
             <div className="abnahme-logo">
+              <img src="/aylux-sidebar-logo.png" alt="AYLUX Sonnenschutzsysteme" />
               <span className="logo-text">AYLUX</span>
               <span className="logo-sub">SONNENSCHUTZSYSTEME</span>
             </div>

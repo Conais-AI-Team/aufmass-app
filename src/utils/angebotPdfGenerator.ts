@@ -5,6 +5,7 @@ import { drawCoverPage } from './pdf/pdfCover';
 import { drawProductDetailPage } from './pdf/pdfProductDetail';
 import { drawAgbPages } from './pdf/pdfAgb';
 import { mergePdf } from './pdf/pdfMerger';
+import { drawAyluxPdfLogo, loadAyluxPdfLogo } from './pdfLogo';
 import { getCachedProductImages, fetchImageAsBase64 } from './productImagesCache';
 import { getCachedBranchTerms } from './branchTermsCache';
 import { getProductCoverPdf, fetchBranchPdfBytes } from '../services/api';
@@ -113,6 +114,7 @@ export const generateAngebotPDF = async (
   const companyName = companyInfo?.company_name || 'AYLUX Sonnenschutzsysteme';
   const branchTerms = await getCachedBranchTerms();
   const pdf = new jsPDF();
+  const brandLogo = await loadAyluxPdfLogo();
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const margin = 20;
@@ -141,14 +143,7 @@ export const generateAngebotPDF = async (
     yPos = 20;
 
     // AYLUX logo block — top-right
-    pdf.setFillColor(127, 169, 61);
-    pdf.rect(pageWidth - 60, 10, 40, 20, 'F');
-    pdf.setTextColor(255, 255, 255);
-    pdf.setFontSize(15);
-    pdf.setFont('helvetica', 'bold');
-    pdf.text('AYLUX', pageWidth - 52, 21);
-    pdf.setFontSize(6);
-    pdf.text('SONNENSCHUTZSYSTEME', pageWidth - 56, 26);
+    drawAyluxPdfLogo(pdf, brandLogo, pageWidth - 65, 12, 45);
 
     let c1Y = 33;
     let c2Y = 33;
@@ -676,7 +671,8 @@ export const generateAngebotPDF = async (
       documentNumber: data.angebot_nummer,
       documentDate: data.created_at ? new Date(data.created_at) : new Date(),
       coverImages,
-      companyInfo: companyInfo || null
+      companyInfo: companyInfo || null,
+      brandLogo
     });
 
     if (item.description && item.description.trim()) {

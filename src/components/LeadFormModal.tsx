@@ -109,6 +109,7 @@ interface ProductRow {
   // Last lookup status (drives the "Preis fehlt" / "auf X×Y aufgerundet" badge)
   lookup_status?: 'matched' | 'rounded' | 'price_missing' | 'no_match';
   rounded_to?: Record<string, number>;
+  price_variant?: Record<string, unknown> | null;
 }
 
 // MODÜL B v3: All dimensions are in mm (productConfig.json reference).
@@ -147,6 +148,75 @@ interface LeadExtra {
 }
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
+
+const buildPriceVariantFromSpecifications = (
+  category: string | undefined,
+  productType: string | undefined,
+  specs: Record<string, unknown>
+): Record<string, unknown> | null => {
+  const variant: Record<string, unknown> = {};
+  const scope = `${category || ''} ${productType || ''}`.toLowerCase();
+  const isRoof = scope.includes('überdachung') || scope.includes('uberdachung') || scope.includes('glasdach');
+  const isFreestandingConstruction = scope.includes('freistehende konstruktion');
+  const normalizeZone = (value: unknown) => {
+    const lower = String(value || '').toLowerCase();
+    if (lower.includes('2a') || lower.includes('3')) return '2a_3';
+    if (lower.includes('1a') || lower.includes('2')) return '1a_2';
+    if (lower.includes('1')) return '1';
+    return '';
+  };
+  const normalizeBasis = (value: unknown) => {
+    const lower = String(value || '').toLowerCase();
+    if (lower.includes('exkl')) return 'exkl_dacheindeckung';
+    if (lower.includes('inkl')) return 'inkl_dacheindeckung';
+    return '';
+  };
+  const normalizeElementGlass = (value: unknown) => {
+    const lower = String(value || '').toLowerCase();
+    if (!lower) return '';
+    if (lower.includes('isolier')) return 'isolierglas';
+    if (lower.includes('matt') || lower.includes('milch')) return 'vsg_44_2_matt';
+    if (lower.includes('klar') || lower.includes('vsg')) return 'vsg_44_2_klar';
+    if (lower.includes('aluminium') || lower.includes('planken')) return 'aluminium';
+    return '';
+  };
+
+  if (isRoof && !isFreestandingConstruction) {
+    const zone = normalizeZone(specs.schneelastzone);
+    const basis = normalizeBasis(specs.preisBasis) || 'inkl_dacheindeckung';
+    if (zone) variant.zone = zone;
+    if (basis) variant.price_basis = basis;
+  }
+
+  const eindeckung = String(specs.eindeckung || '').trim();
+  if (isRoof && !isFreestandingConstruction && eindeckung) {
+    const lower = eindeckung.toLowerCase();
+    if (lower.includes('pcs') || lower.includes('poly')) {
+      variant.covering = 'polycarbonat';
+      variant.glass = lower.includes('ir') ? 'ir_gold' : (lower.includes('milch') ? 'opal_milch' : 'klar_opal');
+    } else if (lower.includes('glas') || lower.includes('klar') || lower.includes('milch') || lower.includes('sonnenschutz')) {
+      variant.covering = 'glas';
+      if (lower.includes('sonnenschutz')) variant.glass = 'sonnenschutz';
+      else if (lower.includes('milch') || lower.includes('matt')) variant.glass = 'matt_milch';
+      else variant.glass = 'klar';
+    } else {
+      variant.covering = eindeckung;
+    }
+  }
+
+  if (!isRoof) {
+    const glass = normalizeElementGlass(specs.glasart || specs.glass || specs.glas || specs.eindeckung);
+    if (glass) variant.glass = glass;
+  }
+
+  if (isFreestandingConstruction && specs.fundamente) {
+    variant.foundations = String(specs.fundamente).toLowerCase().includes('mit');
+  }
+
+  if (specs.spuren) variant.tracks = specs.spuren;
+
+  return Object.keys(variant).length > 0 ? variant : null;
+};
 
 export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, editAngebotId, newAngebotForLeadId, fromAufmassFormId }: LeadFormModalProps) {
   // Customer info
@@ -393,10 +463,12 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         const profile = getSizeProfileForType(entry.category, entry.productType);
         const axes = profile ? PROFILE_AXES[profile] : [];
         const sizeValues = profile ? extractSizeValues(entry.specifications, profile) : {};
+        const priceVariant = buildPriceVariantFromSpecifications(entry.category, entry.productType, entry.specifications);
 
         r.size_profile = profile;
         r.size_axes = axes;
         r.size_values = sizeValues;
+        r.price_variant = priceVariant;
         r.source_category = entry.category;
         r.source_product_type = entry.productType;
 
@@ -419,10 +491,15 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
         r.product_name = entry.modelName;
 
+        const menge = Number(entry.specifications.menge);
+        if (Number.isFinite(menge) && menge > 0) {
+          r.quantity = menge;
+        }
+
         // Generic N-axis lookup via the new endpoint (handles all 8 profiles)
         if (Object.keys(sizeValues).length > 0) {
           try {
-            const result = await lookupLeadProductBySize(entry.modelName, sizeValues);
+            const result = await lookupLeadProductBySize(entry.modelName, sizeValues, priceVariant);
             if (result.matched && result.lead_product) {
               const lp = result.lead_product;
               if (lp.price != null && lp.price > 0) {
@@ -460,6 +537,22 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
             }
           } catch (e) {
             console.warn('Generic lookup failed for', entry.modelName, e);
+            r.lookup_status = 'no_match';
+          }
+        } else {
+          try {
+            const dims = await loadDimensions(entry.modelName);
+            r.pricing_type = dims.pricing_type;
+            r.dimensions = dims.dimensions || {};
+            r.description = dims.description;
+            r.custom_fields = dims.custom_fields;
+            if (dims.pricing_type === 'unit') {
+              r.unit_label = dims.unit_label;
+              r.price = dims.unit_price || 0;
+              r.lookup_status = r.price > 0 ? 'matched' : 'price_missing';
+            }
+          } catch (e) {
+            console.warn('Unit lookup failed for', entry.modelName, e);
             r.lookup_status = 'no_match';
           }
         }

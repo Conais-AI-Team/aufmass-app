@@ -124,6 +124,7 @@ export interface Stats {
 // ============ AUTH HELPERS ============
 const TOKEN_KEY = 'aylux_auth_token';
 const USER_KEY = 'aylux_auth_user';
+const BRANCH_KEY = 'aylux_branch_slug';
 
 export function getStoredToken(): string | null {
   return localStorage.getItem(TOKEN_KEY);
@@ -144,11 +145,29 @@ export function clearAuthData(): void {
   localStorage.removeItem(USER_KEY);
 }
 
+function normalizeBranchSlug(value: string | null | undefined): string | null {
+  const slug = value?.trim().toLowerCase();
+  return slug && /^[a-z0-9-]+$/.test(slug) ? slug : null;
+}
+
 function getRuntimeBranchSlug(): string | null {
   if (typeof window === 'undefined') return null;
   const hostname = window.location.hostname;
   const match = hostname.match(/^([a-z0-9-]+)\.cnsform\.com$/i) || hostname.match(/^([a-z0-9-]+)\.localhost$/i);
-  return match ? match[1].toLowerCase() : null;
+  const hostBranch = normalizeBranchSlug(match?.[1]);
+  if (hostBranch) return hostBranch;
+
+  const params = new URLSearchParams(window.location.search);
+  const queryBranch = normalizeBranchSlug(params.get('branch') || params.get('branchSlug'));
+  if (queryBranch) {
+    window.localStorage.setItem(BRANCH_KEY, queryBranch);
+    return queryBranch;
+  }
+
+  const storedBranch = normalizeBranchSlug(window.localStorage.getItem(BRANCH_KEY));
+  if (storedBranch) return storedBranch;
+
+  return null;
 }
 
 // Helper to get auth headers
@@ -1438,15 +1457,17 @@ export interface LeadProductLookupResult {
     unit_label: string | null;
     description: string | null;
     custom_fields: string | null;
+    price_variant?: Record<string, unknown> | null;
   };
 }
 
 /** Generic lookup that supports any size profile (P1–P8). Pass size_values in mm. */
 export const lookupLeadProductBySize = (
   productName: string,
-  sizeValues: Record<string, number>
+  sizeValues: Record<string, number>,
+  priceVariant?: Record<string, unknown> | null
 ): Promise<LeadProductLookupResult> =>
-  api.post(`/lead-products/${encodeURIComponent(productName)}/lookup`, { size_values: sizeValues });
+  api.post(`/lead-products/${encodeURIComponent(productName)}/lookup`, { size_values: sizeValues, price_variant: priceVariant || null });
 
 /** Upsert a price from the Angebot modal — creates row if missing, updates if exists. */
 export const upsertLeadProductFromAngebot = (input: {
@@ -1456,6 +1477,7 @@ export const upsertLeadProductFromAngebot = (input: {
   category?: string;
   product_type?: string;
   size_profile?: string;
+  price_variant?: Record<string, unknown> | null;
 }): Promise<{ success: boolean; action: 'inserted' | 'updated'; id: number }> =>
   api.post('/lead-products/upsert-from-angebot', input);
 

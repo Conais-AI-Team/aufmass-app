@@ -639,8 +639,10 @@ async function initializeTables() {
     // Existing Köln test data is preserved; we only ADD missing rows from productConfig.json.
     await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_values JSONB`);
     await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_profile VARCHAR(10)`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS price_variant JSONB`);
     await pool.query(`ALTER TABLE aufmass_lead_products ALTER COLUMN price DROP NOT NULL`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_products_size_values ON aufmass_lead_products USING GIN (size_values)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_products_price_variant ON aufmass_lead_products USING GIN (price_variant)`);
     console.log('Modul B v3 columns ready (size_values, size_profile)');
 
     // Eager seed runs in the background so server startup is not blocked
@@ -740,6 +742,12 @@ async function seedLeadProductsFromConfig() {
                 SELECT 1 FROM aufmass_lead_products
                 WHERE branch_id = $1::varchar AND product_name = $4::varchar
                   AND breite = $5::int AND tiefe = $6::int
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM aufmass_lead_products
+                WHERE branch_id = $1::varchar AND product_name = $4::varchar
+                  AND price_variant IS NOT NULL
+                  AND COALESCE(is_active, true) = true
               )
               RETURNING id
             `, [branchSlug, category, productType, modelName, breiteMm, tiefeMm,
@@ -954,6 +962,67 @@ function resolveBranchSlug(req, res, action = 'access') {
     error: `Branch context required. Bitte über die Filiale-Subdomain (z.B. koblenz.cnsform.com) ${action === 'write' ? 'speichern' : 'aufrufen'} oder ?branch=<slug> Parameter angeben.`
   });
   return null;
+}
+
+function normalizeJsonObjectInput(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (typeof value === 'object' && !Array.isArray(value)) {
+    const cleaned = Object.fromEntries(
+      Object.entries(value)
+        .filter(([, v]) => v !== undefined && v !== null && String(v).trim() !== '')
+        .map(([k, v]) => [k, typeof v === 'string' ? v.trim() : v])
+    );
+    return Object.keys(cleaned).length > 0 ? cleaned : null;
+  }
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? normalizeJsonObjectInput(parsed)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function normalizePriceVariantInput(input = {}) {
+  const direct = normalizeJsonObjectInput(input.price_variant || input.priceVariant || input.variant);
+  if (direct) return direct;
+
+  const aliases = {
+    zone: input.zone || input.schneelastzone || input.snow_zone || input.snowZone,
+    covering: input.covering || input.eindeckung || input.coverage,
+    glass: input.glass || input.glas || input.glasart || input.glass_type || input.glassType,
+    price_basis: input.price_basis || input.preisBasis || input.preisbasis || input.priceBasis,
+    tracks: input.tracks || input.spuren,
+  };
+  return normalizeJsonObjectInput(aliases);
+}
+
+function priceVariantSqlFilter(priceVariant, startParamIndex) {
+  if (!priceVariant) {
+    return { sql: '', params: [] };
+  }
+  return {
+    sql: ` AND COALESCE(price_variant, '{}'::jsonb) @> $${startParamIndex}::jsonb`,
+    params: [JSON.stringify(priceVariant)]
+  };
+}
+
+async function resolveProductPricingBranchSlug(req) {
+  const q = req.query && (req.query.branch || req.query.branchSlug);
+  const requested = req.branchId || (typeof q === 'string' ? q.toLowerCase() : null)
+    || (req.user && req.user.branch_id) || null;
+  if (requested) return requested;
+
+  const fallback = await pool.query(`
+    SELECT branch_id
+    FROM aufmass_lead_products
+    WHERE branch_id IS NOT NULL
+    GROUP BY branch_id
+    ORDER BY CASE WHEN branch_id = 'koblenz' THEN 0 ELSE 1 END, branch_id
+    LIMIT 1
+  `);
+  return fallback.rows[0]?.branch_id || 'koblenz';
 }
 
 // Helper: verify a form belongs to the requesting branch (returns form or null)
@@ -5270,6 +5339,69 @@ app.get('/api/boldsign/callback-log', (req, res) => {
 
 // ==================== LEAD / ANGEBOT API ====================
 
+// Lightweight product overview for ProductPricing.
+// Returns one row per product_name instead of every price cell.
+app.get('/api/lead-products/summary', authenticateToken, async (req, res) => {
+  try {
+    const branchSlug = await resolveProductPricingBranchSlug(req);
+    const productsResult = await pool.query(
+      `SELECT
+         MIN(id) AS id,
+         product_name,
+         branch_id,
+         MIN(category) FILTER (WHERE category IS NOT NULL) AS category,
+         MIN(product_type) FILTER (WHERE product_type IS NOT NULL) AS product_type,
+         MIN(pricing_type) FILTER (WHERE pricing_type IS NOT NULL) AS pricing_type,
+         MIN(unit_label) FILTER (WHERE unit_label IS NOT NULL) AS unit_label,
+         MIN(description) FILTER (WHERE description IS NOT NULL) AS description,
+         MIN(custom_fields) FILTER (WHERE custom_fields IS NOT NULL) AS custom_fields,
+         COUNT(*)::int AS price_count
+       FROM aufmass_lead_products
+       WHERE branch_id = $1
+         AND COALESCE(is_active, true) = true
+       GROUP BY product_name, branch_id
+       ORDER BY product_name`,
+      [branchSlug]
+    );
+
+    const variantsResult = await pool.query(
+      `SELECT product_name,
+              COALESCE(price_variant, '{}'::jsonb)::text AS variant_key,
+              COUNT(*)::int AS count
+       FROM aufmass_lead_products
+       WHERE branch_id = $1
+         AND COALESCE(is_active, true) = true
+       GROUP BY product_name, COALESCE(price_variant, '{}'::jsonb)
+       ORDER BY product_name, variant_key`,
+      [branchSlug]
+    );
+
+    const variantsByProduct = new Map();
+    for (const row of variantsResult.rows) {
+      const list = variantsByProduct.get(row.product_name) || [];
+      list.push({
+        key: row.variant_key === '{}' ? '__default__' : row.variant_key,
+        count: row.count
+      });
+      variantsByProduct.set(row.product_name, list);
+    }
+
+    res.json(productsResult.rows.map(row => ({
+      ...row,
+      id: Number(row.id),
+      breite: 0,
+      tiefe: 0,
+      price: 0,
+      pricing_type: row.pricing_type || 'dimension',
+      variant_options: variantsByProduct.get(row.product_name) || [{ key: '__default__', count: row.price_count }],
+      is_summary: true
+    })));
+  } catch (err) {
+    console.error('Get lead products summary error:', err);
+    res.status(500).json({ error: 'Failed to fetch product summary' });
+  }
+});
+
 // Get all lead products (price matrix)
 app.get('/api/lead-products', authenticateToken, async (req, res) => {
   try {
@@ -5283,17 +5415,53 @@ app.get('/api/lead-products', authenticateToken, async (req, res) => {
       ? await pool.query(
           `SELECT * FROM aufmass_lead_products
            WHERE branch_id = $1
+             AND COALESCE(is_active, true) = true
            ORDER BY product_name, breite, tiefe`,
           [branchSlug]
         )
       : await pool.query(
           `SELECT * FROM aufmass_lead_products
+           WHERE COALESCE(is_active, true) = true
            ORDER BY branch_id NULLS FIRST, product_name, breite, tiefe`
         );
     res.json(result.rows);
   } catch (err) {
     console.error('Get lead products error:', err);
     res.status(500).json({ error: 'Failed to fetch products' });
+  }
+});
+
+app.get('/api/lead-products/:productName/matrix', authenticateToken, async (req, res) => {
+  try {
+    const { productName } = req.params;
+    const branchSlug = await resolveProductPricingBranchSlug(req);
+    const variant = typeof req.query.variant === 'string' ? req.query.variant : '';
+    const params = [branchSlug, productName];
+    let variantSql = '';
+
+    if (variant) {
+      if (variant === '__default__') {
+        variantSql = ` AND price_variant IS NULL`;
+      } else {
+        params.push(variant);
+        variantSql = ` AND COALESCE(price_variant, '{}'::jsonb) = $3::jsonb`;
+      }
+    }
+
+    const result = await pool.query(
+      `SELECT *
+       FROM aufmass_lead_products
+       WHERE branch_id = $1
+         AND product_name = $2
+         AND COALESCE(is_active, true) = true
+         ${variantSql}
+       ORDER BY breite, tiefe, id`,
+      params
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Get lead product matrix error:', err);
+    res.status(500).json({ error: 'Failed to fetch product matrix' });
   }
 });
 
@@ -5311,6 +5479,7 @@ app.post('/api/lead-products', authenticateToken, async (req, res) => {
     }
 
     const { product_name, breite, tiefe, price, category, product_type, pricing_type, unit_label } = req.body;
+    const priceVariant = normalizePriceVariantInput(req.body);
 
     if (!product_name || price === undefined) {
       console.log('Missing fields:', { product_name, price });
@@ -5330,8 +5499,9 @@ app.post('/api/lead-products', authenticateToken, async (req, res) => {
     const existing = await pool.query(
       `SELECT id FROM aufmass_lead_products
        WHERE product_name = $1 AND breite = $2 AND tiefe = $3
-       AND (branch_id = $4 OR (branch_id IS NULL AND $4 IS NULL))`,
-      [product_name, effectiveBreite, effectiveTiefe, req.branchId || null]
+       AND (branch_id = $4 OR (branch_id IS NULL AND $4 IS NULL))
+       AND COALESCE(price_variant, '{}'::jsonb) = COALESCE($5::jsonb, '{}'::jsonb)`,
+      [product_name, effectiveBreite, effectiveTiefe, req.branchId || null, priceVariant ? JSON.stringify(priceVariant) : null]
     );
 
     if (existing.rows.length > 0) {
@@ -5375,6 +5545,11 @@ app.post('/api/lead-products', authenticateToken, async (req, res) => {
       values.push(cfJson);
       paramIdx++;
     }
+    if (priceVariant) {
+      columns.push('price_variant');
+      values.push(JSON.stringify(priceVariant));
+      paramIdx++;
+    }
 
     const placeholders = values.map((_, i) => `$${i + 1}`).join(', ');
     const result = await pool.query(
@@ -5399,6 +5574,7 @@ app.put('/api/lead-products/:id', authenticateToken, async (req, res) => {
 
     const { id } = req.params;
     const { product_name, breite, tiefe, price, pricing_type, unit_label } = req.body;
+    const priceVariant = normalizePriceVariantInput(req.body);
 
     const q = req.query && (req.query.branch || req.query.branchSlug);
     const branchSlug = req.branchId || (typeof q === 'string' ? q.toLowerCase() : null);
@@ -5449,6 +5625,10 @@ app.put('/api/lead-products/:id', authenticateToken, async (req, res) => {
       const cfJson = typeof req.body.custom_fields === 'string' ? req.body.custom_fields : JSON.stringify(req.body.custom_fields);
       updates.push(`custom_fields = $${paramIdx++}`);
       values.push(cfJson);
+    }
+    if (req.body.price_variant !== undefined || req.body.priceVariant !== undefined || req.body.variant !== undefined) {
+      updates.push(`price_variant = $${paramIdx++}::jsonb`);
+      values.push(priceVariant ? JSON.stringify(priceVariant) : null);
     }
 
     if (updates.length === 0) {
@@ -5524,11 +5704,11 @@ app.delete('/api/lead-products/:id', authenticateToken, async (req, res) => {
 // Get unique product names
 app.get('/api/lead-products/names', authenticateToken, async (req, res) => {
   try {
-    const branchSlug = resolveBranchSlug(req, res);
-    if (!branchSlug) return;
+    const branchSlug = await resolveProductPricingBranchSlug(req);
     const result = await pool.query(
       `SELECT DISTINCT product_name FROM aufmass_lead_products
        WHERE branch_id = $1
+         AND COALESCE(is_active, true) = true
        ORDER BY product_name`,
       [branchSlug]
     );
@@ -5549,8 +5729,8 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
   try {
     const { productName } = req.params;
     const { size_values } = req.body || {};
-    const branchSlug = resolveBranchSlug(req, res);
-    if (!branchSlug) return;
+    const priceVariant = normalizePriceVariantInput(req.body || {});
+    const branchSlug = await resolveProductPricingBranchSlug(req);
 
     if (!size_values || typeof size_values !== 'object') {
       return res.status(400).json({ error: 'size_values object required in body' });
@@ -5560,11 +5740,13 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
 
     // Pricing-type='unit' fallback (no dimensions involved)
     if (axes.length === 0) {
+      const variantFilter = priceVariantSqlFilter(priceVariant, 3);
       const r = await pool.query(
         `SELECT * FROM aufmass_lead_products
          WHERE branch_id = $1 AND product_name = $2
-           AND pricing_type = 'unit' AND is_active = true LIMIT 1`,
-        [branchSlug, productName]
+           AND pricing_type = 'unit' AND is_active = true${variantFilter.sql}
+         LIMIT 1`,
+        [branchSlug, productName, ...variantFilter.params]
       );
       if (r.rows.length > 0) {
         return res.json({
@@ -5578,11 +5760,12 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
 
     // Exact match on size_values JSONB equality
     const normalizedSV = Object.fromEntries(axes.map(a => [a, Number(size_values[a])]));
+    const exactVariantFilter = priceVariantSqlFilter(priceVariant, 4);
     const exact = await pool.query(
       `SELECT * FROM aufmass_lead_products
        WHERE branch_id = $1 AND product_name = $2
-         AND size_values = $3::jsonb AND is_active = true`,
-      [branchSlug, productName, JSON.stringify(normalizedSV)]
+         AND size_values = $3::jsonb AND is_active = true${exactVariantFilter.sql}`,
+      [branchSlug, productName, JSON.stringify(normalizedSV), ...exactVariantFilter.params]
     );
     if (exact.rows.length > 0) {
       return res.json({
@@ -5599,12 +5782,13 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
     const orderBy = axes.map(a =>
       `(size_values->>'${a.replace(/'/g, "''")}')::int ASC`
     ).join(', ');
-    const params = [branchSlug, productName, ...axes.map(a => normalizedSV[a])];
+    const variantFilter = priceVariantSqlFilter(priceVariant, axes.length + 3);
+    const params = [branchSlug, productName, ...axes.map(a => normalizedSV[a]), ...variantFilter.params];
 
     const rounded = await pool.query(
       `SELECT * FROM aufmass_lead_products
        WHERE branch_id = $1 AND product_name = $2 AND is_active = true
-         AND size_values IS NOT NULL AND ${conditions}
+         AND size_values IS NOT NULL AND ${conditions}${variantFilter.sql}
        ORDER BY ${orderBy}
        LIMIT 1`,
       params
@@ -5631,6 +5815,8 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
 app.post('/api/lead-products/upsert-from-angebot', authenticateToken, async (req, res) => {
   try {
     const { product_name, size_values, price, category, product_type, size_profile } = req.body || {};
+    const priceVariant = normalizePriceVariantInput(req.body || {});
+    const priceVariantJson = priceVariant ? JSON.stringify(priceVariant) : null;
     const branchSlug = resolveBranchSlug(req, res);
     if (!branchSlug) return;
 
@@ -5649,8 +5835,9 @@ app.post('/api/lead-products/upsert-from-angebot', authenticateToken, async (req
       `UPDATE aufmass_lead_products
        SET price = $1
        WHERE branch_id = $2 AND product_name = $3 AND size_values = $4::jsonb
+         AND COALESCE(price_variant, '{}'::jsonb) = COALESCE($5::jsonb, '{}'::jsonb)
        RETURNING id`,
-      [price, branchSlug, product_name, JSON.stringify(normalizedSV)]
+      [price, branchSlug, product_name, JSON.stringify(normalizedSV), priceVariantJson]
     );
     if (upd.rows.length > 0) {
       return res.json({ success: true, action: 'updated', id: upd.rows[0].id });
@@ -5661,11 +5848,11 @@ app.post('/api/lead-products/upsert-from-angebot', authenticateToken, async (req
       `INSERT INTO aufmass_lead_products
         (branch_id, category, product_type, product_name,
          breite, tiefe, price, pricing_type,
-         size_values, size_profile, is_active)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'dimension', $8::jsonb, $9, true)
+         size_values, size_profile, price_variant, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'dimension', $8::jsonb, $9, $10::jsonb, true)
        RETURNING id`,
       [branchSlug, category || null, product_type || null, product_name,
-       breiteCm, tiefeCm, price, JSON.stringify(normalizedSV), size_profile || null]
+       breiteCm, tiefeCm, price, JSON.stringify(normalizedSV), size_profile || null, priceVariantJson]
     );
     res.json({ success: true, action: 'inserted', id: ins.rows[0].id });
   } catch (err) {
@@ -5679,11 +5866,11 @@ app.get('/api/lead-products/:productName/dimensions', authenticateToken, async (
   try {
     const { productName } = req.params;
 
-    const branchSlug = resolveBranchSlug(req, res);
-    if (!branchSlug) return;
+    const branchSlug = await resolveProductPricingBranchSlug(req);
     const query = `SELECT breite, tiefe, price, pricing_type, unit_label, description, custom_fields
              FROM aufmass_lead_products
              WHERE product_name = $1 AND branch_id = $2
+             AND COALESCE(is_active, true) = true
              ORDER BY breite, tiefe`;
     const params = [productName, branchSlug];
 
@@ -6746,12 +6933,15 @@ app.post('/api/lead-products/import', authenticateToken, async (req, res) => {
       const sizeProfile = normalizeText(input.size_profile || input.sizeProfile);
       const sizeValues = input.size_values || input.sizeValues || (isUnit ? {} : { breite, tiefe });
       const sizeValuesJson = normalizeJsonText(sizeValues) || JSON.stringify(sizeValues);
+      const priceVariant = normalizePriceVariantInput(input);
+      const priceVariantJson = priceVariant ? JSON.stringify(priceVariant) : null;
 
       const existing = await client.query(
         `SELECT id FROM aufmass_lead_products
          WHERE branch_id IS NOT DISTINCT FROM $1 AND product_name = $2 AND breite = $3 AND tiefe = $4
+           AND COALESCE(price_variant, '{}'::jsonb) = COALESCE($5::jsonb, '{}'::jsonb)
          ORDER BY id ASC LIMIT 1`,
-        [branchSlug, productName, breite, tiefe]
+        [branchSlug, productName, breite, tiefe, priceVariantJson]
       );
 
       if (existing.rows.length > 0) {
@@ -6765,17 +6955,18 @@ app.post('/api/lead-products/import', authenticateToken, async (req, res) => {
                description = COALESCE($7, description),
                custom_fields = COALESCE($8, custom_fields),
                size_values = $9::jsonb,
-               size_profile = COALESCE($10, size_profile)
+               size_profile = COALESCE($10, size_profile),
+               price_variant = $11::jsonb
            WHERE id = $1`,
-          [existing.rows[0].id, price, category, productType, pricingType, unitLabel, description, customFields, sizeValuesJson, sizeProfile]
+          [existing.rows[0].id, price, category, productType, pricingType, unitLabel, description, customFields, sizeValuesJson, sizeProfile, priceVariantJson]
         );
         updated++;
       } else {
         await client.query(
           `INSERT INTO aufmass_lead_products
-           (branch_id, category, product_type, product_name, breite, tiefe, price, pricing_type, unit_label, description, custom_fields, size_values, size_profile)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13)`,
-          [branchSlug, category, productType, productName, breite, tiefe, price, pricingType, unitLabel, description, customFields, sizeValuesJson, sizeProfile]
+           (branch_id, category, product_type, product_name, breite, tiefe, price, pricing_type, unit_label, description, custom_fields, size_values, size_profile, price_variant)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13, $14::jsonb)`,
+          [branchSlug, category, productType, productName, breite, tiefe, price, pricingType, unitLabel, description, customFields, sizeValuesJson, sizeProfile, priceVariantJson]
         );
         inserted++;
       }
