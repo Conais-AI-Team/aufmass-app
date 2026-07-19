@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import {
   api, getProductImages, uploadProductImage, deleteProductImage, setProductImageCoverFlag,
   getProductCoverPdf, uploadProductCoverPdf, setCoverPdfPages, deleteProductCoverPdf,
-  fetchBranchPdfBytes
+  fetchBranchPdfBytes, adjustProductPrice
 } from '../services/api';
 import type { ProductImage, ProductCoverPdf } from '../services/api';
 import { invalidateProductImagesCache } from '../utils/productImagesCache';
@@ -132,6 +132,11 @@ export default function ProductPricing() {
 
   // Delete confirmation
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'product' | 'row' | 'column'; productName: string; value?: number } | null>(null);
+
+  // Per-product percentage price adjustment (scales all rows/columns)
+  const [adjustingProduct, setAdjustingProduct] = useState<string | null>(null);
+  const [adjustPercent, setAdjustPercent] = useState('');
+  const [adjustBusy, setAdjustBusy] = useState(false);
 
   // Description editing for existing products
   const [editingDescription, setEditingDescription] = useState<string | null>(null);
@@ -341,6 +346,28 @@ export default function ProductPricing() {
     }
   };
 
+  const handleAdjustPrice = async (productName: string) => {
+    const pct = parseFloat(adjustPercent.replace(',', '.'));
+    if (!Number.isFinite(pct) || pct === 0) {
+      setError('Bitte einen gültigen Prozentwert eingeben (z. B. -10 oder 5).');
+      return;
+    }
+    setAdjustBusy(true);
+    try {
+      const res = await adjustProductPrice(productName, pct);
+      setAdjustingProduct(null);
+      setAdjustPercent('');
+      await ensureProductLoaded(productName, true);
+      setError('');
+      console.log(`[price-adjust] ${productName}: ${res.updated} Preise um ${pct}% angepasst`);
+    } catch (err) {
+      console.error('Price adjustment failed:', err);
+      setError('Preisanpassung fehlgeschlagen.');
+    } finally {
+      setAdjustBusy(false);
+    }
+  };
+
   const normalizeVariantValue = (value: unknown): unknown => {
     if (Array.isArray(value)) return value.map(normalizeVariantValue);
     if (value && typeof value === 'object') {
@@ -371,6 +398,12 @@ export default function ProductPricing() {
 
   const getPriceVariantKey = (value: Product['price_variant']) => {
     const parsed = parsePriceVariant(value);
+    if (parsed?.price_component) {
+      return JSON.stringify({
+        price_component: parsed.price_component,
+        component_label: parsed.component_label || parsed.price_component,
+      });
+    }
     return parsed ? JSON.stringify(normalizeVariantValue(parsed)) : '__default__';
   };
 
@@ -378,19 +411,75 @@ export default function ProductPricing() {
     if (key === '__default__') return 'Standard';
     try {
       const variant = JSON.parse(key) as Record<string, unknown>;
+      if (variant.price_component) return String(variant.component_label || variant.price_component);
       const preferred = [
         'zone',
+        'snow_load_kn_m2',
+        'glass_division',
+        'roof_type',
+        'rafter_height_mm',
         'price_basis',
         'covering',
         'glass',
         'freestanding',
         'tracks',
+        'opening',
+        'closure_type',
         'component',
-        'price_component'
+        'price_component',
+        'zip',
+        'type_angle',
+        'fabric',
+        'retraction_brake'
       ];
+      const labels: Record<string, string> = {
+        zone: 'Schneelastzone',
+        snow_load_kn_m2: 'Bemessungslast',
+        glass_division: 'Glasteilung',
+        roof_type: 'Dachtyp',
+        rafter_height_mm: 'Sparrenhöhe',
+        price_basis: 'Preisbasis',
+        covering: 'Dacheindeckung',
+        glass: 'Glas',
+        freestanding: 'Freistehend',
+        tracks: 'Spuren',
+        opening: 'Öffnung',
+        closure_type: 'Ausführung',
+        component: 'Komponente',
+        price_component: 'Preiskomponente',
+        zip: 'ZIP',
+        type_angle: 'Ausführung',
+        fabric: 'Tuchart',
+        retraction_brake: 'Rückschlagbremse'
+      };
+      const formatValue = (key: string, value: unknown) => {
+        if (typeof value === 'boolean') return value ? 'Ja' : 'Nein';
+        if (key === 'snow_load_kn_m2') return `${String(value).replace('.', ',')} kN/m²`;
+        if (key === 'glass_division') return value === 'with' ? 'Mit' : 'Ohne';
+        if (key === 'roof_type') {
+          if (value === 'B') return 'Bündig (B)';
+          if (value === 'U_50') return 'Überstand bis 50 cm';
+          if (value === 'U_100') return 'Überstand bis 100 cm';
+        }
+        if (key === 'rafter_height_mm') return `${value} mm`;
+        if (key === 'type_angle') return `${value}°`;
+        if (key === 'opening') return value === 'center' ? 'Mittig' : 'Seitlich';
+        if (key === 'glass' && value === 'without') return 'Ohne Glas';
+        if (key === 'glass' && value === 'esg_8') return 'ESG 8 mm';
+        if (key === 'glass' && value === 'esg_10') return 'ESG 10 mm';
+        return String(value).replace(/_/g, ' ');
+      };
+      if ('snow_load_kn_m2' in variant) {
+        return [
+          formatValue('snow_load_kn_m2', variant.snow_load_kn_m2),
+          `Glasteilung: ${formatValue('glass_division', variant.glass_division)}`,
+          `Dachtyp: ${formatValue('roof_type', variant.roof_type)}`,
+          ...('rafter_height_mm' in variant ? [`Sparren: ${formatValue('rafter_height_mm', variant.rafter_height_mm)}`] : []),
+        ].join(' | ');
+      }
       const keys = [...preferred.filter(k => k in variant), ...Object.keys(variant).filter(k => !preferred.includes(k)).sort()];
       return keys
-        .map(k => `${k}: ${String(variant[k]).replace(/_/g, ' ')}`)
+        .map(k => `${labels[k] || k}: ${formatValue(k, variant[k])}`)
         .join(' | ');
     } catch {
       return key;
@@ -1799,6 +1888,37 @@ export default function ProductPricing() {
                           Tiefe
                         </button>
                       </>
+                    )}
+                    {adjustingProduct === productName ? (
+                      <div className="price-adjust-inline" onClick={e => e.stopPropagation()}>
+                        <input
+                          type="number"
+                          className="price-adjust-input"
+                          value={adjustPercent}
+                          onChange={e => setAdjustPercent(e.target.value)}
+                          placeholder="z. B. -10"
+                          step="0.5"
+                          autoFocus
+                          disabled={adjustBusy}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') void handleAdjustPrice(productName);
+                            if (e.key === 'Escape') { setAdjustingProduct(null); setAdjustPercent(''); }
+                          }}
+                        />
+                        <span className="price-adjust-suffix">%</span>
+                        <button className="btn-icon-small" disabled={adjustBusy} onClick={() => void handleAdjustPrice(productName)} title="Anwenden">
+                          {adjustBusy ? '…' : '✓'}
+                        </button>
+                        <button className="btn-icon-small" disabled={adjustBusy} onClick={() => { setAdjustingProduct(null); setAdjustPercent(''); }} title="Abbrechen">✕</button>
+                      </div>
+                    ) : (
+                      <button
+                        className="btn-icon-small"
+                        onClick={() => { setAdjustingProduct(productName); setAdjustPercent(''); }}
+                        title="Alle Preise dieses Produkts um Prozent anpassen (Auf-/Abschlag)"
+                      >
+                        %
+                      </button>
                     )}
                     <button
                       className="btn-icon-small delete"

@@ -21,6 +21,7 @@ export function useStatusChange(handlers: StatusChangeHandlers) {
   return useCallback(
     (ctx: StatusChangeContext) => {
       switch (ctx.newStatus) {
+        case 'angebot_ausstehend':
         case 'angebot_versendet':
           handlers.onAngebotVersendet(ctx);
           return;

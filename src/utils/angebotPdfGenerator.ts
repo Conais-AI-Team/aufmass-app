@@ -48,7 +48,36 @@ export interface AngebotPdfItem {
   description?: string;
   custom_fields?: { id: string; label: string; type: string; unit?: string; options?: string[]; required?: boolean }[];
   custom_field_values?: Record<string, string>;
+  price_variant?: Record<string, unknown> | null;
 }
+
+// Human-readable rendering of a price_variant (Glas/Poly, inkl/exkl, Zone, Zip …) for the PDF.
+const VARIANT_KEY_LABELS: Record<string, string> = {
+  covering: 'Dacheindeckung', price_basis: 'Preisbasis', glass: 'Glas', glass_division: 'Glasteilung',
+  zone: 'Schneelastzone', zip: 'ZIP', foundations: 'Fundamente', roof_type: 'Dachtyp',
+  closure_type: 'Abschluss', tracks: 'Laufschienen', opening: 'Öffnung', rafter_height_mm: 'Sparrenhöhe (mm)',
+  snow_load_kn_m2: 'Schneelast (kN/m²)', field_count: 'Felder', motor: 'Motoren', type_angle: 'Winkel',
+  fabric: 'Tuch', retraction_brake: 'Einzugsbremse',
+};
+const VARIANT_VALUE_LABELS: Record<string, string> = {
+  glas: 'Glas', polycarbonat: 'Polycarbonat', klar: 'klar', matt_milch: 'matt/milch', sonnenschutz: 'Sonnenschutz',
+  ir_gold: 'IR-Gold', klar_opal: 'klar/opal', trapezblech: 'Trapezblech',
+  inkl_dacheindeckung: 'inkl. Dacheindeckung', exkl_dacheindeckung: 'exkl. Dacheindeckung', material_only: 'nur Material',
+  with: 'mit', without: 'ohne', '1a_2': '1a/2', '2a_3': '2a/3',
+};
+const prettify = (s: string) => s.replace(/_/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+const formatVariantValue = (v: unknown): string => {
+  if (typeof v === 'boolean') return v ? 'Ja' : 'Nein';
+  const key = String(v);
+  return VARIANT_VALUE_LABELS[key] || prettify(key);
+};
+const formatVariantPairs = (pv?: Record<string, unknown> | null): { label: string; value: string }[] => {
+  if (!pv || typeof pv !== 'object') return [];
+  const skip = new Set(['price_component', 'component_label', 'price_basis_material_only']);
+  return Object.entries(pv)
+    .filter(([k, v]) => !skip.has(k) && v !== undefined && v !== null && v !== '')
+    .map(([k, v]) => ({ label: VARIANT_KEY_LABELS[k] || prettify(k), value: formatVariantValue(v) }));
+};
 
 export interface AngebotPdfExtra {
   description: string;
@@ -382,26 +411,31 @@ export const generateAngebotPDF = async (
         }
       }
 
+      // Selected variant (Dacheindeckung, Glas, Schneelastzone, ZIP …) — must not be dropped.
+      const variantPairs = formatVariantPairs(item.price_variant);
+      if (variantPairs.length > 0) {
+        pdf.setFontSize(8.5);
+        pdf.setTextColor(80, 80, 80);
+        variantPairs.forEach(pair => {
+          checkNewPage(6);
+          pdf.setFont('helvetica', 'bold');
+          pdf.text(`${pair.label}:`, colX.produkt + 3, yPos);
+          const labelWidth = pdf.getTextWidth(`${pair.label}:`);
+          pdf.setFont('helvetica', 'normal');
+          pdf.text(pair.value, colX.produkt + 3 + labelWidth + 3, yPos);
+          yPos += 5;
+        });
+        pdf.setFontSize(10);
+        pdf.setTextColor(0, 0, 0);
+        yPos += 1;
+      }
+
       pdf.setDrawColor(230, 230, 230);
       pdf.setLineWidth(0.2);
       pdf.line(margin, yPos - 3, margin + tableWidth, yPos - 3);
     });
 
     return yPos + 5;
-  };
-
-  // Per-item subtotal (used in multi-product PDFs so each block has its own line total)
-  const drawItemSubtotal = (item: AngebotPdfItem, startY: number): number => {
-    yPos = startY;
-    checkNewPage(15);
-    const summaryX = pageWidth - margin - 100;
-    pdf.setTextColor(60, 60, 60);
-    pdf.setFontSize(10);
-    pdf.setFont('helvetica', 'bold');
-    pdf.text('Zwischensumme:', summaryX, yPos);
-    pdf.text(`${formatPrice(item.total_price)} EUR`, summaryX + 60, yPos);
-    pdf.setFont('helvetica', 'normal');
-    return yPos + 10;
   };
 
   const drawNotes = (startY: number): number => {
@@ -525,6 +559,10 @@ export const generateAngebotPDF = async (
     yPos = startY;
     const hasAnyDiscounts = (data.item_discounts && data.item_discounts > 0) || (data.total_discount && data.total_discount > 0);
     const totalDiscountAmount = (data.item_discounts || 0) + (data.total_discount || 0);
+    const globalDiscountBase = Math.max(0, (data.subtotal || 0) - (data.item_discounts || 0));
+    const globalDiscountPercent = globalDiscountBase > 0 && data.total_discount
+      ? Math.round(((data.total_discount / globalDiscountBase) * 100 + Number.EPSILON) * 100) / 100
+      : 0;
 
     checkNewPage(hasAnyDiscounts ? 60 : 30);
     yPos += 5;
@@ -548,7 +586,7 @@ export const generateAngebotPDF = async (
 
       if (data.total_discount && data.total_discount > 0) {
         pdf.setTextColor(220, 38, 38);
-        pdf.text('Gesamt-Rabatt:', summaryX, yPos);
+        pdf.text(`Gesamt-Rabatt${globalDiscountPercent > 0 ? ` (${globalDiscountPercent}%)` : ''}:`, summaryX, yPos);
         pdf.text(`-${formatPrice(data.total_discount)} EUR`, summaryX + 60, yPos);
         yPos += 7;
       }
@@ -623,74 +661,84 @@ export const generateAngebotPDF = async (
   const coverPageNumbers: number[] = [];
   const coverReplaceIndices: number[] = [];
   const coverPdfsToMerge: { bytes: Uint8Array; selectedPages: number[] }[] = [];
-  const isMultiProduct = data.items.length > 1;
+  type ProductAssets = {
+    item: AngebotPdfItem;
+    coverImages: { base64?: string }[];
+    detailImages: { base64?: string }[];
+    coverPdfData: { bytes: Uint8Array; selectedPages: number[] } | null;
+  };
 
-  // For each product: cover → detail → header + customer + this item's table + (subtotal if multi-product)
-  for (let i = 0; i < data.items.length; i++) {
-    // Subsequent items must start on a fresh page — otherwise the cover would overwrite
-    // the previous item's billing page (jsPDF keeps the cursor on the last drawn page).
-    if (i > 0) pdf.addPage();
-
-    const item = data.items[i];
+  const productAssets: ProductAssets[] = await Promise.all(data.items.map(async (item) => {
     let coverImages: { base64?: string }[] = [];
     let detailImages: { base64?: string }[] = [];
-    let coverPdfData: { bytes: Uint8Array; selectedPages: number[] } | null = null;
+    let coverPdfData: ProductAssets['coverPdfData'] = null;
 
     if (item.product_id) {
       try {
         const cp = await getProductCoverPdf(item.product_id);
-        if (cp && cp.selected_pages && cp.selected_pages.length > 0) {
+        if (cp?.selected_pages?.length) {
           const bytes = await fetchBranchPdfBytes(cp.file_path);
           if (bytes) coverPdfData = { bytes, selectedPages: cp.selected_pages };
         }
         const allImages = await getCachedProductImages(item.product_id);
         if (!coverPdfData) {
-          const coverFlagged = allImages.filter((img) => img.show_on_cover).slice(0, 2);
-          coverImages = await Promise.all(coverFlagged.map(async (img) => ({ base64: await fetchImageAsBase64(img.image_path) })));
+          const flagged = allImages.filter((image) => image.show_on_cover).slice(0, 2);
+          coverImages = await Promise.all(flagged.map(async (image) => ({
+            base64: await fetchImageAsBase64(image.image_path),
+          })));
         }
-        const detailOnly = allImages.filter((img) => !img.show_on_cover).slice(0, 3);
-        detailImages = await Promise.all(detailOnly.map(async (img) => ({ base64: await fetchImageAsBase64(img.image_path) })));
-      } catch (e) {
-        console.warn('Could not load cover assets for item', item.product_id, e);
+        const detailOnly = allImages.filter((image) => !image.show_on_cover).slice(0, 3);
+        detailImages = await Promise.all(detailOnly.map(async (image) => ({
+          base64: await fetchImageAsBase64(image.image_path),
+        })));
+      } catch (error) {
+        console.warn('Could not load cover assets for item', item.product_id, error);
       }
     }
 
-    // Track current page as the cover page (will be footer-skipped + optionally pdf-lib replaced)
+    return { item, coverImages, detailImages, coverPdfData };
+  }));
+
+  // Covers are front matter. No cover asset means no generated mockup page.
+  for (const assets of productAssets) {
+    const hasCoverImage = assets.coverImages.some((image) => Boolean(image.base64));
+    if (!assets.coverPdfData && !hasCoverImage) continue;
+
     const coverPageNum = (pdf as unknown as { internal: { getNumberOfPages: () => number } }).internal.getNumberOfPages();
     coverPageNumbers.push(coverPageNum);
-    if (coverPdfData) {
+    if (assets.coverPdfData) {
       coverReplaceIndices.push(coverPageNum);
-      coverPdfsToMerge.push(coverPdfData);
+      coverPdfsToMerge.push(assets.coverPdfData);
     }
-
-    // Always draw a cover (placeholder if PDF active — pdf-lib will replace it later)
     drawCoverPage(pdf, {
-      productName: item.product_name || 'INDIVIDUELL',
+      productName: assets.item.product_name || 'INDIVIDUELL',
       customerName: `${data.customer_firstname} ${data.customer_lastname}`,
       documentType: 'Angebot',
       documentNumber: data.angebot_nummer,
       documentDate: data.created_at ? new Date(data.created_at) : new Date(),
-      coverImages,
+      coverImages: assets.coverImages,
       companyInfo: companyInfo || null,
-      brandLogo
+      brandLogo,
     });
-
-    if (item.description && item.description.trim()) {
-      drawProductDetailPage(pdf, {
-        productName: item.product_name,
-        description: item.description,
-        images: detailImages
-      });
-    }
-
-    // Now we are on a fresh page — render this item's billing block
-    yPos = drawHeader();
-    yPos = drawCustomerInfo(yPos);
-    yPos = drawProductsTable([item], yPos);
-    if (isMultiProduct) {
-      yPos = drawItemSubtotal(item, yPos);
-    }
   }
+
+  // Product detail pages follow every cover and still precede the prices.
+  for (const assets of productAssets) {
+    const hasCoverAsset = Boolean(assets.coverPdfData)
+      || assets.coverImages.some((image) => Boolean(image.base64));
+    if (!hasCoverAsset) continue;
+    if (!assets.item.description?.trim()) continue;
+    drawProductDetailPage(pdf, {
+      productName: assets.item.product_name,
+      description: assets.item.description,
+      images: assets.detailImages,
+    });
+  }
+
+  // A single coherent Angebot section contains every product and all totals.
+  yPos = drawHeader();
+  yPos = drawCustomerInfo(yPos);
+  yPos = drawProductsTable(data.items, yPos);
 
   // Final summary section — extras, notes, measurements, grand total, AGB, signature
   yPos = drawNotes(yPos);

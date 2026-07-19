@@ -21,7 +21,8 @@ interface Lead {
 
 const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
   'neu': { label: 'Aufmaß Genommen', color: '#8b5cf6' },
-  'angebot_versendet': { label: 'Angebot Versendet', color: '#a78bfa' },
+  'angebot_ausstehend': { label: 'Aufmaß versenden', color: '#a78bfa' },
+  'angebot_versendet': { label: 'Aufmaß versendet', color: '#a78bfa' },
   'auftrag_erteilt': { label: 'Auftrag Erteilt', color: '#3b82f6' },
   'auftrag_abgelehnt': { label: 'Auftrag Abgelehnt', color: '#6b7280' },
   'anzahlung': { label: 'Anzahlung Erhalten', color: '#06b6d4' },
@@ -307,7 +308,7 @@ export default function DashboardStats() {
             )}
           </div>
           <button className="view-all-btn" onClick={() => navigate('/aufmasse')}>
-            Alle Aufmaße anzeigen
+            Alle anzeigen
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M5 12h14M12 5l7 7-7 7" />
             </svg>

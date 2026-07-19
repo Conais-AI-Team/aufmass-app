@@ -63,6 +63,9 @@ export interface FormData {
   pdf_files?: { id: number; file_name: string; file_type: string }[];
   media_files?: { id: number; file_name: string; file_type: string }[];
   lead_id?: number;
+  selectedAngebotId?: number | null;
+  selectedAngebotItemIds?: number[];
+  selectedAngebotExtraIds?: number[];
   customerSignature?: string | null;
   signatureName?: string | null;
   abnahmeSignPending?: boolean;
@@ -107,6 +110,9 @@ export interface ApiForm {
   pdf_files?: { id: number; file_name: string; file_type: string }[];
   media_files?: { id: number; file_name: string; file_type: string }[];
   lead_id?: number;
+  selected_angebot_id?: number | null;
+  selected_angebot_item_ids?: number[] | null;
+  selected_angebot_extra_ids?: number[] | null;
   customer_signature?: string | null;
   signature_name?: string | null;
   abnahme_sign_pending?: boolean;
@@ -376,6 +382,9 @@ function transformApiToFrontend(apiForm: ApiForm): FormData {
     pdf_files: apiForm.pdf_files,
     media_files: apiForm.media_files,
     lead_id: apiForm.lead_id,
+    selectedAngebotId: apiForm.selected_angebot_id ?? null,
+    selectedAngebotItemIds: Array.isArray(apiForm.selected_angebot_item_ids) ? apiForm.selected_angebot_item_ids.map(Number) : undefined,
+    selectedAngebotExtraIds: Array.isArray(apiForm.selected_angebot_extra_ids) ? apiForm.selected_angebot_extra_ids.map(Number) : undefined,
     customerSignature: apiForm.customer_signature || null,
     signatureName: apiForm.signature_name || null,
     abnahmeSignPending: Boolean(apiForm.abnahme_sign_pending),
@@ -1154,9 +1163,11 @@ export async function updateLeadStatus(leadId: number, status: string): Promise<
 // Auto-trigger: called after a successful Angebot e-mail send. Backend flips
 // angebot_sent_at on the lead and pushes every linked Aufmaß forward to
 // 'angebot_versendet'. Idempotent.
-export async function markLeadAngebotAsSent(leadId: number): Promise<{ message: string }> {
+export async function markLeadAngebotAsSent(leadId: number, angebotIds?: number[]): Promise<{ message: string }> {
   const response = await authFetch(`${API_BASE_URL}/leads/${leadId}/mark-angebot-sent`, {
-    method: 'POST'
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(angebotIds === undefined ? {} : { angebotIds })
   });
   if (!response.ok) throw new Error('Failed to mark Angebot as sent');
   return response.json();
@@ -1175,7 +1186,7 @@ export async function markLeadAngebotAsSentManual(leadId: number): Promise<{ mes
 
 // Admin-only: mark an Aufmaß as physically posted to the customer.
 // Idempotent on the backend (first stamp wins via COALESCE).
-export async function markFormPostSent(formId: number): Promise<{ message: string; post_sent_at: string }> {
+export async function markFormPostSent(formId: number): Promise<{ message: string; post_sent_at: string; angebot_promoted?: boolean }> {
   const response = await authFetch(`${API_BASE_URL}/forms/${formId}/mark-post-sent`, {
     method: 'POST'
   });
@@ -1469,6 +1480,39 @@ export const lookupLeadProductBySize = (
 ): Promise<LeadProductLookupResult> =>
   api.post(`/lead-products/${encodeURIComponent(productName)}/lookup`, { size_values: sizeValues, price_variant: priceVariant || null });
 
+export interface LeadProductOptionSelection {
+  code: string;
+  quantity?: number;
+  measure?: number;
+}
+
+export interface LeadProductOptionCalculation {
+  additional_price: number;
+  components: Array<{
+    code: string;
+    label: string;
+    calculation: string;
+    unit_price: number;
+    quantity: number;
+    total: number;
+    source_document?: string | null;
+    source_page?: number | null;
+  }>;
+  unresolved: string[];
+}
+
+export const calculateLeadProductOptions = (
+  productName: string,
+  sizeValues: Record<string, number>,
+  selectedComponents: LeadProductOptionSelection[],
+  priceVariant?: Record<string, unknown> | null
+): Promise<LeadProductOptionCalculation> =>
+  api.post(`/lead-products/${encodeURIComponent(productName)}/options/calculate`, {
+    size_values: sizeValues,
+    price_variant: priceVariant || null,
+    selected_components: selectedComponents,
+  });
+
 /** Upsert a price from the Angebot modal — creates row if missing, updates if exists. */
 export const upsertLeadProductFromAngebot = (input: {
   product_name: string;
@@ -1480,6 +1524,13 @@ export const upsertLeadProductFromAngebot = (input: {
   price_variant?: Record<string, unknown> | null;
 }): Promise<{ success: boolean; action: 'inserted' | 'updated'; id: number }> =>
   api.post('/lead-products/upsert-from-angebot', input);
+
+/** Scale every price of a product (all variants/rows/columns) by a percentage, persisted to DB. */
+export const adjustProductPrice = (
+  productName: string,
+  percent: number
+): Promise<{ updated: number; percent: number; product_name: string }> =>
+  api.post(`/lead-products/${encodeURIComponent(productName)}/adjust-price`, { percent });
 
 // ============ MODÜL F2: PDF Cover/AGB Override ============
 export interface ProductCoverPdf {
@@ -1790,7 +1841,7 @@ export const getRechnung = (id: number): Promise<Rechnung> =>
 export const updateRechnung = (id: number, payload: UpdateRechnungPayload): Promise<Rechnung> =>
   api.put(`/rechnungen/${id}`, payload);
 
-export const markRechnungSent = (id: number): Promise<{ success: boolean; form_status: string }> =>
+export const markRechnungSent = (id: number): Promise<{ success: boolean; form_status: string | null }> =>
   api.post(`/rechnungen/${id}/mark-sent`);
 
 // Confirm customer paid this Anzahlungsrechnung. Backend flips status to

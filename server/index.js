@@ -10,6 +10,7 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import nodemailer from 'nodemailer';
+import { calculateLewensOptionPricing } from './lewensOptionPricing.js';
 
 dotenv.config();
 
@@ -105,6 +106,10 @@ async function initializeTables() {
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS generated_pdf BYTEA`);
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS pdf_generated_at TIMESTAMP`);
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS lead_id INT`);
+    await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS selected_angebot_id INT`);
+    await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS selected_angebot_item_ids JSONB`);
+    await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS selected_angebot_extra_ids JSONB`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS ix_aufmass_forms_selected_angebot_id ON aufmass_forms(selected_angebot_id)`);
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS created_by INT`);
     await pool.query(`ALTER TABLE aufmass_forms ADD COLUMN IF NOT EXISTS branch_id VARCHAR(50)`);
     // Marks the first time an Aufmaß PDF was sent by e-mail (either from
@@ -396,6 +401,60 @@ async function initializeTables() {
     // and by the bidirectional sync between aufmass_forms.status='angebot_versendet'
     // and the lead's sent state.
     await pool.query(`ALTER TABLE aufmass_leads ADD COLUMN IF NOT EXISTS angebot_sent_at TIMESTAMP NULL`);
+    await pool.query(`
+      UPDATE aufmass_forms f
+      SET status = 'angebot_ausstehend',
+          status_date = COALESCE(l.created_at::date, f.status_date),
+          updated_at = NOW()
+      FROM aufmass_leads l
+      WHERE f.lead_id = l.id
+        AND f.status IN ('entwurf', 'neu', 'aufmass_genommen')
+        AND l.angebot_sent_at IS NULL
+    `);
+    await pool.query(`
+      INSERT INTO aufmass_status_history (form_id, status, changed_by, status_date, notes)
+      SELECT f.id, 'angebot_versendet', NULL, f.post_sent_at::date, 'Auto-sync: Angebot wurde per Post versendet'
+      FROM aufmass_forms f
+      WHERE f.status = 'angebot_ausstehend'
+        AND f.post_sent_at IS NOT NULL
+        AND f.lead_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM aufmass_status_history h
+          WHERE h.form_id = f.id AND h.status = 'angebot_versendet'
+        )
+    `);
+    await pool.query(`
+      UPDATE aufmass_leads l
+      SET angebot_sent_at = COALESCE(l.angebot_sent_at, f.post_sent_at), updated_at = NOW()
+      FROM aufmass_forms f
+      WHERE f.lead_id = l.id
+        AND f.status = 'angebot_ausstehend'
+        AND f.post_sent_at IS NOT NULL
+    `);
+    await pool.query(`
+      UPDATE aufmass_lead_angebote a
+      SET status = CASE WHEN a.status = 'angenommen' THEN a.status ELSE 'versendet' END,
+          updated_at = NOW()
+      FROM aufmass_forms f
+      WHERE f.lead_id = a.lead_id
+        AND f.status = 'angebot_ausstehend'
+        AND f.post_sent_at IS NOT NULL
+    `);
+    await pool.query(`
+      UPDATE aufmass_forms
+      SET status = 'angebot_versendet', status_date = post_sent_at::date, updated_at = NOW()
+      WHERE status = 'angebot_ausstehend'
+        AND post_sent_at IS NOT NULL
+        AND lead_id IS NOT NULL
+    `);
+    await pool.query(`
+      UPDATE aufmass_lead_angebote a
+      SET status = 'versendet', updated_at = NOW()
+      FROM aufmass_leads l
+      WHERE a.lead_id = l.id
+        AND l.angebot_sent_at IS NOT NULL
+        AND a.status NOT IN ('versendet', 'angenommen', 'abgelehnt')
+    `);
     console.log('aufmass_leads.angebot_sent_at column ready');
 
     // Marketing source ("Wie sind Sie auf uns aufmerksam geworden?") —
@@ -640,9 +699,17 @@ async function initializeTables() {
     await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_values JSONB`);
     await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS size_profile VARCHAR(10)`);
     await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS price_variant JSONB`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS source_document TEXT`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS source_page INTEGER`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS source_year INTEGER`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS valid_from DATE`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS currency VARCHAR(3) DEFAULT 'EUR'`);
+    await pool.query(`ALTER TABLE aufmass_lead_products ADD COLUMN IF NOT EXISTS vat_included BOOLEAN`);
     await pool.query(`ALTER TABLE aufmass_lead_products ALTER COLUMN price DROP NOT NULL`).catch(() => {});
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_products_size_values ON aufmass_lead_products USING GIN (size_values)`);
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_products_price_variant ON aufmass_lead_products USING GIN (price_variant)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_products_branch_product_active ON aufmass_lead_products (branch_id, product_name, is_active)`);
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_lead_products_source_document ON aufmass_lead_products (source_document, source_page)`);
     console.log('Modul B v3 columns ready (size_values, size_profile)');
 
     // Eager seed runs in the background so server startup is not blocked
@@ -746,7 +813,7 @@ async function seedLeadProductsFromConfig() {
               AND NOT EXISTS (
                 SELECT 1 FROM aufmass_lead_products
                 WHERE branch_id = $1::varchar AND product_name = $4::varchar
-                  AND price_variant IS NOT NULL
+                  AND (price_variant IS NOT NULL OR source_document IS NOT NULL)
                   AND COALESCE(is_active, true) = true
               )
               RETURNING id
@@ -802,6 +869,7 @@ const FORM_STATUS_ORDER = [
   'entwurf',
   'auftrag_abgelehnt',
   'neu',
+  'angebot_ausstehend',
   'angebot_versendet',
   'auftrag_erteilt',
   'bauantrag',
@@ -813,6 +881,8 @@ const FORM_STATUS_ORDER = [
   'reklamation_eingegangen',
   'reklamation_bestellt',
   'reklamation_abgelehnt',
+  'schluss_rechnung_erstellt',
+  'rest_rechnung_erstellt',
 ];
 
 // Keep the linked lead's "Versendet" flag in sync with the form's status:
@@ -1542,7 +1612,7 @@ app.get('/api/forms', authenticateToken, async (req, res) => {
           f.id, f.datum, f.aufmasser, f.kunde_vorname, f.kunde_nachname, f.kunde_email, f.kunde_telefon,
           f.kundenlokation, f.category, f.product_type, f.model, f.specifications,
           f.markise_data, f.bemerkungen, f.status, f.created_by, f.created_at, f.updated_at,
-          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at, f.marketing_source,
+          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.selected_angebot_id, f.selected_angebot_item_ids, f.selected_angebot_extra_ids, f.email_sent_at, f.post_sent_at, f.marketing_source,
           EXISTS(
             SELECT 1
             FROM aufmass_abnahme_sign_requests sr
@@ -1563,7 +1633,7 @@ app.get('/api/forms', authenticateToken, async (req, res) => {
           f.id, f.datum, f.aufmasser, f.kunde_vorname, f.kunde_nachname, f.kunde_email, f.kunde_telefon,
           f.kundenlokation, f.category, f.product_type, f.model, f.specifications,
           f.markise_data, f.bemerkungen, f.status, f.created_by, f.created_at, f.updated_at,
-          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.email_sent_at, f.post_sent_at, f.marketing_source,
+          f.montage_datum, f.status_date, f.pdf_generated_at, f.branch_id, f.papierkorb_date, f.lead_id, f.selected_angebot_id, f.selected_angebot_item_ids, f.selected_angebot_extra_ids, f.email_sent_at, f.post_sent_at, f.marketing_source,
           EXISTS(
             SELECT 1
             FROM aufmass_abnahme_sign_requests sr
@@ -1642,14 +1712,14 @@ app.get('/api/forms/:id', authenticateToken, async (req, res) => {
       query = `SELECT id, datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon,
                kundenlokation, category, product_type, model, specifications,
                markise_data, bemerkungen, status, created_by, created_at, updated_at,
-               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id, marketing_source
+               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id, selected_angebot_id, selected_angebot_item_ids, selected_angebot_extra_ids, marketing_source
                FROM aufmass_forms WHERE id = $1 AND branch_id = $2`;
       params = [id, req.branchId];
     } else {
       query = `SELECT id, datum, aufmasser, kunde_vorname, kunde_nachname, kunde_email, kunde_telefon,
                kundenlokation, category, product_type, model, specifications,
                markise_data, bemerkungen, status, created_by, created_at, updated_at,
-               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id, marketing_source
+               montage_datum, status_date, pdf_generated_at, customer_signature, signature_name, email_sent_at, post_sent_at, lead_id, selected_angebot_id, selected_angebot_item_ids, selected_angebot_extra_ids, marketing_source
                FROM aufmass_forms WHERE id = $1`;
       params = [id];
     }
@@ -1764,6 +1834,77 @@ app.put('/api/forms/:id', authenticateToken, async (req, res) => {
     const { id } = req.params;
     const updates = req.body;
 
+    if (updates.status === 'schluss_rechnung_erstellt' || updates.status === 'rest_rechnung_erstellt') {
+      return res.status(400).json({ error: 'Schluss status is set by the Schlussrechnung workflow' });
+    }
+
+    let selectedOfferForAuftrag = null;
+    if (updates.status === 'auftrag_erteilt') {
+      const formLookup = req.branchId
+        ? await pool.query(
+            'SELECT lead_id, selected_angebot_id, selected_angebot_item_ids, selected_angebot_extra_ids FROM aufmass_forms WHERE id = $1 AND branch_id = $2',
+            [id, req.branchId]
+          )
+        : await pool.query(
+            'SELECT lead_id, selected_angebot_id, selected_angebot_item_ids, selected_angebot_extra_ids FROM aufmass_forms WHERE id = $1',
+            [id]
+          );
+      if (formLookup.rows.length === 0) {
+        return res.status(404).json({ error: 'Form not found' });
+      }
+
+      const linkedLeadId = formLookup.rows[0].lead_id;
+      if (linkedLeadId) {
+        const offers = await pool.query(
+          'SELECT id, status FROM aufmass_lead_angebote WHERE lead_id = $1 ORDER BY created_at, id',
+          [linkedLeadId]
+        );
+        if (offers.rows.length === 0) {
+          return res.status(400).json({ error: 'Bitte zuerst ein Angebot erstellen' });
+        }
+
+        const selectableOffers = offers.rows.filter((offer) =>
+          ['versendet', 'angenommen', 'abgelehnt'].includes(offer.status)
+        );
+        const requestedOfferId = Number(updates.selectedAngebotId || formLookup.rows[0].selected_angebot_id);
+        selectedOfferForAuftrag = selectableOffers.find((offer) => Number(offer.id) === requestedOfferId) || null;
+        if (!selectedOfferForAuftrag) {
+          return res.status(400).json({ error: 'Bitte wählen Sie ein zuvor versendetes Angebot aus' });
+        }
+
+        const [offerItemsResult, offerExtrasResult] = await Promise.all([
+          pool.query('SELECT id FROM aufmass_lead_items WHERE angebot_id = $1 ORDER BY id', [selectedOfferForAuftrag.id]),
+          pool.query('SELECT id FROM aufmass_lead_extras WHERE angebot_id = $1 ORDER BY id', [selectedOfferForAuftrag.id]),
+        ]);
+        const offerItemIds = offerItemsResult.rows.map((row) => Number(row.id));
+        const offerExtraIds = offerExtrasResult.rows.map((row) => Number(row.id));
+        const sameStoredOffer = Number(formLookup.rows[0].selected_angebot_id) === Number(selectedOfferForAuftrag.id);
+        const normalizeIds = (value) => Array.isArray(value)
+          ? [...new Set(value.map(Number).filter(Number.isInteger))]
+          : null;
+        const requestedItemIds = normalizeIds(updates.selectedAngebotItemIds)
+          ?? (sameStoredOffer ? normalizeIds(formLookup.rows[0].selected_angebot_item_ids) : null)
+          ?? offerItemIds;
+        const requestedExtraIds = normalizeIds(updates.selectedAngebotExtraIds)
+          ?? (sameStoredOffer ? normalizeIds(formLookup.rows[0].selected_angebot_extra_ids) : null)
+          ?? offerExtraIds;
+
+        if (requestedItemIds.length === 0) {
+          return res.status(400).json({ error: 'Bitte wählen Sie mindestens ein Produkt für den Auftrag aus' });
+        }
+        if (requestedItemIds.some((itemId) => !offerItemIds.includes(itemId))) {
+          return res.status(400).json({ error: 'Die Produktauswahl gehört nicht zum gewählten Angebot' });
+        }
+        if (requestedExtraIds.some((extraId) => !offerExtraIds.includes(extraId))) {
+          return res.status(400).json({ error: 'Die Zusatzpositionen gehören nicht zum gewählten Angebot' });
+        }
+
+        updates.selectedAngebotId = Number(selectedOfferForAuftrag.id);
+        updates.selectedAngebotItemIds = requestedItemIds;
+        updates.selectedAngebotExtraIds = requestedExtraIds;
+      }
+    }
+
     const fieldMappings = {
       datum: { column: 'datum' },
       aufmasser: { column: 'aufmasser' },
@@ -1784,7 +1925,10 @@ app.put('/api/forms/:id', authenticateToken, async (req, res) => {
       papierkorbDate: { column: 'papierkorb_date' },
       customerSignature: { column: 'customer_signature' },
       signatureName: { column: 'signature_name' },
-      marketingSource: { column: 'marketing_source' }
+      marketingSource: { column: 'marketing_source' },
+      selectedAngebotId: { column: 'selected_angebot_id' },
+      selectedAngebotItemIds: { column: 'selected_angebot_item_ids', transform: v => JSON.stringify(v || []) },
+      selectedAngebotExtraIds: { column: 'selected_angebot_extra_ids', transform: v => JSON.stringify(v || []) }
     };
 
     // Auto-set papierkorb_date when moving to trash, clear when restoring
@@ -1855,6 +1999,22 @@ app.put('/api/forms/:id', authenticateToken, async (req, res) => {
         );
         // MODÜL B: Reflect angebot_versendet onto the linked lead
         await syncLeadFromForm(id, updates.status);
+
+        if (updates.status === 'auftrag_erteilt' && selectedOfferForAuftrag) {
+          const leadLookup = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [id]);
+          const linkedLeadId = leadLookup.rows[0]?.lead_id;
+          await pool.query(
+            `UPDATE aufmass_lead_angebote
+             SET status = CASE WHEN id = $1 THEN 'angenommen' ELSE 'abgelehnt' END,
+                 updated_at = NOW()
+             WHERE lead_id = $2`,
+            [selectedOfferForAuftrag.id, linkedLeadId]
+          );
+          await pool.query(
+            `UPDATE aufmass_leads SET status = 'auftrag_erteilt', updated_at = NOW() WHERE id = $1`,
+            [linkedLeadId]
+          );
+        }
       }
     }
 
@@ -2540,20 +2700,40 @@ app.post('/api/forms/:id/mark-post-sent', authenticateToken, requireAdmin, async
     if (req.branchId) {
       result = await pool.query(
         `UPDATE aufmass_forms SET post_sent_at = COALESCE(post_sent_at, NOW())
-         WHERE id = $1 AND branch_id = $2 RETURNING id, post_sent_at`,
+         WHERE id = $1 AND branch_id = $2 RETURNING id, post_sent_at, lead_id, status`,
         [id, req.branchId]
       );
     } else {
       result = await pool.query(
         `UPDATE aufmass_forms SET post_sent_at = COALESCE(post_sent_at, NOW())
-         WHERE id = $1 RETURNING id, post_sent_at`,
+         WHERE id = $1 RETURNING id, post_sent_at, lead_id, status`,
         [id]
       );
     }
     if (result.rowCount === 0) {
       return res.status(404).json({ error: 'Form not found' });
     }
-    res.json({ message: 'Form marked as sent by post', post_sent_at: result.rows[0].post_sent_at });
+    const form = result.rows[0];
+    if (form.lead_id && form.status === 'angebot_ausstehend') {
+      await pool.query(
+        `UPDATE aufmass_leads
+         SET angebot_sent_at = COALESCE(angebot_sent_at, $2), updated_at = NOW()
+         WHERE id = $1`,
+        [form.lead_id, form.post_sent_at]
+      );
+      await pool.query(
+        `UPDATE aufmass_lead_angebote
+         SET status = CASE WHEN status = 'angenommen' THEN status ELSE 'versendet' END, updated_at = NOW()
+         WHERE lead_id = $1`,
+        [form.lead_id]
+      );
+      await syncFormsFromLead(form.lead_id, req.user?.id);
+    }
+    res.json({
+      message: 'Form marked as sent by post',
+      post_sent_at: form.post_sent_at,
+      angebot_promoted: Boolean(form.lead_id && form.status === 'angebot_ausstehend')
+    });
   } catch (err) {
     console.error('Mark post sent error:', err);
     res.status(500).json({ error: 'Failed to mark form as sent by post' });
@@ -2715,6 +2895,194 @@ app.delete('/api/abnahme-images/:id', authenticateToken, async (req, res) => {
 
 // ============ ANGEBOT (QUOTE) ENDPOINTS ============
 
+function mapLeadAngebotItems(formId, items, extras, globalDiscount = 0, globalDiscountPercent = 0) {
+  let sortIdx = 0;
+  const mappedItems = items.map((item) => {
+    const dimsLabel = (item.breite && item.tiefe)
+      ? ` (${item.breite}×${item.tiefe} mm)`
+      : (item.unit_label ? ` (${item.unit_label})` : '');
+    const lineTotal = (Number(item.unit_price) * Number(item.quantity)) - Number(item.discount || 0);
+    return {
+      id: item.id,
+      form_id: Number(formId),
+      bezeichnung: `${item.product_name}${dimsLabel}`,
+      menge: Number(item.quantity),
+      einzelpreis: Number(item.unit_price),
+      gesamtpreis: lineTotal,
+      sort_order: sortIdx++,
+    };
+  });
+
+  for (const extra of extras) {
+    mappedItems.push({
+      id: -extra.id,
+      form_id: Number(formId),
+      bezeichnung: extra.description,
+      menge: 1,
+      einzelpreis: Number(extra.price),
+      gesamtpreis: Number(extra.price),
+      sort_order: sortIdx++,
+    });
+  }
+  if (globalDiscount > 0) {
+    const percentLabel = globalDiscountPercent > 0
+      ? ` (${globalDiscountPercent.toLocaleString('de-DE', { maximumFractionDigits: 2 })}%)`
+      : '';
+    mappedItems.push({
+      id: 0,
+      form_id: Number(formId),
+      bezeichnung: `Gesamtrabatt${percentLabel}`,
+      menge: 1,
+      einzelpreis: -globalDiscount,
+      gesamtpreis: -globalDiscount,
+      sort_order: sortIdx++,
+    });
+  }
+  return mappedItems;
+}
+
+async function resolveFormAngebot(formId) {
+  const formResult = await pool.query(
+    'SELECT lead_id, selected_angebot_id, selected_angebot_item_ids, selected_angebot_extra_ids FROM aufmass_forms WHERE id = $1',
+    [formId]
+  );
+  const form = formResult.rows[0];
+  if (!form) return { summary: null, items: [] };
+
+  if (form.lead_id) {
+    const offersResult = await pool.query(
+      'SELECT * FROM aufmass_lead_angebote WHERE lead_id = $1 ORDER BY created_at, id',
+      [form.lead_id]
+    );
+    const offers = offersResult.rows;
+    let selectedOffer = offers.find((offer) => Number(offer.id) === Number(form.selected_angebot_id));
+
+    if (!selectedOffer) {
+      const acceptedOffers = offers.filter((offer) => offer.status === 'angenommen');
+      if (acceptedOffers.length === 1) selectedOffer = acceptedOffers[0];
+      else if (offers.length === 1) selectedOffer = offers[0];
+    }
+
+    if (selectedOffer) {
+      const [itemsResult, extrasResult] = await Promise.all([
+        pool.query('SELECT * FROM aufmass_lead_items WHERE angebot_id = $1 ORDER BY id', [selectedOffer.id]),
+        pool.query('SELECT * FROM aufmass_lead_extras WHERE angebot_id = $1 ORDER BY id', [selectedOffer.id]),
+      ]);
+      const normalizeStoredIds = (value) => Array.isArray(value)
+        ? [...new Set(value.map(Number).filter(Number.isInteger))]
+        : null;
+      const storedItemIds = normalizeStoredIds(form.selected_angebot_item_ids);
+      const storedExtraIds = normalizeStoredIds(form.selected_angebot_extra_ids);
+      const selectedItems = storedItemIds === null
+        ? itemsResult.rows
+        : itemsResult.rows.filter((item) => storedItemIds.includes(Number(item.id)));
+      const selectedExtras = storedExtraIds === null
+        ? extrasResult.rows
+        : extrasResult.rows.filter((extra) => storedExtraIds.includes(Number(extra.id)));
+      const selectedItemIds = selectedItems.map((item) => Number(item.id));
+      const selectedExtraIds = selectedExtras.map((extra) => Number(extra.id));
+
+      if (!form.selected_angebot_id || storedItemIds === null || storedExtraIds === null) {
+        await pool.query(
+          `UPDATE aufmass_forms
+           SET selected_angebot_id = $1,
+               selected_angebot_item_ids = COALESCE(selected_angebot_item_ids, $2::jsonb),
+               selected_angebot_extra_ids = COALESCE(selected_angebot_extra_ids, $3::jsonb)
+           WHERE id = $4`,
+          [selectedOffer.id, JSON.stringify(selectedItemIds), JSON.stringify(selectedExtraIds), formId]
+        );
+      }
+
+      const itemSubtotal = selectedItems.reduce(
+        (sum, item) => sum + ((Number(item.unit_price) * Number(item.quantity)) - Number(item.discount || 0)),
+        0
+      );
+      const extrasSubtotal = selectedExtras.reduce((sum, extra) => sum + Number(extra.price || 0), 0);
+      const selectedSubtotal = Math.max(0, itemSubtotal + extrasSubtotal);
+      const fullCalculatedSubtotal = itemsResult.rows.reduce(
+        (sum, item) => sum + ((Number(item.unit_price) * Number(item.quantity)) - Number(item.discount || 0)),
+        extrasResult.rows.reduce((sum, extra) => sum + Number(extra.price || 0), 0)
+      );
+      const offerDiscount = Math.max(0, Number(selectedOffer.total_discount || 0));
+      const discountRate = fullCalculatedSubtotal > 0
+        ? Math.min(1, offerDiscount / fullCalculatedSubtotal)
+        : 0;
+      const selectedDiscount = Number((selectedSubtotal * discountRate).toFixed(2));
+      const totalPrice = Number(Math.max(0, selectedSubtotal - selectedDiscount).toFixed(2));
+      const netto = totalPrice / 1.19;
+      return {
+        summary: {
+          id: selectedOffer.id,
+          form_id: Number(formId),
+          netto_summe: netto.toFixed(2),
+          mwst_satz: 19,
+          mwst_betrag: (totalPrice - netto).toFixed(2),
+          brutto_summe: totalPrice.toFixed(2),
+          angebot_datum: selectedOffer.created_at,
+          bemerkungen: selectedOffer.notes,
+          angebot_nummer: selectedOffer.angebot_nummer,
+          source: 'selected_lead_angebot',
+          original_subtotal: Number(selectedOffer.subtotal || 0),
+          original_total_discount: Number(selectedOffer.total_discount || 0),
+          selected_subtotal: selectedSubtotal,
+          selected_total_discount: selectedDiscount,
+          selected_item_ids: selectedItemIds,
+          selected_extra_ids: selectedExtraIds,
+        },
+        items: mapLeadAngebotItems(
+          formId,
+          selectedItems,
+          selectedExtras,
+          selectedDiscount,
+          discountRate * 100
+        ),
+      };
+    }
+
+    if (offers.length > 1) {
+      return { summary: null, items: [], selection_required: true };
+    }
+
+    // Backward compatibility for old lead records without aufmass_lead_angebote.
+    const leadResult = await pool.query('SELECT * FROM aufmass_leads WHERE id = $1', [form.lead_id]);
+    if (leadResult.rows.length > 0) {
+      const [itemsResult, extrasResult] = await Promise.all([
+        pool.query('SELECT * FROM aufmass_lead_items WHERE lead_id = $1 AND angebot_id IS NULL ORDER BY id', [form.lead_id]),
+        pool.query('SELECT * FROM aufmass_lead_extras WHERE lead_id = $1 AND angebot_id IS NULL ORDER BY id', [form.lead_id]),
+      ]);
+      if (itemsResult.rows.length > 0) {
+        const lead = leadResult.rows[0];
+        const totalPrice = Number(lead.total_price || 0);
+        const netto = totalPrice / 1.19;
+        return {
+          summary: {
+            id: lead.id,
+            form_id: Number(formId),
+            netto_summe: netto.toFixed(2),
+            mwst_satz: 19,
+            mwst_betrag: (totalPrice - netto).toFixed(2),
+            brutto_summe: totalPrice.toFixed(2),
+            angebot_datum: lead.created_at,
+            bemerkungen: lead.notes,
+            source: 'legacy_lead',
+          },
+          items: mapLeadAngebotItems(formId, itemsResult.rows, extrasResult.rows),
+        };
+      }
+    }
+  }
+
+  const [legacySummary, legacyItems] = await Promise.all([
+    pool.query('SELECT * FROM aufmass_angebot WHERE form_id = $1', [formId]),
+    pool.query('SELECT * FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id', [formId]),
+  ]);
+  if (legacySummary.rows.length > 0 && legacyItems.rows.length > 0) {
+    return { summary: legacySummary.rows[0], items: legacyItems.rows };
+  }
+
+  return { summary: null, items: [] };
+}
+
 // Get Angebot data for a form
 app.get('/api/forms/:id/angebot', authenticateToken, async (req, res) => {
   try {
@@ -2725,96 +3093,7 @@ app.get('/api/forms/:id/angebot', authenticateToken, async (req, res) => {
       return res.status(404).json({ error: 'Form not found' });
     }
 
-    // (1) Legacy form-bazli Angebot (eski Caglayan oncesi akis)
-    const legacySummary = await pool.query('SELECT * FROM aufmass_angebot WHERE form_id = $1', [id]);
-    const legacyItems = await pool.query(
-      'SELECT * FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id',
-      [id]
-    );
-    if (legacySummary.rows.length > 0 && legacyItems.rows.length > 0) {
-      return res.json({ summary: legacySummary.rows[0], items: legacyItems.rows });
-    }
-
-    // (2) MODÜL B v3: form'un lead_id'si varsa lead-bazli items'i Angebot formatina cevir.
-    // Bu sayede RechnungForm (Modül C) Caglayan'in LeadFormModal akisinda olusan
-    // verileri de gorebilir.
-    const formRow = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [id]);
-    const leadId = formRow.rows[0]?.lead_id;
-    if (!leadId) {
-      return res.json({ summary: null, items: [] });
-    }
-
-    const leadRes = await pool.query('SELECT * FROM aufmass_leads WHERE id = $1', [leadId]);
-    if (leadRes.rows.length === 0) {
-      return res.json({ summary: null, items: [] });
-    }
-    const lead = leadRes.rows[0];
-
-    const itemsRes = await pool.query(
-      'SELECT * FROM aufmass_lead_items WHERE lead_id = $1 ORDER BY id',
-      [leadId]
-    );
-    const extrasRes = await pool.query(
-      'SELECT * FROM aufmass_lead_extras WHERE lead_id = $1 ORDER BY id',
-      [leadId]
-    );
-
-    // Map lead_items → Angebot.items shape (bezeichnung, menge, einzelpreis, gesamtpreis)
-    let sortIdx = 0;
-    const mappedItems = itemsRes.rows.map(it => {
-      const dimsLabel = (it.breite && it.tiefe)
-        ? ` (${it.breite}×${it.tiefe} mm)`
-        : (it.unit_label ? ` (${it.unit_label})` : '');
-      const lineTotal = (Number(it.unit_price) * Number(it.quantity)) - Number(it.discount || 0);
-      return {
-        id: it.id,
-        form_id: parseInt(id),
-        bezeichnung: `${it.product_name}${dimsLabel}`,
-        menge: Number(it.quantity),
-        einzelpreis: Number(it.unit_price),
-        gesamtpreis: lineTotal,
-        sort_order: sortIdx++,
-      };
-    });
-
-    // Append extras as additional invoice lines
-    for (const ex of extrasRes.rows) {
-      mappedItems.push({
-        id: -ex.id,           // negative ids to avoid collision
-        form_id: parseInt(id),
-        bezeichnung: ex.description,
-        menge: 1,
-        einzelpreis: Number(ex.price),
-        gesamtpreis: Number(ex.price),
-        sort_order: sortIdx++,
-      });
-    }
-
-    // Compute totals matching Angebot summary contract (netto/mwst/brutto)
-    const subtotal = Number(lead.subtotal || 0);
-    const totalDiscount = Number(lead.total_discount || 0);
-    const totalPrice = Number(lead.total_price || 0);
-    const netto = totalPrice / 1.19;
-    const mwstSatz = 19;
-    const mwstBetrag = totalPrice - netto;
-
-    res.json({
-      summary: {
-        id: lead.id,
-        form_id: parseInt(id),
-        netto_summe: netto.toFixed(2),
-        mwst_satz: mwstSatz,
-        mwst_betrag: mwstBetrag.toFixed(2),
-        brutto_summe: totalPrice.toFixed(2),
-        angebot_datum: lead.created_at,
-        bemerkungen: lead.notes,
-        // For UI: indicate which path the data came from
-        source: 'lead',
-        original_subtotal: subtotal,
-        original_total_discount: totalDiscount,
-      },
-      items: mappedItems
-    });
+    res.json(await resolveFormAngebot(id));
   } catch (err) {
     console.error('Error fetching Angebot:', err);
     res.status(500).json({ error: 'Failed to fetch Angebot data' });
@@ -2942,72 +3221,53 @@ app.post('/api/forms/:id/rechnung', authenticateToken, async (req, res) => {
       return res.status(400).json({ error: 'Invalid anzahlungsbetrag' });
     }
 
-    // Snapshot form (kunde_*) and angebot (totals + items)
+    // Snapshot customer and the explicitly accepted Angebot.
     const formRow = (await pool.query(
-      `SELECT kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, branch_id
+      `SELECT kunde_vorname, kunde_nachname, kunde_email, kunde_telefon, kundenlokation, branch_id, status
        FROM aufmass_forms WHERE id = $1`, [id])).rows[0];
     if (!formRow) return res.status(404).json({ error: 'Form not found' });
+    const angebotData = await resolveFormAngebot(id);
+    if (angebotData.selection_required) {
+      return res.status(400).json({ error: 'Bitte wählen Sie zuerst das angenommene Angebot aus' });
+    }
+    const angebotRow = angebotData.summary;
+    const itemsRows = angebotData.items;
+    if (!angebotRow) return res.status(400).json({ error: 'Form has no accepted Angebot — cannot create Rechnung' });
+    if (itemsRows.length === 0) return res.status(400).json({ error: 'Accepted Angebot has no items' });
 
-    // (1) Legacy form-bazli Angebot
-    let angebotRow = (await pool.query(
-      'SELECT netto_summe, mwst_satz, mwst_betrag, brutto_summe FROM aufmass_angebot WHERE form_id = $1',
-      [id])).rows[0];
-    let itemsRows = (await pool.query(
-      'SELECT bezeichnung, menge, einzelpreis, gesamtpreis, sort_order FROM aufmass_angebot_items WHERE form_id = $1 ORDER BY sort_order, id',
-      [id])).rows;
-
-    // (2) MODÜL B fallback: form'un lead_id'si varsa lead-bazli items'i Angebot formatina cevir.
-    if (!angebotRow || itemsRows.length === 0) {
-      const formInfo = await pool.query('SELECT lead_id FROM aufmass_forms WHERE id = $1', [id]);
-      const leadId = formInfo.rows[0]?.lead_id;
-      if (leadId) {
-        const leadRes = await pool.query('SELECT * FROM aufmass_leads WHERE id = $1', [leadId]);
-        if (leadRes.rows.length > 0) {
-          const lead = leadRes.rows[0];
-          const leadItems = (await pool.query('SELECT * FROM aufmass_lead_items WHERE lead_id = $1 ORDER BY id', [leadId])).rows;
-          const leadExtras = (await pool.query('SELECT * FROM aufmass_lead_extras WHERE lead_id = $1 ORDER BY id', [leadId])).rows;
-
-          const totalPrice = Number(lead.total_price || 0);
-          const nettoCalc = totalPrice / 1.19;
-          const mwstSatzCalc = 19;
-          const mwstBetragCalc = totalPrice - nettoCalc;
-
-          angebotRow = {
-            netto_summe: nettoCalc.toFixed(2),
-            mwst_satz: mwstSatzCalc,
-            mwst_betrag: mwstBetragCalc.toFixed(2),
-            brutto_summe: totalPrice.toFixed(2),
-          };
-
-          let sortIdx = 0;
-          itemsRows = leadItems.map(it => {
-            const dimsLabel = (it.breite && it.tiefe)
-              ? ` (${it.breite}×${it.tiefe} mm)`
-              : (it.unit_label ? ` (${it.unit_label})` : '');
-            const lineTotal = (Number(it.unit_price) * Number(it.quantity)) - Number(it.discount || 0);
-            return {
-              bezeichnung: `${it.product_name}${dimsLabel}`,
-              menge: Number(it.quantity),
-              einzelpreis: Number(it.unit_price),
-              gesamtpreis: lineTotal,
-              sort_order: sortIdx++,
-            };
-          });
-          for (const ex of leadExtras) {
-            itemsRows.push({
-              bezeichnung: ex.description,
-              menge: 1,
-              einzelpreis: Number(ex.price),
-              gesamtpreis: Number(ex.price),
-              sort_order: sortIdx++,
-            });
-          }
-        }
+    if (type === 'schlussrechnung') {
+      const schlussAllowed = formRow.status === 'abnahme' || String(formRow.status).startsWith('reklamation_');
+      if (!schlussAllowed) {
+        return res.status(400).json({ error: 'Schlussrechnung ist erst nach der Abnahme oder bei einer Reklamation möglich' });
+      }
+      const abnahmeResult = await pool.query(
+        `SELECT a.ist_fertig, a.hat_probleme, a.baustelle_sauber, a.monteur_note, a.kunde_name,
+                (SELECT COUNT(*)::int FROM aufmass_abnahme_bilder b WHERE b.form_id = a.form_id) AS photo_count
+         FROM aufmass_abnahme a
+         WHERE a.form_id = $1`,
+        [id]
+      );
+      const abnahme = abnahmeResult.rows[0];
+      const abnahmeCompleted = abnahme
+        && (abnahme.ist_fertig || abnahme.hat_probleme)
+        && Boolean(abnahme.baustelle_sauber)
+        && Number(abnahme.monteur_note) >= 1
+        && Number(abnahme.monteur_note) <= 6
+        && Boolean(String(abnahme.kunde_name || '').trim())
+        && Number(abnahme.photo_count) >= 2;
+      if (!abnahmeCompleted) {
+        return res.status(400).json({ error: 'Bitte zuerst das vollständige Abnahmeformular speichern' });
+      }
+      const existingSchluss = await pool.query(
+        `SELECT id FROM aufmass_rechnungen
+         WHERE form_id = $1 AND type = 'schlussrechnung' AND status != 'storniert'
+         LIMIT 1`,
+        [id]
+      );
+      if (existingSchluss.rows.length > 0) {
+        return res.status(409).json({ error: 'Für dieses Aufmaß existiert bereits eine Schlussrechnung' });
       }
     }
-
-    if (!angebotRow) return res.status(400).json({ error: 'Form has no Angebot — cannot create Rechnung' });
-    if (itemsRows.length === 0) return res.status(400).json({ error: 'Angebot has no items' });
 
     // For Schlussrechnung the displayed totals stay the full Angebot brutto;
     // the "Restbetrag" is computed at PDF render time from anzahlungen.
@@ -3063,12 +3323,14 @@ app.post('/api/forms/:id/rechnung', authenticateToken, async (req, res) => {
        JSON.stringify(finalItems), req.user.id]
     );
 
-    // Advance the parent form to "Entwurf" workflow status
-    const newFormStatus = type === 'schlussrechnung' ? 'schluss_rechnung_erstellt' : 'rechnung_erstellt';
-    await pool.query(
-      `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
-      [newFormStatus, id]
-    );
+    // Anzahlungs-/Zwischenrechnungen do not replace the project's lifecycle
+    // stage. Schluss is the terminal workflow and advances only after Abnahme.
+    if (type === 'schlussrechnung') {
+      await pool.query(
+        `UPDATE aufmass_forms SET status = 'schluss_rechnung_erstellt', status_date = CURRENT_DATE WHERE id = $1`,
+        [id]
+      );
+    }
 
     res.status(201).json(inserted.rows[0]);
   } catch (err) {
@@ -3217,11 +3479,12 @@ app.post('/api/rechnungen/:id/mark-sent', authenticateToken, requireAdmin, async
        RETURNING form_id, type`, [id]);
     if (r.rows.length === 0) return res.status(409).json({ error: 'Rechnung is not entwurf' });
 
-    // Advance form status as well
-    const formStatus = r.rows[0].type === 'schlussrechnung' ? 'rest_rechnung_erstellt' : 'gesendet';
-    await pool.query(
-      `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
-      [formStatus, r.rows[0].form_id]);
+    const formStatus = r.rows[0].type === 'schlussrechnung' ? 'rest_rechnung_erstellt' : null;
+    if (formStatus) {
+      await pool.query(
+        `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
+        [formStatus, r.rows[0].form_id]);
+    }
 
     res.json({ success: true, form_status: formStatus });
   } catch (err) {
@@ -3536,11 +3799,11 @@ app.get('/api/stats', authenticateToken, async (req, res) => {
     if (req.branchId) {
       total = await pool.query('SELECT COUNT(*) as count FROM aufmass_forms WHERE branch_id = $1', [req.branchId]);
       completed = await pool.query("SELECT COUNT(*) as count FROM aufmass_forms WHERE status = 'abnahme' AND branch_id = $1", [req.branchId]);
-      draft = await pool.query("SELECT COUNT(*) as count FROM aufmass_forms WHERE status IN ('neu', 'angebot_versendet') AND branch_id = $1", [req.branchId]);
+      draft = await pool.query("SELECT COUNT(*) as count FROM aufmass_forms WHERE status IN ('neu', 'angebot_ausstehend', 'angebot_versendet') AND branch_id = $1", [req.branchId]);
     } else {
       total = await pool.query('SELECT COUNT(*) as count FROM aufmass_forms');
       completed = await pool.query("SELECT COUNT(*) as count FROM aufmass_forms WHERE status = 'abnahme'");
-      draft = await pool.query("SELECT COUNT(*) as count FROM aufmass_forms WHERE status IN ('neu', 'angebot_versendet')");
+      draft = await pool.query("SELECT COUNT(*) as count FROM aufmass_forms WHERE status IN ('neu', 'angebot_ausstehend', 'angebot_versendet')");
     }
 
     res.json({
@@ -5648,6 +5911,42 @@ app.put('/api/lead-products/:id', authenticateToken, async (req, res) => {
   }
 });
 
+// Bulk percentage price adjustment for one product (admin/office only).
+// Scales EVERY active priced row (all variants / breite / tiefe) of the product by
+// (1 + percent/100), rounded to 2 decimals. percent can be negative (discount) or positive (markup).
+app.post('/api/lead-products/:productName/adjust-price', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin' && req.user.role !== 'office') {
+      return res.status(403).json({ error: 'Admin or office access required' });
+    }
+    const productName = decodeURIComponent(req.params.productName);
+    const percent = Number(req.body.percent);
+    if (!Number.isFinite(percent) || percent === 0 || percent <= -100 || Math.abs(percent) > 90) {
+      return res.status(400).json({ error: 'percent must be a non-zero number between -90 and 90' });
+    }
+    const q = req.query && (req.query.branch || req.query.branchSlug);
+    const branchSlug = req.branchId || (typeof q === 'string' ? q.toLowerCase() : null);
+    const factor = 1 + percent / 100;
+
+    const where = branchSlug
+      ? 'product_name = $2 AND branch_id = $3 AND price IS NOT NULL AND price <> 0 AND COALESCE(is_active, true) = true'
+      : 'product_name = $2 AND price IS NOT NULL AND price <> 0 AND COALESCE(is_active, true) = true';
+    const params = branchSlug ? [factor, productName, branchSlug] : [factor, productName];
+
+    const result = await pool.query(
+      `UPDATE aufmass_lead_products
+       SET price = ROUND(GREATEST(price * $1, 0)::numeric, 2)
+       WHERE ${where}
+       RETURNING id`,
+      params
+    );
+    res.json({ updated: result.rowCount || 0, percent, product_name: productName });
+  } catch (err) {
+    console.error('Adjust product price error:', err);
+    res.status(500).json({ error: 'Failed to adjust prices' });
+  }
+});
+
 // Delete a product price entry (admin/office only)
 app.delete('/api/lead-products/:id', authenticateToken, async (req, res) => {
   console.log('=== DELETE LEAD PRODUCT START ===');
@@ -5706,13 +6005,17 @@ app.get('/api/lead-products/names', authenticateToken, async (req, res) => {
   try {
     const branchSlug = await resolveProductPricingBranchSlug(req);
     const result = await pool.query(
-      `SELECT DISTINCT product_name FROM aufmass_lead_products
+      `SELECT product_name,
+              min(category) AS category,
+              min(product_type) AS product_type
+       FROM aufmass_lead_products
        WHERE branch_id = $1
          AND COALESCE(is_active, true) = true
+       GROUP BY product_name
        ORDER BY product_name`,
       [branchSlug]
     );
-    res.json(result.rows.map(r => r.product_name));
+    res.json(result.rows);
   } catch (err) {
     console.error('Get product names error:', err);
     res.status(500).json({ error: 'Failed to fetch product names' });
@@ -5741,13 +6044,24 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
     // Pricing-type='unit' fallback (no dimensions involved)
     if (axes.length === 0) {
       const variantFilter = priceVariantSqlFilter(priceVariant, 3);
-      const r = await pool.query(
+      let r = await pool.query(
         `SELECT * FROM aufmass_lead_products
          WHERE branch_id = $1 AND product_name = $2
-           AND pricing_type = 'unit' AND is_active = true${variantFilter.sql}
+           AND pricing_type = 'unit' AND is_active = true
+           AND NOT (COALESCE(price_variant, '{}'::jsonb) ? 'price_component')${variantFilter.sql}
          LIMIT 1`,
         [branchSlug, productName, ...variantFilter.params]
       );
+      if (r.rows.length === 0 && priceVariant) {
+        r = await pool.query(
+          `SELECT * FROM aufmass_lead_products
+           WHERE branch_id = $1 AND product_name = $2
+             AND pricing_type = 'unit' AND is_active = true
+             AND COALESCE(price_variant, '{}'::jsonb) = '{}'::jsonb
+           LIMIT 1`,
+          [branchSlug, productName]
+        );
+      }
       if (r.rows.length > 0) {
         return res.json({
           matched: true, exact: true,
@@ -5761,12 +6075,22 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
     // Exact match on size_values JSONB equality
     const normalizedSV = Object.fromEntries(axes.map(a => [a, Number(size_values[a])]));
     const exactVariantFilter = priceVariantSqlFilter(priceVariant, 4);
-    const exact = await pool.query(
+    let exact = await pool.query(
       `SELECT * FROM aufmass_lead_products
        WHERE branch_id = $1 AND product_name = $2
-         AND size_values = $3::jsonb AND is_active = true${exactVariantFilter.sql}`,
+         AND size_values = $3::jsonb AND is_active = true
+         AND NOT (COALESCE(price_variant, '{}'::jsonb) ? 'price_component')${exactVariantFilter.sql}`,
       [branchSlug, productName, JSON.stringify(normalizedSV), ...exactVariantFilter.params]
     );
+    if (exact.rows.length === 0 && priceVariant) {
+      exact = await pool.query(
+        `SELECT * FROM aufmass_lead_products
+         WHERE branch_id = $1 AND product_name = $2
+           AND size_values = $3::jsonb AND is_active = true
+           AND COALESCE(price_variant, '{}'::jsonb) = '{}'::jsonb`,
+        [branchSlug, productName, JSON.stringify(normalizedSV)]
+      );
+    }
     if (exact.rows.length > 0) {
       return res.json({
         matched: true, exact: true,
@@ -5785,14 +6109,26 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
     const variantFilter = priceVariantSqlFilter(priceVariant, axes.length + 3);
     const params = [branchSlug, productName, ...axes.map(a => normalizedSV[a]), ...variantFilter.params];
 
-    const rounded = await pool.query(
+    let rounded = await pool.query(
       `SELECT * FROM aufmass_lead_products
        WHERE branch_id = $1 AND product_name = $2 AND is_active = true
+         AND NOT (COALESCE(price_variant, '{}'::jsonb) ? 'price_component')
          AND size_values IS NOT NULL AND ${conditions}${variantFilter.sql}
        ORDER BY ${orderBy}
        LIMIT 1`,
       params
     );
+    if (rounded.rows.length === 0 && priceVariant) {
+      rounded = await pool.query(
+        `SELECT * FROM aufmass_lead_products
+         WHERE branch_id = $1 AND product_name = $2 AND is_active = true
+           AND COALESCE(price_variant, '{}'::jsonb) = '{}'::jsonb
+           AND size_values IS NOT NULL AND ${conditions}
+         ORDER BY ${orderBy}
+         LIMIT 1`,
+        [branchSlug, productName, ...axes.map(a => normalizedSV[a])]
+      );
+    }
     if (rounded.rows.length > 0) {
       const row = rounded.rows[0];
       return res.json({
@@ -5808,6 +6144,68 @@ app.post('/api/lead-products/:productName/lookup', authenticateToken, async (req
   } catch (err) {
     console.error('Lead-products lookup error:', err);
     res.status(500).json({ error: 'Lookup failed' });
+  }
+});
+
+// Calculates additive catalog options independently from the base size lookup.
+// Component rows use price_variant.price_component and may be fixed, quantity-,
+// metre-, area-, or dimension-based. They are never eligible as base prices.
+app.post('/api/lead-products/:productName/options/calculate', authenticateToken, async (req, res) => {
+  try {
+    const { productName } = req.params;
+    const { size_values: rawSizeValues, selected_components: selectedComponents } = req.body || {};
+    const priceVariant = normalizePriceVariantInput(req.body || {}) || {};
+    const branchSlug = await resolveProductPricingBranchSlug(req);
+    const sizeValues = rawSizeValues && typeof rawSizeValues === 'object'
+      ? Object.fromEntries(
+          Object.entries(rawSizeValues)
+            .filter(([, value]) => Number.isFinite(Number(value)))
+            .map(([key, value]) => [key, Number(value)])
+        )
+      : {};
+
+    if (!Array.isArray(selectedComponents)) {
+      return res.status(400).json({ error: 'selected_components array required in body' });
+    }
+
+    const normalizedSelections = selectedComponents
+      .map(selection => {
+        if (typeof selection === 'string') return { code: selection, quantity: 1 };
+        if (!selection || typeof selection !== 'object') return null;
+        const code = String(selection.code || '').trim();
+        if (!code) return null;
+        const quantity = Number(selection.quantity);
+        const measure = Number(selection.measure);
+        return {
+          code,
+          quantity: Number.isFinite(quantity) && quantity > 0 ? quantity : 1,
+          measure: Number.isFinite(measure) && measure > 0 ? measure : null,
+        };
+      })
+      .filter(Boolean);
+
+    if (normalizedSelections.length === 0) {
+      return res.json({ additional_price: 0, components: [], unresolved: [] });
+    }
+
+    const codes = [...new Set(normalizedSelections.map(selection => selection.code))];
+    const componentResult = await pool.query(
+      `SELECT * FROM aufmass_lead_products
+       WHERE branch_id = $1 AND product_name = $2 AND is_active = true
+         AND price_variant->>'price_component' = ANY($3)
+       ORDER BY id`,
+      [branchSlug, productName, codes]
+    );
+
+    res.json(calculateLewensOptionPricing({
+      rows: componentResult.rows,
+      selections: normalizedSelections,
+      sizeValues,
+      priceVariant,
+    }));
+  } catch (err) {
+    console.error('Lead product option calculation error:', err);
+    res.status(500).json({ error: 'Option calculation failed' });
   }
 });
 
@@ -5980,15 +6378,47 @@ app.post('/api/leads', authenticateToken, async (req, res) => {
     // MODÜL B: If created from an existing Aufmaß, link the form to this lead.
     // Branch-scoped UPDATE so callers cannot link forms outside their branch.
     if (aufmass_form_id) {
+      let linkedForm;
       if (req.branchId) {
-        await pool.query(
-          'UPDATE aufmass_forms SET lead_id = $1 WHERE id = $2 AND branch_id = $3',
+        linkedForm = await pool.query(
+          `UPDATE aufmass_forms
+           SET lead_id = $1,
+               status = CASE
+                 WHEN status IN ('entwurf', 'neu', 'aufmass_genommen') THEN 'angebot_ausstehend'
+                 ELSE status
+               END,
+               status_date = CASE
+                 WHEN status IN ('entwurf', 'neu', 'aufmass_genommen') THEN CURRENT_DATE
+                 ELSE status_date
+               END,
+               updated_at = NOW()
+           WHERE id = $2 AND branch_id = $3
+           RETURNING id, status`,
           [leadId, aufmass_form_id, req.branchId]
         );
       } else {
-        await pool.query(
-          'UPDATE aufmass_forms SET lead_id = $1 WHERE id = $2',
+        linkedForm = await pool.query(
+          `UPDATE aufmass_forms
+           SET lead_id = $1,
+               status = CASE
+                 WHEN status IN ('entwurf', 'neu', 'aufmass_genommen') THEN 'angebot_ausstehend'
+                 ELSE status
+               END,
+               status_date = CASE
+                 WHEN status IN ('entwurf', 'neu', 'aufmass_genommen') THEN CURRENT_DATE
+                 ELSE status_date
+               END,
+               updated_at = NOW()
+           WHERE id = $2
+           RETURNING id, status`,
           [leadId, aufmass_form_id]
+        );
+      }
+      if (linkedForm.rows[0]?.status === 'angebot_ausstehend') {
+        await pool.query(
+          `INSERT INTO aufmass_status_history (form_id, status, changed_by, status_date, notes)
+           VALUES ($1, 'angebot_ausstehend', $2, CURRENT_DATE, $3)`,
+          [aufmass_form_id, req.user?.id || null, 'Angebot erstellt, Versand ausstehend']
         );
       }
     }
@@ -6429,6 +6859,35 @@ app.post('/api/leads/:id/mark-angebot-sent', authenticateToken, async (req, res)
     if (ownership.rowCount === 0) {
       return res.status(404).json({ error: 'Lead not found' });
     }
+    const hasExplicitAngebotIds = Array.isArray(req.body?.angebotIds);
+    const angebotIds = hasExplicitAngebotIds
+      ? [...new Set(req.body.angebotIds.map(Number).filter(Number.isInteger))]
+      : [];
+    if (hasExplicitAngebotIds && angebotIds.length === 0) {
+      return res.status(400).json({ error: 'Kein versendetes Angebot angegeben' });
+    }
+    if (angebotIds.length > 0) {
+      const matching = await pool.query(
+        'SELECT id FROM aufmass_lead_angebote WHERE lead_id = $1 AND id = ANY($2::int[])',
+        [id, angebotIds]
+      );
+      if (matching.rows.length !== angebotIds.length) {
+        return res.status(400).json({ error: 'Mindestens ein Angebot gehört nicht zu diesem Vorgang' });
+      }
+      await pool.query(
+        `UPDATE aufmass_lead_angebote
+         SET status = CASE WHEN status = 'angenommen' THEN status ELSE 'versendet' END, updated_at = NOW()
+         WHERE lead_id = $1 AND id = ANY($2::int[])`,
+        [id, angebotIds]
+      );
+    } else {
+      await pool.query(
+        `UPDATE aufmass_lead_angebote
+         SET status = CASE WHEN status = 'angenommen' THEN status ELSE 'versendet' END, updated_at = NOW()
+         WHERE lead_id = $1`,
+        [id]
+      );
+    }
     await pool.query(
       `UPDATE aufmass_leads SET angebot_sent_at = COALESCE(angebot_sent_at, NOW()), updated_at = NOW() WHERE id = $1`,
       [id]
@@ -6453,6 +6912,12 @@ app.post('/api/leads/:id/mark-angebot-sent-manual', authenticateToken, requireAd
     if (ownership.rowCount === 0) {
       return res.status(404).json({ error: 'Lead not found' });
     }
+    await pool.query(
+      `UPDATE aufmass_lead_angebote
+       SET status = CASE WHEN status = 'angenommen' THEN status ELSE 'versendet' END, updated_at = NOW()
+       WHERE lead_id = $1`,
+      [id]
+    );
     await pool.query(
       `UPDATE aufmass_leads SET angebot_sent_at = COALESCE(angebot_sent_at, NOW()), updated_at = NOW() WHERE id = $1`,
       [id]
@@ -6487,7 +6952,8 @@ app.delete('/api/leads/:id', authenticateToken, async (req, res) => {
 app.post('/api/leads/:id/angebote', authenticateToken, async (req, res) => {
   try {
     const { id } = req.params;
-    const { items, extras, notes, subtotal, total_discount, total_price } = req.body;
+    const { items, extras, notes, subtotal, total_discount, total_price,
+      customer_firstname, customer_lastname, customer_email, customer_phone, customer_address } = req.body;
 
     // Verify lead exists
     const leadCheck = req.branchId
@@ -6496,6 +6962,24 @@ app.post('/api/leads/:id/angebote', authenticateToken, async (req, res) => {
 
     if (leadCheck.rows.length === 0) {
       return res.status(404).json({ error: 'Lead not found' });
+    }
+
+    // When a new angebot is created, the salesperson may also have corrected the
+    // customer details — persist them to the shared lead so all angebote stay in sync.
+    if (customer_firstname !== undefined || customer_lastname !== undefined ||
+        customer_email !== undefined || customer_phone !== undefined || customer_address !== undefined) {
+      await pool.query(
+        `UPDATE aufmass_leads
+         SET customer_firstname = COALESCE($1, customer_firstname),
+             customer_lastname  = COALESCE($2, customer_lastname),
+             customer_email     = COALESCE($3, customer_email),
+             customer_phone     = COALESCE($4, customer_phone),
+             customer_address   = COALESCE($5, customer_address),
+             updated_at = NOW()
+         WHERE id = $6`,
+        [customer_firstname ?? null, customer_lastname ?? null, customer_email ?? null,
+         customer_phone ?? null, customer_address ?? null, id]
+      );
     }
 
     // Generate angebot_nummer using race-safe counter (same logic as POST /api/leads).
@@ -7662,8 +8146,8 @@ app.post('/api/email/send', authenticateToken, async (req, res) => {
         `UPDATE aufmass_rechnungen SET status = 'gesendet', sent_at = NOW() WHERE id = $1`,
         [rechnungRow.id]
       );
-      if (rechnungRow.form_id) {
-        const newFormStatus = rechnungRow.type === 'schlussrechnung' ? 'rest_rechnung_erstellt' : 'gesendet';
+      if (rechnungRow.form_id && rechnungRow.type === 'schlussrechnung') {
+        const newFormStatus = 'rest_rechnung_erstellt';
         await pool.query(
           `UPDATE aufmass_forms SET status = $1, status_date = CURRENT_DATE WHERE id = $2`,
           [newFormStatus, rechnungRow.form_id]
@@ -8601,7 +9085,7 @@ app.get('/api/admin/branch-details', authenticateToken, requireAdmin, async (req
     const funnelResult = await pool.query(`
       SELECT branch_id,
         COUNT(*) FILTER (WHERE status NOT IN ('papierkorb','entwurf')) as total_aufmass,
-        COUNT(*) FILTER (WHERE status IN ('angebot_versendet','auftrag_erteilt','bauantrag','anzahlung','bestellt','montage_geplant','montage_gestartet','abnahme','reklamation_eingegangen','reklamation_bestellt')) as has_angebot,
+        COUNT(*) FILTER (WHERE status IN ('angebot_ausstehend','angebot_versendet','auftrag_erteilt','bauantrag','anzahlung','bestellt','montage_geplant','montage_gestartet','abnahme','reklamation_eingegangen','reklamation_bestellt')) as has_angebot,
         COUNT(*) FILTER (WHERE status IN ('auftrag_erteilt','bauantrag','anzahlung','bestellt','montage_geplant','montage_gestartet','abnahme')) as has_auftrag,
         COUNT(*) FILTER (WHERE status IN ('abnahme')) as completed
       FROM aufmass_forms

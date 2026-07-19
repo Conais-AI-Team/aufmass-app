@@ -575,6 +575,34 @@
   transition: all 0.2s;
 }
 
+.price-adjust-inline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.price-adjust-input {
+  width: 70px;
+  padding: 5px 7px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  font-size: 0.78rem;
+  background: rgba(255, 255, 255, 0.05);
+  color: inherit;
+}
+
+.price-adjust-suffix {
+  font-size: 0.8rem;
+  color: #8b95a5;
+  margin: 0 2px 0 -1px;
+}
+
+.light-theme .price-adjust-input {
+  background: #fff;
+  border-color: #d0d7de;
+  color: #1f2328;
+}
+
 .btn-icon-small:hover {
   background: rgba(163, 230, 53, 0.1);
   border-color: rgba(163, 230, 53, 0.3);

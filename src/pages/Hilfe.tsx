@@ -86,13 +86,13 @@ const FAQ: FaqCategory[] = [
     items: [
       { q: 'Wie erstelle ich ein Angebot?', a: 'Über „Neues Angebot" in der Seitenleiste oder direkt aus einem bestehenden Aufmaß. Kundendaten und Positionen werden übernommen, sodass Sie nur noch Preise und Details ergänzen.' },
       { q: 'Wie versende ich ein Angebot per E-Mail an den Kunden?', a: 'Im Angebot bzw. im Aufmaß-Abschluss gibt es die Funktion „Per E-Mail senden". Das PDF wird automatisch angehängt; optional auch die AGB. Voraussetzung ist, dass Ihre E-Mail-Einstellungen eingerichtet sind (siehe Bereich „E-Mail").' },
-      { q: 'Was bedeutet die Verbindung zwischen Aufmaß und Angebot?', a: 'Aufmaß und Angebot sind synchronisiert: Wird ein Angebot versendet, springt das zugehörige Aufmaß automatisch auf den Status „Angebot Versendet" – und umgekehrt. So bleiben beide immer auf demselben Stand.' },
+      { q: 'Was bedeutet die Verbindung zwischen Aufmaß und Angebot?', a: 'Aufmaß und Angebot sind synchronisiert: Erst nach dem tatsächlichen E-Mail-Versand wechselt das zugehörige Aufmaß von „Aufmaß versenden" auf „Aufmaß versendet". Wird der Versand abgebrochen, bleibt „Aufmaß versenden" bestehen.' },
     ],
   },
   {
     id: 'status', title: 'Status & Ablauf', blurb: 'Der Weg vom Entwurf zur Abnahme',
     items: [
-      { q: 'Welche Status durchläuft ein Vorgang?', a: 'Der typische Ablauf: Entwurf, Aufmaß Genommen, Angebot Versendet, Auftrag Erteilt, Bauantrag, Anzahlung Erhalten, Bestellt, Montage Geplant, Montage Gestartet, Abnahme. Bei Reklamationen kommen die Status „Reklamation Eingegangen / Bestellt / Abgelehnt" hinzu.' },
+      { q: 'Welche Status durchläuft ein Vorgang?', a: 'Der typische Ablauf: Entwurf, Aufmaß Genommen, Aufmaß versenden, Aufmaß versendet, Auftrag Erteilt, Bauantrag, Anzahlung Erhalten, Bestellt, Montage Geplant, Montage Gestartet, Abnahme, gegebenenfalls Reklamation und zuletzt Schluss.' },
       { q: 'Wie ändere ich den Status eines Vorgangs?', a: 'Öffnen Sie das Aufmaß (als Office oder Administrator). Oben im Formular sehen Sie die Status-Leiste. Klicken Sie auf den gewünschten Status – Sie werden nach dem Datum der Änderung gefragt. Diese Funktion ist nur für Office- und Administrator-Rollen sichtbar.' },
     ],
   },

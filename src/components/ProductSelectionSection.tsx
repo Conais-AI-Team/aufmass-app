@@ -16,8 +16,15 @@ interface ProductSelectionSectionProps {
   updateSelection: (field: 'category' | 'productType' | 'model', value: string | string[]) => void;
 }
 
+// Zubehör (accessories) and Montage (installation) are commercial add-ons that belong in the
+// Angebot, not the on-site measurement form. The measurement team only captures the physical
+// product here; accessories/installation are priced when the offer is drawn up.
+const MEASUREMENT_HIDDEN_CATEGORIES = ['ZUBEHÖR', 'MONTAGE'];
+
 const ProductSelectionSection = ({ selection, updateSelection }: ProductSelectionSectionProps) => {
-  const categories = Object.keys(productConfig);
+  const categories = Object.keys(productConfig).filter(
+    (category) => !MEASUREMENT_HIDDEN_CATEGORIES.includes(category)
+  );
 
   const productTypes = selection.category
     ? Object.keys(productConfig[selection.category] || {})
@@ -25,7 +32,7 @@ const ProductSelectionSection = ({ selection, updateSelection }: ProductSelectio
   const models = selection.category && selection.productType
     ? (productConfig[selection.category]?.[selection.productType]?.models || [])
     : [];
-  const requiresModelSelection = selection.category !== 'MARKISE';
+  const requiresModelSelection = true;
   const selectedModel = Array.isArray(selection.model) ? (selection.model[0] || '') : (selection.model || '');
 
   // Glasdach gets multi-select, others get single dropdown

@@ -208,8 +208,12 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
         ? ` · Rechnung ${(created as { rechnung_nr?: string }).rechnung_nr}`
         : '';
       toast.success('Anzahlung erfasst', `${formatPrice(betragNum)} EUR${rechnungLabel}`);
-      const fresh = await getAnzahlungenByForm(formId);
-      setList(fresh);
+      const [freshAnz, freshRech] = await Promise.all([
+        getAnzahlungenByForm(formId),
+        getRechnungenByForm(formId),
+      ]);
+      setList(freshAnz);
+      setAnzahlungsRechnungen(freshRech.filter(r => r.type === 'anzahlungsrechnung'));
       reset();
       onSaved?.();
     } catch (err) {
@@ -225,7 +229,12 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
     setDeletingId(id);
     try {
       await deleteAnzahlung(id);
-      setList(list.filter(a => a.id !== id));
+      const [freshAnz, freshRech] = await Promise.all([
+        getAnzahlungenByForm(formId),
+        getRechnungenByForm(formId),
+      ]);
+      setList(freshAnz);
+      setAnzahlungsRechnungen(freshRech.filter(r => r.type === 'anzahlungsrechnung'));
       onSaved?.();
     } catch (err) {
       toast.error('Fehler', err instanceof Error ? err.message : 'Konnte nicht gelöscht werden.');

@@ -10,6 +10,8 @@ interface ProductConfigField {
   label?: string;
   type?: string;
   unit?: string;
+  models?: string[];
+  excludeModels?: string[];
 }
 
 interface ProductConfigType {
@@ -64,10 +66,16 @@ export function inferSizeProfile(fields: ProductConfigField[] | undefined): Size
 }
 
 /** Get size profile for a given category + product type, or null if unknown. */
-export function getSizeProfileForType(category: string | undefined, productType: string | undefined): SizeProfile | null {
+export function getSizeProfileForType(category: string | undefined, productType: string | undefined, modelName?: string): SizeProfile | null {
   if (!category || !productType) return null;
   const typeData = productConfig[category]?.[productType];
-  return inferSizeProfile(typeData?.fields);
+  const fields = modelName
+    ? typeData?.fields?.filter(field =>
+        (!field.models?.length || field.models.includes(modelName))
+        && (!field.excludeModels?.length || !field.excludeModels.includes(modelName))
+      )
+    : typeData?.fields;
+  return inferSizeProfile(fields);
 }
 
 /** Extract size_values from Aufmaß specifications (numeric mm fields only). */

@@ -13,7 +13,8 @@ const STATUS_META: Record<string, { label: string; color: string }> = {
   entwurf: { label: 'Entwurf', color: '#f97316' },
   auftrag_abgelehnt: { label: 'Auftrag Abgelehnt', color: '#6b7280' },
   neu: { label: 'Aufmaß Genommen', color: '#8b5cf6' },
-  angebot_versendet: { label: 'Angebot Versendet', color: '#a78bfa' },
+  angebot_ausstehend: { label: 'Aufmaß versenden', color: '#a78bfa' },
+  angebot_versendet: { label: 'Aufmaß versendet', color: '#a78bfa' },
   auftrag_erteilt: { label: 'Auftrag Erteilt', color: '#3b82f6' },
   rechnung_erstellt: { label: 'Rechnung Entwurf', color: '#38bdf8' },
   gesendet: { label: 'Rechnung Gesendet', color: '#0ea5e9' },
@@ -24,7 +25,7 @@ const STATUS_META: Record<string, { label: string; color: string }> = {
   montage_gestartet: { label: 'Montage Gestartet', color: '#ec4899' },
   abnahme: { label: 'Abnahme', color: '#10b981' },
   schluss_rechnung_erstellt: { label: 'Schlussrechnung Entwurf', color: '#22d3ee' },
-  rest_rechnung_erstellt: { label: 'Schlussrechnung Gesendet', color: '#0891b2' },
+  rest_rechnung_erstellt: { label: 'Schluss', color: '#0891b2' },
   reklamation_eingegangen: { label: 'Reklamation Eingegangen', color: '#ef4444' },
   reklamation_bestellt: { label: 'Reklamation Bestellt', color: '#dc2626' },
   reklamation_abgelehnt: { label: 'Reklamation Abgelehnt', color: '#b91c1c' },
@@ -502,13 +503,35 @@ const MontageteamPage = () => {
                             </div>
                             {(() => {
                               const m = statusMeta(form.status);
+                              const canOpenAbnahme = form.status === 'montage_gestartet'
+                                || form.status === 'abnahme'
+                                || String(form.status || '').startsWith('reklamation_');
                               return (
-                                <span
-                                  className="project-status-badge"
-                                  style={{ background: `${m.color}22`, color: m.color, whiteSpace: 'nowrap' }}
-                                >
-                                  {m.label}
-                                </span>
+                                <div className="project-row-actions">
+                                  <span
+                                    className="project-status-badge"
+                                    style={{ background: `${m.color}22`, color: m.color, whiteSpace: 'nowrap' }}
+                                  >
+                                    {m.label}
+                                  </span>
+                                  {canOpenAbnahme && (
+                                    <button
+                                      type="button"
+                                      className="project-abnahme-button"
+                                      title="Abnahmeformular öffnen"
+                                      aria-label="Abnahmeformular öffnen"
+                                      onClick={(event) => {
+                                        event.stopPropagation();
+                                        navigate(`/aufmasse?abnahme=${form.id}`);
+                                      }}
+                                    >
+                                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                                        <path d="M9 11l3 3L22 4" />
+                                        <path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" />
+                                      </svg>
+                                    </button>
+                                  )}
+                                </div>
                               );
                             })()}
                           </div>

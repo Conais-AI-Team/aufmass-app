@@ -286,13 +286,13 @@ const BranchUebersicht = () => {
                     {details.pipeline.slice(0, 8).map(p => {
                       const maxP = details.pipeline[0]?.count || 1;
                       const STATUS_COLORS: Record<string, string> = {
-                        'neu': '#8b5cf6', 'angebot_versendet': '#a78bfa', 'auftrag_erteilt': '#3b82f6',
+                        'neu': '#8b5cf6', 'angebot_ausstehend': '#a78bfa', 'angebot_versendet': '#a78bfa', 'auftrag_erteilt': '#3b82f6',
                         'anzahlung': '#06b6d4', 'bestellt': '#f59e0b', 'montage_geplant': '#a855f7',
                         'abnahme': '#10b981', 'reklamation_eingegangen': '#ef4444', 'bauantrag': '#2563eb',
                         'montage_gestartet': '#ec4899', 'auftrag_abgelehnt': '#6b7280',
                       };
                       const STATUS_LABELS: Record<string, string> = {
-                        'neu': 'Aufmaß Genommen', 'angebot_versendet': 'Angebot Versendet',
+                        'neu': 'Aufmaß Genommen', 'angebot_ausstehend': 'Aufmaß versenden', 'angebot_versendet': 'Aufmaß versendet',
                         'auftrag_erteilt': 'Auftrag Erteilt', 'anzahlung': 'Anzahlung',
                         'bestellt': 'Bestellt', 'montage_geplant': 'Montage Geplant',
                         'abnahme': 'Abnahme', 'reklamation_eingegangen': 'Reklamation',
