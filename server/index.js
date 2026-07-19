@@ -8671,8 +8671,10 @@ app.post('/api/products/:productId/cover-pdf', authenticateToken, requireAdmin, 
         if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
       }
 
-      // Default: first page selected
-      const defaultPages = [1];
+      // Default: all pages of the uploaded cover are selected (user can deselect
+      // unwanted pages in the picker). Previously only page 1 was selected, so
+      // multi-page cover PDFs silently showed just the first page in the Angebot.
+      const defaultPages = Array.from({ length: pageCount }, (_, i) => i + 1);
 
       const upsertResult = await pool.query(
         `INSERT INTO aufmass_product_cover_pdfs (branch_slug, product_id, file_path, selected_pages, page_count, uploaded_at)
