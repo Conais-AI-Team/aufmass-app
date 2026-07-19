@@ -53,8 +53,8 @@ interface AusAufmassTabProps {
 
 const AUFMASS_STATUS_OPTIONS: { value: string; label: string; color: string }[] = [
   { value: 'neu', label: 'Aufmaß Genommen', color: '#8b5cf6' },
-  { value: 'angebot_ausstehend', label: 'Aufmaß versenden', color: '#a78bfa' },
-  { value: 'angebot_versendet', label: 'Aufmaß versendet', color: '#a78bfa' },
+  { value: 'angebot_ausstehend', label: 'Angebot versenden', color: '#a78bfa' },
+  { value: 'angebot_versendet', label: 'Angebot versendet', color: '#a78bfa' },
 ];
 
 const formatDate = (iso?: string) => {

@@ -34,8 +34,8 @@ const STATUS_OPTIONS = [
   { value: 'entwurf', label: 'Entwurf', color: '#f97316' },
   { value: 'auftrag_abgelehnt', label: 'Auftrag Abgelehnt', color: '#6b7280' },
   { value: 'neu', label: 'Aufmaß Genommen', color: '#8b5cf6' },
-  { value: 'angebot_ausstehend', label: 'Aufmaß versenden', color: '#a78bfa' },
-  { value: 'angebot_versendet', label: 'Aufmaß versendet', color: '#a78bfa' },
+  { value: 'angebot_ausstehend', label: 'Angebot versenden', color: '#a78bfa' },
+  { value: 'angebot_versendet', label: 'Angebot versendet', color: '#a78bfa' },
   { value: 'auftrag_erteilt', label: 'Auftrag Erteilt', color: '#3b82f6' },
   { value: 'rechnung_erstellt', label: 'Rechnung Entwurf', color: '#38bdf8' },
   { value: 'gesendet', label: 'Rechnung Gesendet', color: '#0ea5e9' },
@@ -2422,11 +2422,18 @@ Aylux Team`;
                       <button
                         className="action-btn"
                         style={{ background: 'rgba(14,165,233,0.1)', color: '#0ea5e9', border: '1px solid rgba(14,165,233,0.2)' }}
-                        title="Rechnungen und Anzahlungen verwalten"
+                        title={getFormStatus(form) === 'auftrag_erteilt' ? 'Erste Rechnung (Anzahlung) erstellen' : 'Rechnungen und Anzahlungen verwalten'}
                         onClick={(e) => {
                           e.stopPropagation();
-                          setAnzahlungFormId(form.id!);
-                          setAnzahlungModalOpen(true);
+                          // First invoice is created directly at auftrag_erteilt; once a Rechnung
+                          // exists (status advances to rechnung_erstellt and beyond) the button
+                          // opens the management view, where further invoices can be created.
+                          if (getFormStatus(form) === 'auftrag_erteilt') {
+                            handleOpenRechnung(form.id!, 'anzahlungsrechnung');
+                          } else {
+                            setAnzahlungFormId(form.id!);
+                            setAnzahlungModalOpen(true);
+                          }
                         }}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
@@ -3514,6 +3521,11 @@ Aylux Team`;
           <AnzahlungForm
             formId={anzahlungFormId}
             onClose={() => setAnzahlungModalOpen(false)}
+            onCreateRechnung={() => {
+              const fid = anzahlungFormId;
+              setAnzahlungModalOpen(false);
+              if (fid !== null) handleOpenRechnung(fid, 'anzahlungsrechnung');
+            }}
           />
         )}
       </AnimatePresence>

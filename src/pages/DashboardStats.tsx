@@ -21,8 +21,8 @@ interface Lead {
 
 const STATUS_CONFIG: Record<string, { label: string; color: string }> = {
   'neu': { label: 'Aufmaß Genommen', color: '#8b5cf6' },
-  'angebot_ausstehend': { label: 'Aufmaß versenden', color: '#a78bfa' },
-  'angebot_versendet': { label: 'Aufmaß versendet', color: '#a78bfa' },
+  'angebot_ausstehend': { label: 'Angebot versenden', color: '#a78bfa' },
+  'angebot_versendet': { label: 'Angebot versendet', color: '#a78bfa' },
   'auftrag_erteilt': { label: 'Auftrag Erteilt', color: '#3b82f6' },
   'auftrag_abgelehnt': { label: 'Auftrag Abgelehnt', color: '#6b7280' },
   'anzahlung': { label: 'Anzahlung Erhalten', color: '#06b6d4' },

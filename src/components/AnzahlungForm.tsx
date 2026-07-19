@@ -25,12 +25,14 @@ interface AnzahlungFormProps {
   formId: number;
   onClose: () => void;
   onSaved?: () => void;
+  // Opens the RechnungForm to create a further Anzahlungsrechnung (additional invoice).
+  onCreateRechnung?: () => void;
 }
 
 const formatPrice = (n: number) =>
   new Intl.NumberFormat('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
 
-const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
+const AnzahlungForm = ({ formId, onClose, onSaved, onCreateRechnung }: AnzahlungFormProps) => {
   const toast = useToast();
   const [list, setList] = useState<Anzahlung[]>([]);
   // All Anzahlungsrechnungen issued for this form — surfaced here so the
@@ -313,6 +315,19 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
               customer has paid yet. Two row-actions:
                 ✓ confirm payment received → flips status + auto-creates receipt
                 🔔 send Mahnung → only if Zahlungsziel passed; toast otherwise */}
+          {onCreateRechnung && (
+            <button
+              type="button"
+              onClick={onCreateRechnung}
+              style={{
+                display: 'inline-flex', alignItems: 'center', gap: '6px', marginBottom: '14px',
+                padding: '9px 14px', borderRadius: '8px', border: '1px solid rgba(14,165,233,0.3)',
+                background: 'rgba(14,165,233,0.1)', color: '#0ea5e9', fontSize: '13px', fontWeight: 600, cursor: 'pointer',
+              }}
+            >
+              + {anzahlungsRechnungen.length > 0 ? 'Weitere Anzahlungsrechnung' : 'Anzahlungsrechnung erstellen'}
+            </button>
+          )}
           {anzahlungsRechnungen.length > 0 && (
             <>
               <div style={sectionTitle}>Anzahlungsrechnungen (ausgestellt)</div>
@@ -450,6 +465,21 @@ const AnzahlungForm = ({ formId, onClose, onSaved }: AnzahlungFormProps) => {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px', marginBottom: '10px' }}>
             <div>
               <label style={labelStyle}>Betrag (EUR)</label>
+              <div style={{ display: 'flex', gap: '6px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                {[10, 20, 30, 45, 50, 75, 100].map((pct) => (
+                  <button
+                    key={pct}
+                    type="button"
+                    onClick={() => setBetrag((bruttoSumme * pct / 100).toFixed(2).replace('.', ','))}
+                    style={{
+                      padding: '5px 10px', borderRadius: '6px',
+                      border: '1px solid var(--border-primary)',
+                      background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
+                      fontSize: '12px', fontWeight: 600, cursor: 'pointer',
+                    }}
+                  >{pct}%</button>
+                ))}
+              </div>
               <input type="text" inputMode="decimal" value={betrag} onChange={(e) => setBetrag(e.target.value)} placeholder="0,00" style={inputStyle} />
             </div>
             <div>

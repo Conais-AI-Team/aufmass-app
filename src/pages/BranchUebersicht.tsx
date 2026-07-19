@@ -292,7 +292,7 @@ const BranchUebersicht = () => {
                         'montage_gestartet': '#ec4899', 'auftrag_abgelehnt': '#6b7280',
                       };
                       const STATUS_LABELS: Record<string, string> = {
-                        'neu': 'Aufmaß Genommen', 'angebot_ausstehend': 'Aufmaß versenden', 'angebot_versendet': 'Aufmaß versendet',
+                        'neu': 'Aufmaß Genommen', 'angebot_ausstehend': 'Angebot versenden', 'angebot_versendet': 'Angebot versendet',
                         'auftrag_erteilt': 'Auftrag Erteilt', 'anzahlung': 'Anzahlung',
                         'bestellt': 'Bestellt', 'montage_geplant': 'Montage Geplant',
                         'abnahme': 'Abnahme', 'reklamation_eingegangen': 'Reklamation',
