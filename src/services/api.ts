@@ -1532,6 +1532,13 @@ export const adjustProductPrice = (
 ): Promise<{ updated: number; percent: number; product_name: string }> =>
   api.post(`/lead-products/${encodeURIComponent(productName)}/adjust-price`, { percent });
 
+/** Rename a product (all rows within the branch) to a new name. */
+export const renameProduct = (
+  productName: string,
+  newName: string
+): Promise<{ updated: number; product_name: string }> =>
+  api.post(`/lead-products/${encodeURIComponent(productName)}/rename`, { new_name: newName });
+
 // ============ MODÜL F2: PDF Cover/AGB Override ============
 export interface ProductCoverPdf {
   id: number;
