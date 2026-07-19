@@ -5947,6 +5947,32 @@ app.post('/api/lead-products/:productName/adjust-price', authenticateToken, asyn
   }
 });
 
+// Rename a product (admin/office only) — updates product_name on all rows of the
+// product within the resolved branch (active + inactive so no stale duplicate remains).
+app.post('/api/lead-products/:productName/rename', authenticateToken, async (req, res) => {
+  try {
+    if (req.user.role !== 'admin' && req.user.role !== 'office') {
+      return res.status(403).json({ error: 'Admin or office access required' });
+    }
+    const oldName = decodeURIComponent(req.params.productName);
+    const newName = String(req.body.new_name || '').trim();
+    if (!newName) return res.status(400).json({ error: 'new_name is required' });
+    if (newName === oldName) return res.json({ updated: 0, product_name: newName });
+
+    const q = req.query && (req.query.branch || req.query.branchSlug);
+    const branchSlug = req.branchId || (typeof q === 'string' ? q.toLowerCase() : null);
+    const where = branchSlug ? 'product_name = $2 AND branch_id = $3' : 'product_name = $2';
+    const params = branchSlug ? [newName, oldName, branchSlug] : [newName, oldName];
+
+    const result = await pool.query(
+      `UPDATE aufmass_lead_products SET product_name = $1 WHERE ${where}`, params);
+    res.json({ updated: result.rowCount || 0, product_name: newName });
+  } catch (err) {
+    console.error('Rename product error:', err);
+    res.status(500).json({ error: 'Failed to rename product' });
+  }
+});
+
 // Delete a product price entry (admin/office only)
 app.delete('/api/lead-products/:id', authenticateToken, async (req, res) => {
   console.log('=== DELETE LEAD PRODUCT START ===');

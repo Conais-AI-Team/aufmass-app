@@ -603,6 +603,48 @@
   color: #1f2328;
 }
 
+.product-rename-inline {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.product-rename-input {
+  padding: 4px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 6px;
+  font-size: 1rem;
+  font-weight: 600;
+  background: rgba(255, 255, 255, 0.06);
+  color: inherit;
+  min-width: 180px;
+}
+
+.light-theme .product-rename-input {
+  background: #fff;
+  border-color: #d0d7de;
+  color: #1f2328;
+}
+
+.product-rename-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: none;
+  border: none;
+  padding: 2px;
+  margin-left: 8px;
+  cursor: pointer;
+  color: #8b95a5;
+  opacity: 0.55;
+  vertical-align: middle;
+}
+
+.product-rename-btn:hover {
+  opacity: 1;
+  color: #7fa93d;
+}
+
 .btn-icon-small:hover {
   background: rgba(163, 230, 53, 0.1);
   border-color: rgba(163, 230, 53, 0.3);
