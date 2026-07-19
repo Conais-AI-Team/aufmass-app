@@ -14,6 +14,8 @@ export interface FieldConfig {
   valueLabel?: string;
   allowZero?: boolean;
   positions?: string[];
+  models?: string[];
+  excludeModels?: string[];
   conditionalField?: {
     trigger: string;
     field: string;

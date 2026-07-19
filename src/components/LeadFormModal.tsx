@@ -1,9 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl, lookupLeadProductBySize } from '../services/api';
+import { api, saveLeadPdf, saveAngebotPdf, getForm, getImageUrl, lookupLeadProductBySize, calculateLeadProductOptions } from '../services/api';
 import type { FormData as AufmassFormData } from '../services/api';
 import { generateAngebotPDF } from '../utils/angebotPdfGenerator';
 import { getSizeProfileForType, PROFILE_AXES, extractSizeValues, parseModelList, type SizeProfile } from '../utils/sizeProfile';
+import { getLewensSelectedComponents } from '../utils/lewensCatalog';
 import { MARKETING_SOURCES } from '../utils/marketingSources';
 import './LeadFormModal.css';
 
@@ -84,7 +85,8 @@ interface ProductRow {
   tiefe: number | '';
   quantity: number;
   price: number;
-  discount: number; // Discount in Euro
+  discount: number; // API/PDF amount in Euro, derived from discount_percent
+  discount_percent: number;
   dimensions: ProductDimensions;
   pricing_type: 'dimension' | 'unit';
   unit_label?: string;
@@ -109,6 +111,7 @@ interface ProductRow {
   // Last lookup status (drives the "Preis fehlt" / "auf X×Y aufgerundet" badge)
   lookup_status?: 'matched' | 'rounded' | 'price_missing' | 'no_match';
   rounded_to?: Record<string, number>;
+  price_variant?: Record<string, unknown> | null;
 }
 
 // MODÜL B v3: All dimensions are in mm (productConfig.json reference).
@@ -147,6 +150,126 @@ interface LeadExtra {
 }
 
 const generateId = () => Math.random().toString(36).substr(2, 9);
+const roundToTwo = (value: number) => Math.round((value + Number.EPSILON) * 100) / 100;
+const clampPercent = (value: number) => Math.min(100, Math.max(0, value));
+
+// Business rule: discounts entered in the Angebot are capped at 20 %.
+const MAX_DISCOUNT_PERCENT = 20;
+const clampDiscount = (value: number) => Math.min(MAX_DISCOUNT_PERCENT, Math.max(0, value));
+
+const buildPriceVariantFromSpecifications = (
+  category: string | undefined,
+  productType: string | undefined,
+  specs: Record<string, unknown>,
+  productName?: string
+): Record<string, unknown> | null => {
+  const variant: Record<string, unknown> = {};
+  const scope = `${category || ''} ${productType || ''}`.toLowerCase();
+  const isRoof = scope.includes('überdachung') || scope.includes('uberdachung') || scope.includes('glasdach');
+  const isFreestandingConstruction = scope.includes('freistehende konstruktion');
+  const lewensRoofModels = new Set(['Murano Modulare', 'Murano Puro', 'Murano Vetro', 'Murano Integrale', 'Murano Integrale Z']);
+  const isLewensRoof = Boolean(productName && lewensRoofModels.has(productName));
+  const normalizeZone = (value: unknown) => {
+    const lower = String(value || '').toLowerCase();
+    if (lower.includes('2a') || lower.includes('3')) return '2a_3';
+    if (lower.includes('1a') || lower.includes('2')) return '1a_2';
+    if (lower.includes('1')) return '1';
+    return '';
+  };
+  const normalizeBasis = (value: unknown) => {
+    const lower = String(value || '').toLowerCase();
+    if (lower.includes('exkl')) return 'exkl_dacheindeckung';
+    if (lower.includes('inkl')) return 'inkl_dacheindeckung';
+    return '';
+  };
+  const normalizeElementGlass = (value: unknown) => {
+    const lower = String(value || '').toLowerCase();
+    if (!lower) return '';
+    if (lower.includes('isolier')) return 'isolierglas';
+    if (lower.includes('matt') || lower.includes('milch')) return 'vsg_44_2_matt';
+    if (lower.includes('klar') || lower.includes('vsg')) return 'vsg_44_2_klar';
+    if (lower.includes('aluminium') || lower.includes('planken')) return 'aluminium';
+    return '';
+  };
+
+  if (isLewensRoof) {
+    const snowLoad = Number(String(specs.lewensSnowLoad || '').match(/\d+[,.]\d+/)?.[0].replace(',', '.'));
+    if (Number.isFinite(snowLoad)) variant.snow_load_kn_m2 = snowLoad;
+    variant.price_basis = 'exkl_dacheindeckung';
+    variant.glass_division = String(specs.lewensGlassDivision || '').toLowerCase().includes('mit') ? 'with' : 'without';
+    if (productName === 'Murano Modulare') {
+      variant.roof_type = 'B';
+      const rafterHeight = Number(String(specs.lewensRafterHeight || '').match(/\d+/)?.[0]);
+      if (Number.isFinite(rafterHeight)) variant.rafter_height_mm = rafterHeight;
+    } else {
+      const roofType = String(specs.lewensRoofType || '').toLowerCase();
+      variant.roof_type = roofType.includes('100') ? 'U_100' : (roofType.includes('50') ? 'U_50' : 'B');
+    }
+    return variant;
+  }
+
+  if (isRoof && !isFreestandingConstruction) {
+    const zone = normalizeZone(specs.schneelastzone);
+    const basis = normalizeBasis(specs.preisBasis) || 'inkl_dacheindeckung';
+    if (zone) variant.zone = zone;
+    if (basis) variant.price_basis = basis;
+  }
+
+  const eindeckung = String(specs.eindeckung || '').trim();
+  if (isRoof && !isFreestandingConstruction && eindeckung) {
+    const lower = eindeckung.toLowerCase();
+    if (lower.includes('pcs') || lower.includes('poly')) {
+      variant.covering = 'polycarbonat';
+      variant.glass = lower.includes('ir') ? 'ir_gold' : (lower.includes('milch') ? 'opal_milch' : 'klar_opal');
+    } else if (lower.includes('glas') || lower.includes('klar') || lower.includes('milch') || lower.includes('sonnenschutz')) {
+      variant.covering = 'glas';
+      if (lower.includes('sonnenschutz')) variant.glass = 'sonnenschutz';
+      else if (lower.includes('milch') || lower.includes('matt')) variant.glass = 'matt_milch';
+      else variant.glass = 'klar';
+    } else {
+      variant.covering = eindeckung;
+    }
+  }
+
+  if (!isRoof) {
+    const glass = normalizeElementGlass(specs.glasart || specs.glass || specs.glas || specs.eindeckung);
+    if (glass) variant.glass = glass;
+  }
+
+  if (productName === 'Murano Glissando' || productName === 'Murano Glissando Due') {
+    const glass = String(specs.lewensSlidingGlass || '').toLowerCase();
+    variant.glass = glass.includes('10') ? 'esg_10' : (glass.includes('8') ? 'esg_8' : 'without');
+    variant.opening = String(specs.oeffnungsrichtung || '').toLowerCase().includes('mittig') ? 'center' : 'side';
+  }
+  if (productName === 'Murano Dreieckschluss') {
+    variant.closure_type = String(specs.lewensClosureType || '').toLowerCase().includes('b') ? 'B' : 'A';
+  } else if (productName === 'Murano Dreiecksbespannung') {
+    variant.closure_type = String(specs.lewensClosureType || '').toLowerCase().includes('m2020') ? 'm2020' : 'standard';
+  } else if (productName === 'Murano Finestra') {
+    variant.closure_type = String(specs.lewensClosureType || '').toLowerCase().includes('schräg') ? 'sloped' : 'rectangle';
+  }
+
+  if (isFreestandingConstruction && specs.fundamente) {
+    variant.foundations = String(specs.fundamente).toLowerCase().includes('mit');
+  }
+
+  if (specs.spuren) variant.tracks = specs.spuren;
+
+  if (productName && ['Amalfi Unterglas', 'Amalfi Aufglas', 'Micro 860', 'Micro 1060'].includes(productName)) {
+    variant.zip = String(specs.zip || '').toLowerCase() === 'ja';
+  }
+  if (productName === 'Micro 100') {
+    variant.type_angle = String(specs.lewensTypeAngle || '').includes('135') ? '135' : '90';
+  }
+  if (productName === 'Micro 700') {
+    variant.fabric = String(specs.lewensFabric || '').toLowerCase().includes('soltis')
+      ? 'soltis_perform_92'
+      : 'acryl';
+    variant.retraction_brake = true;
+  }
+
+  return Object.keys(variant).length > 0 ? variant : null;
+};
 
 export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, editAngebotId, newAngebotForLeadId, fromAufmassFormId }: LeadFormModalProps) {
   // Customer info
@@ -159,13 +282,38 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
   const [notes, setNotes] = useState('');
 
   // Products
-  const [productNames, setProductNames] = useState<string[]>([]);
+  const [productNames, setProductNames] = useState<{ product_name: string; category: string | null; product_type: string | null }[]>([]);
+
+  // Two-step product picker: pick a category, then a product within it.
+  const CATEGORY_ORDER = ['ÜBERDACHUNG', 'MARKISE', 'UNTERBAUELEMENTE', 'ZUBEHÖR', 'MONTAGE'];
+  const productsByCategory = useMemo(() => {
+    const groups = new Map<string, string[]>();
+    for (const p of productNames) {
+      const cat = (p.category && p.category.trim()) || 'Sonstige';
+      if (!groups.has(cat)) groups.set(cat, []);
+      groups.get(cat)!.push(p.product_name);
+    }
+    for (const list of groups.values()) list.sort((a, b) => a.localeCompare(b, 'de'));
+    return groups;
+  }, [productNames]);
+  const categoryList = useMemo(() =>
+    [...productsByCategory.keys()].sort((a, b) => {
+      const ia = CATEGORY_ORDER.indexOf(a); const ib = CATEGORY_ORDER.indexOf(b);
+      return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib) || a.localeCompare(b, 'de');
+    }), [productsByCategory]);
+  const nameToCategory = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of productNames) m.set(p.product_name, (p.category && p.category.trim()) || 'Sonstige');
+    return m;
+  }, [productNames]);
+  // Per-row selected category (falls back to the category of the already-picked product).
+  const [rowCategories, setRowCategories] = useState<Record<string, string>>({});
   const [productRows, setProductRows] = useState<ProductRow[]>([]);
   const [extras, setExtras] = useState<LeadExtra[]>([]);
 
   // Discounts
   const [showItemDiscounts, setShowItemDiscounts] = useState(false);
-  const [totalDiscount, setTotalDiscount] = useState<number>(0);
+  const [totalDiscountPercent, setTotalDiscountPercent] = useState<number>(0);
 
   // Einzelangebote (separate quotes per product)
   const [einzelAngebote, setEinzelAngebote] = useState(false);
@@ -207,7 +355,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         setAddress(editData.customer_address || '');
         setMarketingSource(editData.marketing_source || '');
         setNotes('');
-        setTotalDiscount(0);
+        setTotalDiscountPercent(0);
+        setShowItemDiscounts(false);
         setProductRows([createEmptyRow()]);
         setExtras([]);
       } else if (editData) {
@@ -233,7 +382,15 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         const editItems = targetAngebot ? targetAngebot.items : editData.items;
         const editExtras = targetAngebot ? targetAngebot.extras : editData.extras;
         setNotes(targetAngebot ? (targetAngebot.notes || '') : (editData.notes || ''));
-        setTotalDiscount(targetAngebot ? (targetAngebot.total_discount || 0) : (editData.total_discount || 0));
+        const existingTotalDiscount = targetAngebot ? (targetAngebot.total_discount || 0) : (editData.total_discount || 0);
+        const existingItemDiscounts = editItems.reduce((sum, item) => sum + (item.discount || 0), 0);
+        const existingSubtotal = (targetAngebot?.subtotal ?? editData.subtotal)
+          || editItems.reduce((sum, item) => sum + (item.unit_price * item.quantity), 0)
+          + (editExtras || []).reduce((sum, extra) => sum + Number(extra.price || 0), 0);
+        const existingGlobalDiscountBase = Math.max(0, existingSubtotal - existingItemDiscounts);
+        setTotalDiscountPercent(existingGlobalDiscountBase > 0
+          ? roundToTwo((existingTotalDiscount / existingGlobalDiscountBase) * 100)
+          : 0);
 
         // Load product rows from edit data
         const loadEditRows = async () => {
@@ -244,6 +401,9 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
             row.quantity = item.quantity;
             row.price = item.unit_price;
             row.discount = item.discount || 0;
+            row.discount_percent = item.unit_price > 0 && item.quantity > 0
+              ? roundToTwo((row.discount / (item.unit_price * item.quantity)) * 100)
+              : 0;
             row.pricing_type = item.pricing_type || 'dimension';
             row.unit_label = item.unit_label;
             if (item.pricing_type === 'unit') {
@@ -275,6 +435,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           // Check if any items have discounts
           if (editItems.some(i => (i.discount || 0) > 0)) {
             setShowItemDiscounts(true);
+          } else {
+            setShowItemDiscounts(false);
           }
         };
         loadEditRows();
@@ -304,6 +466,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
     quantity: 1,
     price: 0,
     discount: 0,
+    discount_percent: 0,
     pricing_type: 'dimension',
     dimensions: {}
   });
@@ -321,7 +484,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
       setPhone(data.kundeTelefon || '');
       setAddress(data.kundenlokation || '');
       setNotes(data.bemerkungen || '');
-      setTotalDiscount(0);
+      setTotalDiscountPercent(0);
+      setShowItemDiscounts(false);
       setExtras([]);
       setSendEmailAfterSave(false);
 
@@ -384,19 +548,22 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
       }
 
       // Get available product names — auto-fill skipped if model not in this branch's catalog
-      const availableNames = await api.get<string[]>('/lead-products/names').catch(() => [] as string[]);
+      const availableNames = (await api.get<{ product_name: string }[]>('/lead-products/names').catch(() => []))
+        .map(r => r.product_name);
 
       const enrichedRows = await Promise.all(entries.map(async (entry) => {
         const r = createEmptyRow();
 
         // Determine size profile from category/product_type
-        const profile = getSizeProfileForType(entry.category, entry.productType);
+        const profile = getSizeProfileForType(entry.category, entry.productType, entry.modelName);
         const axes = profile ? PROFILE_AXES[profile] : [];
         const sizeValues = profile ? extractSizeValues(entry.specifications, profile) : {};
+        const priceVariant = buildPriceVariantFromSpecifications(entry.category, entry.productType, entry.specifications, entry.modelName);
 
         r.size_profile = profile;
         r.size_axes = axes;
         r.size_values = sizeValues;
+        r.price_variant = priceVariant;
         r.source_category = entry.category;
         r.source_product_type = entry.productType;
 
@@ -419,10 +586,15 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
         r.product_name = entry.modelName;
 
+        const menge = Number(entry.specifications.menge);
+        if (Number.isFinite(menge) && menge > 0) {
+          r.quantity = menge;
+        }
+
         // Generic N-axis lookup via the new endpoint (handles all 8 profiles)
         if (Object.keys(sizeValues).length > 0) {
           try {
-            const result = await lookupLeadProductBySize(entry.modelName, sizeValues);
+            const result = await lookupLeadProductBySize(entry.modelName, sizeValues, priceVariant);
             if (result.matched && result.lead_product) {
               const lp = result.lead_product;
               if (lp.price != null && lp.price > 0) {
@@ -462,6 +634,56 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
             console.warn('Generic lookup failed for', entry.modelName, e);
             r.lookup_status = 'no_match';
           }
+        } else {
+          try {
+            const dims = await loadDimensions(entry.modelName);
+            r.pricing_type = dims.pricing_type;
+            r.dimensions = dims.dimensions || {};
+            r.description = dims.description;
+            r.custom_fields = dims.custom_fields;
+            if (dims.pricing_type === 'unit') {
+              r.unit_label = dims.unit_label;
+              r.price = dims.unit_price || 0;
+              r.lookup_status = r.price > 0 ? 'matched' : 'price_missing';
+            }
+          } catch (e) {
+            console.warn('Unit lookup failed for', entry.modelName, e);
+            r.lookup_status = 'no_match';
+          }
+        }
+
+        const selectedComponents = getLewensSelectedComponents(
+          entry.specifications.lewensCatalogOptions,
+          entry.modelName,
+          entry.specifications
+        );
+        if (r.product_name && r.price > 0 && selectedComponents.length > 0) {
+          try {
+            const optionResult = await calculateLeadProductOptions(
+              entry.modelName,
+              sizeValues,
+              selectedComponents,
+              priceVariant
+            );
+            r.price = Math.round((r.price + optionResult.additional_price) * 100) / 100;
+            const details = optionResult.components
+              .map(component => `${component.label}: ${component.total.toLocaleString('de-DE', { minimumFractionDigits: 2 })} €`);
+            if (optionResult.unresolved.length > 0) {
+              details.push(`Preis fehlt: ${optionResult.unresolved.join(', ')}`);
+              r.lookup_status = 'price_missing';
+            }
+            r.custom_fields = [
+              ...(r.custom_fields || []).filter(field => field.id !== 'lewens_catalog_options'),
+              { id: 'lewens_catalog_options', label: 'Katalogoptionen', type: 'text' },
+            ];
+            r.custom_field_values = {
+              ...(r.custom_field_values || {}),
+              lewens_catalog_options: details.join(' | '),
+            };
+          } catch (error) {
+            console.warn('Lewens option calculation failed for', entry.modelName, error);
+            r.lookup_status = 'price_missing';
+          }
         }
 
         return r;
@@ -481,7 +703,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
   const loadProductNames = async () => {
     try {
-      const data = await api.get<string[]>('/lead-products/names');
+      const data = await api.get<{ product_name: string; category: string | null; product_type: string | null }[]>('/lead-products/names');
       setProductNames(data);
     } catch (err) {
       console.error('Failed to load products:', err);
@@ -518,6 +740,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         updated.unit_label = undefined;
         updated.roundedBreite = undefined;
         updated.roundedTiefe = undefined;
+        updated.discount = 0;
+        updated.discount_percent = 0;
         // Load dimensions for new product
         if (value) {
           loadDimensions(value as string).then(result => {
@@ -580,6 +804,12 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         }
       }
 
+      if (field === 'quantity' || field === 'breite' || field === 'tiefe') {
+        updated.discount = roundToTwo(
+          updated.price * updated.quantity * clampPercent(updated.discount_percent) / 100
+        );
+      }
+
       return updated;
     }));
   }, []);
@@ -602,9 +832,15 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
     ));
   };
 
-  const updateRowDiscount = (rowId: string, discount: number) => {
+  const updateRowDiscountPercent = (rowId: string, percentage: number) => {
     setProductRows(prev => prev.map(r =>
-      r.id === rowId ? { ...r, discount: Math.max(0, discount) } : r
+      r.id === rowId
+        ? {
+            ...r,
+            discount_percent: clampDiscount(percentage),
+            discount: roundToTwo(r.price * r.quantity * clampDiscount(percentage) / 100),
+          }
+        : r
     ));
   };
 
@@ -640,11 +876,17 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
       .reduce((sum, r) => sum + r.discount, 0);
   };
 
+  const getGlobalDiscountBase = () => Math.max(0, calculateSubtotal() - calculateItemDiscounts());
+
+  const getTotalDiscountAmount = () => roundToTwo(
+    getGlobalDiscountBase() * clampPercent(totalDiscountPercent) / 100
+  );
+
   // Calculate total (after all discounts)
   const calculateTotal = () => {
     const subtotal = calculateSubtotal();
     const itemDiscounts = calculateItemDiscounts();
-    const totalDisc = totalDiscount || 0;
+    const totalDisc = getTotalDiscountAmount();
     return Math.max(0, subtotal - itemDiscounts - totalDisc);
   };
 
@@ -652,15 +894,15 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
   const getRowDiscountPercent = (row: ProductRow) => {
     const rowTotal = row.price * row.quantity;
     if (rowTotal <= 0 || row.discount <= 0) return 0;
-    return Math.round((row.discount / rowTotal) * 100);
+    return roundToTwo((row.discount / rowTotal) * 100);
   };
 
   // Calculate total discount percentage
   const getTotalDiscountPercent = () => {
     const subtotal = calculateSubtotal();
-    const allDiscounts = calculateItemDiscounts() + (totalDiscount || 0);
+    const allDiscounts = calculateItemDiscounts() + getTotalDiscountAmount();
     if (subtotal <= 0 || allDiscounts <= 0) return 0;
-    return Math.round((allDiscounts / subtotal) * 100);
+    return roundToTwo((allDiscounts / subtotal) * 100);
   };
 
   const getValidItems = () => {
@@ -728,7 +970,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
       unit_label: r.unit_label || undefined,
       description: r.description || undefined,
       custom_fields: r.custom_fields || undefined,
-      custom_field_values: r.custom_field_values && Object.keys(r.custom_field_values).length > 0 ? r.custom_field_values : undefined
+      custom_field_values: r.custom_field_values && Object.keys(r.custom_field_values).length > 0 ? r.custom_field_values : undefined,
+      price_variant: r.price_variant || undefined
     });
 
     const customerBase = {
@@ -751,16 +994,19 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
             return assign === 'all' || assign === item.id;
           });
 
-          const itemTotal = (item.price * item.quantity) - (item.discount || 0);
+          const itemGross = item.price * item.quantity;
+          const itemTotal = itemGross - (item.discount || 0);
           const extrasTotal = itemExtras.reduce((s, e) => s + Number(e.price), 0);
+          const einzelSubtotal = itemGross + extrasTotal;
+          const einzelTotal = itemTotal + extrasTotal;
 
           const payload = {
             ...customerBase,
             items: [buildItemPayload(item)],
             extras: itemExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
             total_discount: 0,
-            subtotal: itemTotal + extrasTotal,
-            total_price: itemTotal + extrasTotal
+            subtotal: einzelSubtotal,
+            total_price: einzelTotal
           };
 
           const result = await api.post<{ id: number }>('/leads', payload);
@@ -777,11 +1023,13 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
             notes: notes.trim() || undefined,
             items: [buildPdfItem(item)],
             extras: itemExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-            subtotal: itemTotal + extrasTotal,
+            subtotal: einzelSubtotal,
             item_discounts: item.discount || 0,
             total_discount: 0,
-            total_discount_percent: 0,
-            total_price: itemTotal + extrasTotal
+            total_discount_percent: einzelSubtotal > 0
+              ? roundToTwo(((item.discount || 0) / einzelSubtotal) * 100)
+              : 0,
+            total_price: einzelTotal
           };
           void (async () => {
             try {
@@ -802,9 +1050,15 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           items: validItems.map(buildItemPayload),
           extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
           notes: notes.trim() || null,
-          total_discount: totalDiscount || 0,
+          total_discount: getTotalDiscountAmount(),
           subtotal: calculateSubtotal(),
-          total_price: calculateTotal()
+          total_price: calculateTotal(),
+          // Persist any customer-detail corrections back to the shared lead.
+          customer_firstname: firstname.trim(),
+          customer_lastname: lastname.trim(),
+          customer_email: email.trim(),
+          customer_phone: phone.trim() || null,
+          customer_address: address.trim() || null
         };
 
         const result = await api.post<{ id: number; angebot_nummer: string }>(`/leads/${newAngebotForLeadId}/angebote`, angebotPayload);
@@ -826,7 +1080,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
           subtotal: calculateSubtotal(),
           item_discounts: calculateItemDiscounts(),
-          total_discount: totalDiscount || 0,
+          total_discount: getTotalDiscountAmount(),
           total_discount_percent: getTotalDiscountPercent(),
           total_price: calculateTotal()
         };
@@ -844,7 +1098,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           ...customerBase,
           items: validItems.map(buildItemPayload),
           extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
-          total_discount: totalDiscount || 0,
+          total_discount: getTotalDiscountAmount(),
           subtotal: calculateSubtotal(),
           total_price: calculateTotal(),
           ...(editAngebotId ? { angebot_id: editAngebotId } : {}),
@@ -877,7 +1131,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           extras: validExtras.map(e => ({ description: e.description.trim(), price: Number(e.price) })),
           subtotal: calculateSubtotal(),
           item_discounts: calculateItemDiscounts(),
-          total_discount: totalDiscount || 0,
+          total_discount: getTotalDiscountAmount(),
           total_discount_percent: getTotalDiscountPercent(),
           total_price: calculateTotal(),
           // MODÜL B: forward Aufmaß photos so the generator can embed them.
@@ -922,7 +1176,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
     setNotes('');
     setProductRows([createEmptyRow()]);
     setExtras([]);
-    setTotalDiscount(0);
+    setTotalDiscountPercent(0);
+    setShowItemDiscounts(false);
     setEinzelAngebote(false);
     setError('');
     setAufmassData(null);
@@ -984,7 +1239,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
 
             {/* Customer Info Section */}
             <section className="lead-section">
-              <h3>Kundendaten {isNewAngebotMode && <span style={{ fontSize: '0.75rem', color: 'var(--text-secondary)', fontWeight: 400 }}>(schreibgeschützt)</span>}</h3>
+              <h3>Kundendaten</h3>
               <div className="lead-form-grid">
                 <div className="form-group">
                   <label>Vorname *</label>
@@ -992,10 +1247,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                     type="text"
                     value={firstname}
                     onChange={e => setFirstname(e.target.value)}
-                    placeholder="Vorname"
-                    readOnly={isNewAngebotMode}
-                    style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
-                  />
+                    placeholder="Vorname"                  />
                 </div>
                 <div className="form-group">
                   <label>Nachname *</label>
@@ -1003,10 +1255,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                     type="text"
                     value={lastname}
                     onChange={e => setLastname(e.target.value)}
-                    placeholder="Nachname"
-                    readOnly={isNewAngebotMode}
-                    style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
-                  />
+                    placeholder="Nachname"                  />
                 </div>
                 <div className="form-group">
                   <label>E-Mail *</label>
@@ -1015,10 +1264,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                     value={email}
                     onChange={e => setEmail(e.target.value)}
                     placeholder="email@beispiel.de"
-                    required
-                    readOnly={isNewAngebotMode}
-                    style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
-                  />
+                    required                  />
                 </div>
                 <div className="form-group">
                   <label>Telefon</label>
@@ -1026,10 +1272,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                     type="tel"
                     value={phone}
                     onChange={e => setPhone(e.target.value)}
-                    placeholder="+49 123 456789"
-                    readOnly={isNewAngebotMode}
-                    style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
-                  />
+                    placeholder="+49 123 456789"                  />
                 </div>
                 <div className="form-group full-width">
                   <label>Adresse</label>
@@ -1037,19 +1280,13 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                     type="text"
                     value={address}
                     onChange={e => setAddress(e.target.value)}
-                    placeholder="Straße, PLZ, Ort"
-                    readOnly={isNewAngebotMode}
-                    style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
-                  />
+                    placeholder="Straße, PLZ, Ort"                  />
                 </div>
                 <div className="form-group full-width">
                   <label>Wie sind Sie auf uns aufmerksam geworden?</label>
                   <select
                     value={marketingSource}
-                    onChange={e => setMarketingSource(e.target.value)}
-                    disabled={isNewAngebotMode}
-                    style={isNewAngebotMode ? { opacity: 0.6, cursor: 'not-allowed' } : undefined}
-                  >
+                    onChange={e => setMarketingSource(e.target.value)}                  >
                     <option value="">Bitte auswählen...</option>
                     {MARKETING_SOURCES.map((s) => (
                       <option key={s.value} value={s.value}>{s.label}</option>
@@ -1078,18 +1315,42 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                     </div>
 
                     <div className="product-row-selects">
-                      <div className="select-group">
-                        <label>Produkt</label>
-                        <select
-                          value={row.product_name}
-                          onChange={e => updateRow(row.id, 'product_name', e.target.value)}
-                        >
-                          <option value="">Produkt wählen...</option>
-                          {productNames.map(name => (
-                            <option key={name} value={name}>{name}</option>
-                          ))}
-                        </select>
-                      </div>
+                      {(() => {
+                        const selectedCategory = rowCategories[row.id] ?? nameToCategory.get(row.product_name) ?? '';
+                        const productsInCat = selectedCategory ? (productsByCategory.get(selectedCategory) || []) : [];
+                        return (
+                          <>
+                            <div className="select-group">
+                              <label>Kategorie</label>
+                              <select
+                                value={selectedCategory}
+                                onChange={e => {
+                                  setRowCategories(prev => ({ ...prev, [row.id]: e.target.value }));
+                                  updateRow(row.id, 'product_name', '');
+                                }}
+                              >
+                                <option value="">Kategorie wählen...</option>
+                                {categoryList.map(cat => (
+                                  <option key={cat} value={cat}>{cat}</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="select-group">
+                              <label>Produkt</label>
+                              <select
+                                value={row.product_name}
+                                disabled={!selectedCategory}
+                                onChange={e => updateRow(row.id, 'product_name', e.target.value)}
+                              >
+                                <option value="">{selectedCategory ? 'Produkt wählen...' : 'Zuerst Kategorie wählen'}</option>
+                                {productsInCat.map(name => (
+                                  <option key={name} value={name}>{name}</option>
+                                ))}
+                              </select>
+                            </div>
+                          </>
+                        );
+                      })()}
 
                       {row.pricing_type === 'unit' ? (
                         <div className="select-group quantity-group">
@@ -1170,19 +1431,20 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                         {/* Discount input for this product - only show when enabled */}
                         {showItemDiscounts && (
                           <div className="product-discount-row">
-                            <label>Rabatt (€)</label>
+                            <label>Rabatt (%)</label>
                             <div className="discount-input-wrapper">
                               <input
                                 type="number"
                                 min="0"
-                                step="1"
-                                value={row.discount || ''}
-                                onChange={e => updateRowDiscount(row.id, parseFloat(e.target.value) || 0)}
+                                max="20"
+                                step="0.1"
+                                value={row.discount_percent || ''}
+                                onChange={e => updateRowDiscountPercent(row.id, parseFloat(e.target.value) || 0)}
                                 placeholder="0"
                                 className="discount-input"
                               />
                               {row.discount > 0 && (
-                                <span className="discount-percent">-{getRowDiscountPercent(row)}%</span>
+                                <span className="discount-percent">-{formatPrice(row.discount)}</span>
                               )}
                             </div>
                             {row.discount > 0 && (
@@ -1209,9 +1471,13 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                           <div className="product-row-warning">
                             Keine Preisdaten für diese Größe verfügbar
                           </div>
+                        ) : row.lookup_status === 'no_match' ? (
+                          <div className="product-row-warning">
+                            Keine passende Preisdaten für Modell und Konfiguration verfügbar
+                          </div>
                         ) : (
                           <div className="product-row-warning">
-                            Modell nicht im Katalog — bitte in „Produkte &amp; Preise" anlegen
+                            Keine Preisdaten für diese Größe verfügbar
                           </div>
                         )
                       ) : null
@@ -1280,7 +1546,7 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                     const enabled = e.target.checked;
                     setShowItemDiscounts(enabled);
                     if (!enabled) {
-                      setProductRows(prev => prev.map(r => ({ ...r, discount: 0 })));
+                      setProductRows(prev => prev.map(r => ({ ...r, discount: 0, discount_percent: 0 })));
                     }
                   }}
                 />
@@ -1400,10 +1666,10 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
               {/* Total discount input — hidden in Einzelangebote mode */}
               <div className="pricing-row total-discount-row" style={einzelAngebote ? { display: 'none' } : undefined}>
                 <div className="total-discount-label">
-                  <span>Gesamtrabatt (€):</span>
-                  {totalDiscount > 0 && (
+                  <span>Gesamtrabatt (%):</span>
+                  {totalDiscountPercent > 0 && (
                     <span className="total-discount-percent">
-                      -{Math.round((totalDiscount / calculateSubtotal()) * 100)}%
+                      -{formatPrice(getTotalDiscountAmount())}
                     </span>
                   )}
                 </div>
@@ -1411,9 +1677,10 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
                   <input
                     type="number"
                     min="0"
-                    step="1"
-                    value={totalDiscount || ''}
-                    onChange={e => setTotalDiscount(parseFloat(e.target.value) || 0)}
+                    max="20"
+                    step="0.1"
+                    value={totalDiscountPercent || ''}
+                    onChange={e => setTotalDiscountPercent(clampDiscount(parseFloat(e.target.value) || 0))}
                     placeholder="0"
                     className="total-discount-input"
                   />

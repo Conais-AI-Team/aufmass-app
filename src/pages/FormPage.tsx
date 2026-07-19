@@ -4,14 +4,17 @@ import { AnimatePresence } from 'framer-motion';
 import { AufmassForm } from '../App';
 import { FormData } from '../types';
 import { DynamicFormData } from '../types/productConfig';
-import { api, getForm, createForm, updateForm, uploadImages, savePdf, updateLeadStatus, getAbnahme, getAbnahmeImages, markLeadAngebotAsSent, FormData as ApiFormData } from '../services/api';
+import { api, getForm, createForm, updateForm, uploadImages, savePdf, updateLeadStatus, getAbnahme, getAbnahmeImages, FormData as ApiFormData } from '../services/api';
 import type { Rechnung, RechnungType } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import EmailComposer from '../components/EmailComposer';
 import LeadFormModal from '../components/LeadFormModal';
 import RechnungForm from '../components/RechnungForm';
 import AnzahlungForm from '../components/AnzahlungForm';
+import AuftragAngebotSelection from '../components/AuftragAngebotSelection';
+import type { AuftragAngebotOption } from '../components/AuftragAngebotSelection';
 import { useToast } from '../components/Toast';
+import { canCreateAdditionalRechnung, canCreateSchlussrechnung } from '../utils/workflow';
 
 interface LeadItem {
   id: number;
@@ -59,6 +62,13 @@ const FormPage = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [formStatus, setFormStatus] = useState<string>('neu');
+  const [auftragModalOpen, setAuftragModalOpen] = useState(false);
+  const [auftragAngebote, setAuftragAngebote] = useState<AuftragAngebotOption[]>([]);
+  const [selectedAuftragAngebotId, setSelectedAuftragAngebotId] = useState<number | null>(null);
+  const [selectedAuftragItemIds, setSelectedAuftragItemIds] = useState<number[]>([]);
+  const [selectedAuftragExtraIds, setSelectedAuftragExtraIds] = useState<number[]>([]);
+  const [auftragDatum, setAuftragDatum] = useState(new Date().toISOString().split('T')[0]);
+  const [auftragSaving, setAuftragSaving] = useState(false);
 
   // MODÜL B — LeadFormModal state for the unified Angebot Versendet flow
   // (fired from the form's status bar). When form.lead_id exists we open the
@@ -73,14 +83,14 @@ const FormPage = () => {
   const handleStatusChange = async (newStatus: string) => {
     if (!id || id === 'new') return;
 
-    // MODÜL B — Intercept "angebot_versendet" so the user lands in
+    // MODÜL B — Intercept the pending send action so the user lands in
     // LeadFormModal (Aus Aufmaß flow) instead of just flipping the status.
     // The modal save will trigger backend cross-sync (markLeadAngebotAsSent
     // → syncFormsFromLead) which sets the form status, so we don't update
     // the status here. If the user cancels the modal nothing changes —
     // mirroring the Dashboard card dropdown behaviour.
     const baseStatus = newStatus.includes(':') ? newStatus.split(':')[0] : newStatus;
-    if (baseStatus === 'angebot_versendet') {
+    if (baseStatus === 'angebot_ausstehend') {
       try {
         const formId = parseInt(id);
         const fresh = await getForm(formId);
@@ -133,6 +143,76 @@ const FormPage = () => {
     }
   };
 
+  const handleRequestAuftrag = async () => {
+    if (!id || id === 'new') return;
+    try {
+      const fresh = await getForm(Number(id));
+      if (!fresh.lead_id) {
+        toast.warning('Angebot fehlt', 'Bitte erstellen und versenden Sie zuerst ein Angebot.');
+        return;
+      }
+      const lead = await api.get<{ angebote?: AuftragAngebotOption[]; angebot_sent_at?: string | null }>(`/leads/${fresh.lead_id}`);
+      const allOffers = lead.angebote || [];
+      const explicitlySent = allOffers.filter((offer) =>
+        ['versendet', 'angenommen', 'abgelehnt'].includes(offer.status || '')
+      );
+      const choices = explicitlySent.length > 0
+        ? explicitlySent
+        : (lead.angebot_sent_at ? allOffers : []);
+      if (choices.length === 0) {
+        toast.warning('Angebot fehlt', 'Bitte versenden Sie zuerst mindestens ein Angebot.');
+        return;
+      }
+      setAuftragAngebote(choices);
+      const existingOffer = choices.find((offer) => offer.id === fresh.selectedAngebotId);
+      const selectedOffer = existingOffer || (choices.length === 1 ? choices[0] : null);
+      setSelectedAuftragAngebotId(selectedOffer?.id || null);
+      if (selectedOffer) {
+        const allowedItemIds = (selectedOffer.items || []).map((item) => item.id);
+        const allowedExtraIds = (selectedOffer.extras || []).map((extra) => extra.id);
+        setSelectedAuftragItemIds(
+          existingOffer && Array.isArray(fresh.selectedAngebotItemIds)
+            ? fresh.selectedAngebotItemIds.filter((itemId) => allowedItemIds.includes(itemId))
+            : allowedItemIds
+        );
+        setSelectedAuftragExtraIds(
+          existingOffer && Array.isArray(fresh.selectedAngebotExtraIds)
+            ? fresh.selectedAngebotExtraIds.filter((extraId) => allowedExtraIds.includes(extraId))
+            : allowedExtraIds
+        );
+      } else {
+        setSelectedAuftragItemIds([]);
+        setSelectedAuftragExtraIds([]);
+      }
+      setAuftragDatum(new Date().toISOString().split('T')[0]);
+      setAuftragModalOpen(true);
+    } catch (err) {
+      console.error('Failed to prepare Auftrag selection:', err);
+      toast.error('Fehler', 'Angebote konnten nicht geladen werden.');
+    }
+  };
+
+  const handleConfirmAuftrag = async () => {
+    if (!id || id === 'new' || !selectedAuftragAngebotId || selectedAuftragItemIds.length === 0 || !auftragDatum) return;
+    setAuftragSaving(true);
+    try {
+      await updateForm(Number(id), {
+        status: 'auftrag_erteilt',
+        statusDate: auftragDatum,
+        selectedAngebotId: selectedAuftragAngebotId,
+        selectedAngebotItemIds: selectedAuftragItemIds,
+        selectedAngebotExtraIds: selectedAuftragExtraIds,
+      });
+      setFormStatus('auftrag_erteilt');
+      setAuftragModalOpen(false);
+      toast.success('Auftrag erteilt', 'Das angenommene Angebot wurde für den Auftrag übernommen.');
+    } catch (err) {
+      toast.error('Fehler', err instanceof Error ? err.message : 'Auftrag konnte nicht gespeichert werden.');
+    } finally {
+      setAuftragSaving(false);
+    }
+  };
+
   // ============ MODUL C: RECHNUNG TRIGGER ============
   const handleOpenRechnung = (type: RechnungType) => {
     setRechnungType(type);
@@ -141,9 +221,11 @@ const FormPage = () => {
 
   const handleRechnungSaved = (rechnung: Rechnung, opts: { sendEmail: boolean }) => {
     setRechnungModalOpen(false);
-    // Entwurf: form goes to *_erstellt; email/mark-sent later advances to gesendet
-    const draftStatus = rechnung.type === 'schlussrechnung' ? 'schluss_rechnung_erstellt' : 'rechnung_erstellt';
-    setFormStatus(draftStatus);
+    // Additional invoices keep the project at its current lifecycle step.
+    // Only the Schlussrechnung moves the project into the terminal flow.
+    if (rechnung.type === 'schlussrechnung') {
+      setFormStatus('schluss_rechnung_erstellt');
+    }
     if (opts.sendEmail && rechnung.kunde_email) {
       const labelDe = rechnung.type === 'schlussrechnung' ? 'Schlussrechnung' : 'Anzahlungsrechnung';
       setEmailComposer({
@@ -248,7 +330,7 @@ const FormPage = () => {
         if (leadState?.fromLead) {
           // Map lead product to form product selection
           let productSelection = { category: '', productType: '', model: '' };
-          let specifications: DynamicFormData = {};
+          const specifications: DynamicFormData = {};
 
           // Get first lead item for main product
           const firstItem = leadState.leadItems?.[0];
@@ -342,6 +424,9 @@ const FormPage = () => {
     };
 
     loadForm();
+    // Navigation state is a one-shot input; reloading on object identity changes
+    // would overwrite edits already made in the form.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);
 
   const handleSave = async (data: FormData): Promise<number | void> => {
@@ -547,13 +632,13 @@ const FormPage = () => {
   return (
     <>
       {/* Modul C: Rechnung action bar — only visible for existing forms in trigger statuses */}
-      {numericFormId && (formStatus === 'auftrag_erteilt' || formStatus === 'abnahme' || formStatus === 'anzahlung') && (
+      {numericFormId && (canCreateAdditionalRechnung(formStatus) || canCreateSchlussrechnung(formStatus) || formStatus === 'anzahlung') && (
         <div style={{
           display: 'flex', justifyContent: 'flex-end', gap: '8px',
           padding: '10px 20px', borderBottom: '1px solid var(--border-primary)',
           background: 'var(--bg-secondary)',
         }}>
-          {formStatus === 'auftrag_erteilt' && (
+          {canCreateAdditionalRechnung(formStatus) && (
             <button
               onClick={() => handleOpenRechnung('anzahlungsrechnung')}
               style={{
@@ -567,7 +652,7 @@ const FormPage = () => {
               Anzahlungsrechnung erstellen
             </button>
           )}
-          {formStatus === 'abnahme' && (
+          {canCreateSchlussrechnung(formStatus) && (
             <button
               onClick={() => handleOpenRechnung('schlussrechnung')}
               style={{
@@ -607,8 +692,43 @@ const FormPage = () => {
         onSendEmail={handleSendEmail}
         formStatus={formStatus}
         onStatusChange={handleStatusChange}
+        onAuftragRequest={handleRequestAuftrag}
         isExistingForm={id !== 'new'}
       />
+      <AnimatePresence>
+        {auftragModalOpen && (
+          <div className="modal-overlay-modern" onClick={() => !auftragSaving && setAuftragModalOpen(false)}>
+            <div className="modal-modern montage-modal auftrag-modal" onClick={(event) => event.stopPropagation()}>
+              <h3>Auftrag erteilt</h3>
+              <p className="montage-modal-description">Datum und angenommenes Angebot auswählen</p>
+              <div className="montage-date-input">
+                <label>Datum</label>
+                <input type="date" value={auftragDatum} onChange={(event) => setAuftragDatum(event.target.value)} />
+              </div>
+              <AuftragAngebotSelection
+                angebote={auftragAngebote}
+                selectedAngebotId={selectedAuftragAngebotId}
+                selectedItemIds={selectedAuftragItemIds}
+                selectedExtraIds={selectedAuftragExtraIds}
+                onSelectAngebot={(angebotId) => {
+                  const angebot = auftragAngebote.find((entry) => entry.id === angebotId);
+                  setSelectedAuftragAngebotId(angebotId);
+                  setSelectedAuftragItemIds((angebot?.items || []).map((item) => item.id));
+                  setSelectedAuftragExtraIds((angebot?.extras || []).map((extra) => extra.id));
+                }}
+                onSelectedItemIdsChange={setSelectedAuftragItemIds}
+                onSelectedExtraIdsChange={setSelectedAuftragExtraIds}
+              />
+              <div className="modal-actions-modern">
+                <button className="modal-btn secondary" onClick={() => setAuftragModalOpen(false)} disabled={auftragSaving}>Abbrechen</button>
+                <button className="modal-btn primary" onClick={handleConfirmAuftrag} disabled={auftragSaving || !auftragDatum || !selectedAuftragAngebotId || selectedAuftragItemIds.length === 0}>
+                  {auftragSaving ? 'Speichern...' : 'Auftrag übernehmen'}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+      </AnimatePresence>
       <AnimatePresence>
         {emailComposer && (
           <EmailComposer
@@ -633,20 +753,15 @@ const FormPage = () => {
           setLeadModalEditData(null);
           setLeadModalFromAufmassId(null);
         }}
-        onSuccess={async (savedLeadId) => {
+        onSuccess={async (savedLeadId, sendEmail) => {
           setLeadModalOpen(false);
           setLeadModalEditData(null);
           setLeadModalFromAufmassId(null);
-          // MODÜL B: When the modal is opened from the status bar's "Angebot
-          // Versendet" intercept, the user's intent is already "send the
-          // offer", so flag the lead as sent immediately. Backend cross-sync
-          // (syncFormsFromLead) then flips this Aufmaß to angebot_versendet.
-          if (savedLeadId) {
-            try {
-              await markLeadAngebotAsSent(savedLeadId);
-            } catch (err) {
-              console.error('mark-angebot-sent after save failed:', err);
-            }
+          // Saving creates the pending-send status. Only a successful
+          // EmailComposer send promotes it to "angebot_versendet".
+          if (savedLeadId && sendEmail) {
+            navigate(`/angebote?sendLead=${savedLeadId}`);
+            return;
           }
           // Reload the form so the new status (set by backend cross-sync)
           // shows up in the status bar without a manual refresh.

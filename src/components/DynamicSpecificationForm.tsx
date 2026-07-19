@@ -5,6 +5,8 @@ import type { DynamicFormData } from '../types/productConfig';
 import { getMontageteams } from '../services/api';
 import type { Montageteam } from '../services/api';
 import { WeiteresProdukt } from '../types';
+import LewensCatalogOptions from './LewensCatalogOptions';
+import { isLewensModel } from '../utils/lewensCatalog';
 import './DynamicSpecificationForm.css';
 import './SectionStyles.css';
 import './WeitereProdukte.css';
@@ -34,6 +36,8 @@ interface FieldConfig {
   allowZero?: boolean;
   positions?: string[];
   gridGroup?: string;
+  models?: string[];
+  excludeModels?: string[];
   conditionalField?: {
     trigger: string;
     field: string;
@@ -71,6 +75,14 @@ interface DynamicSpecificationFormProps {
 
 const categories = Object.keys(productConfig);
 const generateId = () => Math.random().toString(36).substr(2, 9);
+
+const fieldAppliesToModel = (field: FieldConfig, selectedModel: string | string[]) => {
+  const selected = (Array.isArray(selectedModel) ? selectedModel : [selectedModel]).filter(Boolean);
+  if (selected.length === 0) return !field.models?.length;
+  if (field.models?.length && !selected.some(modelName => field.models!.includes(modelName))) return false;
+  if (field.excludeModels?.length && selected.some(modelName => field.excludeModels!.includes(modelName))) return false;
+  return true;
+};
 
 const createEmptyProdukt = (): WeiteresProdukt => ({
   id: generateId(),
@@ -134,6 +146,7 @@ const DynamicSpecificationForm = ({
 
   // Get fields and model colors for selected product
   const productTypeConfig = productConfig[category]?.[productType];
+  const firstModel = Array.isArray(model) ? model[0] : model;
 
   // Calculate total required fields - ALL fields except montageteam and bemerkungen
   const excludedFields = ['montageteam', 'bemerkungen'];
@@ -141,6 +154,7 @@ const DynamicSpecificationForm = ({
     if (!productTypeConfig?.fields) return 0;
     let count = 0;
     for (const field of productTypeConfig.fields as FieldConfig[]) {
+      if (!fieldAppliesToModel(field, model)) continue;
       // Skip excluded fields
       if (excludedFields.includes(field.name)) continue;
       // Skip special types
@@ -180,7 +194,6 @@ const DynamicSpecificationForm = ({
   const filledRequiredFields = Math.max(0, totalRequiredFields - missingFields.length);
   const fields = productTypeConfig?.fields || [];
   // For model colors, use first selected model if array
-  const firstModel = Array.isArray(model) ? model[0] : model;
   const modelColors = productTypeConfig?.modelColors?.[firstModel] || [];
   // Display string for model (join if array)
   const modelDisplay = Array.isArray(model) ? model.join(', ') : model;
@@ -194,6 +207,7 @@ const DynamicSpecificationForm = ({
   }
 
   const renderField = (field: FieldConfig, index: number, hasError: boolean = false) => {
+    if (!fieldAppliesToModel(field, model)) return null;
     // Check showWhen condition
     if (field.showWhen) {
       const dependentValue = formData[field.showWhen.field];
@@ -1322,24 +1336,12 @@ const DynamicSpecificationForm = ({
     updateWeitereProdukte(newProducts);
   };
 
-  // Handle multi-select product type toggle for Markise
-  const handleWPProductTypeToggle = (index: number, productType: string) => {
+  const handleWPModelChange = (index: number, value: string) => {
     if (!updateWeitereProdukte) return;
-    const product = weitereProdukte[index];
-    const currentTypes = product.productType ? product.productType.split(', ').filter(t => t) : [];
-
-    let newTypes: string[];
-    if (currentTypes.includes(productType)) {
-      newTypes = currentTypes.filter(t => t !== productType);
-    } else {
-      newTypes = [...currentTypes, productType];
-    }
-
     const newProducts = [...weitereProdukte];
     newProducts[index] = {
       ...newProducts[index],
-      productType: newTypes.join(', '),
-      model: '',
+      model: value,
       specifications: {}
     };
     updateWeitereProdukte(newProducts);
@@ -1384,6 +1386,11 @@ const DynamicSpecificationForm = ({
     return productConfig[cat]?.[pt]?.fields || [];
   };
 
+  const getWPModels = (cat: string, pt: string) => {
+    if (!cat || !pt) return [];
+    return productConfig[cat]?.[pt]?.models || [];
+  };
+
   const getWPColorsForModel = (cat: string, pt: string, mdl: string): string[] => {
     if (!cat || !pt || !productConfig[cat]?.[pt]) return [];
     const allColors = productConfig[cat][pt].modelColors;
@@ -1403,6 +1410,7 @@ const DynamicSpecificationForm = ({
   };
 
   const renderWPSpecField = (product: WeiteresProdukt, index: number, field: FieldConfig) => {
+    if (!fieldAppliesToModel(field, product.model)) return null;
     const value = product.specifications[field.name];
     // Skip montageteam and markise_trigger fields in weitere produkte
     if (field.name === 'montageteam' || field.type === 'markise_trigger') return null;
@@ -2006,13 +2014,9 @@ const DynamicSpecificationForm = ({
   const renderWPProductForm = (product: WeiteresProdukt, index: number) => {
     const productTypes = getWPProductTypes(product.category);
     const isMarkise = product.category === 'MARKISE';
-    const selectedProductTypes = isMarkise && product.productType
-      ? product.productType.split(', ').filter(t => t)
-      : [];
-
-    // For fields, use first selected produkttyp (they share similar fields anyway)
-    const effectiveProductType = isMarkise ? (selectedProductTypes[0] || '') : product.productType;
+    const effectiveProductType = product.productType;
     const wpFields = getWPFields(product.category, effectiveProductType);
+    const models = getWPModels(product.category, effectiveProductType);
 
     return (
       <div className="product-form-content">
@@ -2029,8 +2033,7 @@ const DynamicSpecificationForm = ({
           </select>
         </div>
 
-        {/* Produkttyp - MultiSelect dropdown for MARKISE, regular select for others */}
-        {product.category && !isMarkise && (
+        {product.category && (
           <div className="form-field">
             <label>Produkttyp <span className="required">*</span></label>
             <select
@@ -2045,40 +2048,7 @@ const DynamicSpecificationForm = ({
           </div>
         )}
 
-        {/* MultiSelect Produkttyp dropdown for MARKISE */}
-        {product.category && isMarkise && (
-          <div className="form-field multiselect-field">
-            <label>Produkttyp <span className="multi-hint">(Mehrfachauswahl möglich)</span></label>
-            <div className="markise-multiselect-dropdown">
-              <div className="multiselect-options markise-produkttyp-options">
-                {productTypes.map(pt => {
-                  const isSelected = selectedProductTypes.includes(pt);
-                  return (
-                    <label
-                      key={pt}
-                      className={`multiselect-checkbox ${isSelected ? 'selected' : ''}`}
-                    >
-                      <input
-                        type="checkbox"
-                        checked={isSelected}
-                        onChange={() => handleWPProductTypeToggle(index, pt)}
-                      />
-                      <span className="checkbox-label">{pt}</span>
-                    </label>
-                  );
-                })}
-              </div>
-              {selectedProductTypes.length > 0 && (
-                <div className="selected-types-summary">
-                  Ausgewählt: {selectedProductTypes.join(', ')}
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* ARCHIVED: Model selection removed - no longer needed in first measurement */}
-        {/* {((isMarkise && selectedProductTypes.length > 0) || (!isMarkise && product.productType)) && models.length > 0 && (
+        {product.productType && models.length > 0 && (
           <div className="form-field">
             <label>Modell <span className="required">*</span></label>
             <select
@@ -2091,17 +2061,22 @@ const DynamicSpecificationForm = ({
               ))}
             </select>
           </div>
-        )} */}
+        )}
 
-        {/* Specs for all products */}
-        {((isMarkise && selectedProductTypes.length > 0) || (!isMarkise && product.productType)) && (
+        {product.productType && product.model && (
           <div className="specs-grid">
             {wpFields.map(field => renderWPSpecField(product, index, field))}
+            {isLewensModel(product.model) && (
+              <LewensCatalogOptions
+                models={product.model}
+                value={product.specifications.lewensCatalogOptions}
+                onChange={value => handleWPSpecChange(index, 'lewensCatalogOptions', value)}
+              />
+            )}
           </div>
         )}
 
-        {/* Markise Bemerkungen (Note field) for MARKISE category */}
-        {isMarkise && selectedProductTypes.length > 0 && (
+        {isMarkise && product.model && (
           <div className="form-field full-width markise-bemerkungen-field">
             <label>Markise Bemerkung</label>
             <textarea
@@ -2263,6 +2238,13 @@ const DynamicSpecificationForm = ({
             return renderField(field, index, isFieldMissing(field.name));
           });
         })()}
+        {(Array.isArray(model) ? model : [model]).some(isLewensModel) && (
+          <LewensCatalogOptions
+            models={model}
+            value={formData.lewensCatalogOptions}
+            onChange={value => updateField('lewensCatalogOptions', value)}
+          />
+        )}
       </div>
 
       {/* Weitere Produkte Section */}

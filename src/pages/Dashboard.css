@@ -30,6 +30,18 @@
   gap: 0.875rem;
 }
 
+.sidebar-brand-logo {
+  display: block;
+  width: min(210px, 100%);
+  height: auto;
+  object-fit: contain;
+}
+
+.sidebar-logo .sidebar-brand-logo ~ .logo-icon,
+.sidebar-logo .sidebar-brand-logo ~ .logo-text {
+  display: none;
+}
+
 .theme-toggle-sidebar {
   display: flex !important;
   align-items: center;
@@ -712,8 +724,8 @@
   }
 }
 
-/* Laptop/mid screens where 3 cards don't fit - 2 columns */
-@media (max-width: 1439px) and (min-width: 1025px) {
+/* Laptop/mid screens where 3 cards don't fit comfortably - 2 columns */
+@media (max-width: 2199px) and (min-width: 1025px) {
   .forms-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
@@ -1272,7 +1284,7 @@
   display: none;
 }
 
-@media (min-width: 1201px) {
+@media (min-width: 2200px) {
   .forms-list {
     gap: 0.75rem;
   }
@@ -1291,7 +1303,7 @@
 
   .form-card-modern.list .card-main {
     display: grid;
-    grid-template-columns: minmax(430px, 0.95fr) minmax(360px, 1fr);
+    grid-template-columns: minmax(360px, 0.95fr) minmax(300px, 1fr);
     align-items: center;
     gap: 1.25rem;
     padding: 1rem 1.25rem;
@@ -1406,7 +1418,7 @@
     flex-wrap: nowrap;
     align-self: stretch;
     justify-content: flex-end;
-    min-width: 360px;
+    min-width: 330px;
     padding: 0 1rem;
     border-top: 0;
     border-left: 1px solid var(--border-color);
@@ -1427,7 +1439,7 @@
   }
 }
 
-@media (min-width: 901px) and (max-width: 1200px) {
+@media (min-width: 901px) and (max-width: 2199px) {
   .form-card-modern.list {
     display: flex;
     flex-direction: column;
@@ -1442,23 +1454,86 @@
 
   .form-card-modern.list .card-header-modern {
     display: grid;
-    grid-template-columns: 48px minmax(0, 1fr) max-content;
-    align-items: center;
+    grid-template-columns: 48px minmax(0, 1fr) minmax(220px, max-content);
+    align-items: start;
     flex: none;
     margin: 0;
+    gap: 0.9rem;
   }
 
   .form-card-modern.list .card-body-modern {
-    display: flex;
-    flex-direction: row;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(160px, auto);
     align-items: center;
     gap: 1rem;
+    min-width: 0;
+  }
+
+  .form-card-modern.list .product-tags {
+    min-width: 0;
+  }
+
+  .form-card-modern.list .product-tag {
+    max-width: 170px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .form-card-modern.list .card-meta {
+    min-width: 0;
+    justify-content: flex-start;
+  }
+
+  .form-card-modern.list .meta-item-modern {
+    min-width: 0;
+  }
+
+  .form-card-modern.list .meta-item-modern span {
+    max-width: 90px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .form-card-modern.list .card-actions-modern {
+    display: flex;
+    flex-wrap: wrap;
     border-left: 0;
     border-top: 1px solid var(--border-color);
-    justify-content: flex-end;
+    justify-content: flex-start;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+    background: var(--card-actions-bg, rgba(0, 0, 0, 0.08));
+  }
+
+  .form-card-modern.list .team-selector-btn {
+    min-width: 110px;
+    max-width: 160px;
+  }
+
+  .form-card-modern.list .action-btn {
+    min-width: 40px;
+    min-height: 40px;
+  }
+
+  .form-card-modern.list .action-btn span {
+    display: none;
+  }
+
+  .form-card-modern.list .action-btn.angebot span,
+  .form-card-modern.list .action-btn.edit span {
+    display: inline;
+    max-width: 88px;
+  }
+
+  .form-card-modern.list .email-sent-badge,
+  .form-card-modern.list .email-pending-badge,
+  .form-card-modern.list .angebot-pending-badge,
+  .form-card-modern.list .post-sent-badge,
+  .form-card-modern.list .post-pending-badge {
+    width: fit-content;
+    max-width: 100%;
   }
 }
 
@@ -2205,6 +2280,78 @@
 
   .filter-tabs {
     display: none;
+  }
+
+  .form-card-modern.list,
+  .form-card-modern {
+    flex-direction: column;
+  }
+
+  .form-card-modern.list .card-main {
+    display: block;
+  }
+
+  .form-card-modern.list .card-header-modern,
+  .card-header-modern {
+    display: grid;
+    grid-template-columns: 48px minmax(0, 1fr) minmax(150px, max-content);
+    align-items: start;
+    gap: 0.75rem;
+  }
+
+  .form-card-modern.list .card-body-modern {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 0.75rem;
+  }
+
+  .form-card-modern.list .card-actions-modern,
+  .card-actions-modern {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(42px, max-content));
+    justify-content: start;
+    align-items: center;
+    border-left: 0;
+    border-top: 1px solid var(--border-color);
+    gap: 0.5rem;
+  }
+
+  .form-card-modern.list .action-btn span,
+  .action-btn span {
+    display: none;
+  }
+
+  .form-card-modern.list .action-btn.angebot span,
+  .form-card-modern.list .action-btn.edit span,
+  .action-btn.angebot span,
+  .action-btn.edit span {
+    display: inline;
+    max-width: 92px;
+  }
+
+  .status-selector {
+    min-width: 0;
+    max-width: 176px;
+  }
+
+  .status-pill-row,
+  .montage-date-badge,
+  .signature-status-badge {
+    max-width: 176px;
+  }
+
+  .status-pill-btn,
+  .status-pill-static {
+    max-width: 146px;
+    overflow: hidden;
+  }
+
+  .status-pill-btn,
+  .status-pill-static,
+  .montage-date-badge span,
+  .signature-status-badge span {
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 }
 
@@ -3759,6 +3906,35 @@
   flex-shrink: 0;
 }
 
+.project-row-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-shrink: 0;
+}
+
+.project-abnahme-button {
+  display: inline-grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  border-radius: 4px;
+  background: rgba(16, 185, 129, 0.1);
+  color: #10b981;
+  cursor: pointer;
+}
+
+.project-abnahme-button:hover {
+  background: rgba(16, 185, 129, 0.2);
+}
+
+.project-abnahme-button svg {
+  width: 17px;
+  height: 17px;
+}
+
 .project-status-badge.completed {
   background: rgba(34, 197, 94, 0.15);
   color: #22c55e;
@@ -4352,6 +4528,17 @@
   display: flex;
   flex-direction: column;
   align-items: center;
+}
+
+.mobile-brand-logo {
+  display: block;
+  width: 132px;
+  height: auto;
+}
+
+.mobile-logo .mobile-brand-logo ~ .logo-name,
+.mobile-logo .mobile-brand-logo ~ .logo-tagline {
+  display: none;
 }
 
 .mobile-logo .logo-name {

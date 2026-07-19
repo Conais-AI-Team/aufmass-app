@@ -19,7 +19,8 @@ import { getStoredUser, getPdfBlob, getPdfStatus, getAbnahme, getAbnahmeImages, 
 const STATUS_STEPS = [
   { value: 'entwurf', label: 'Entwurf', color: '#f97316' },
   { value: 'neu', label: 'Aufmaß Genommen', color: '#8b5cf6' },
-  { value: 'angebot_versendet', label: 'Angebot Versendet', color: '#a78bfa' },
+  { value: 'angebot_ausstehend', label: 'Angebot versenden', color: '#a78bfa' },
+  { value: 'angebot_versendet', label: 'Angebot versendet', color: '#a78bfa' },
   { value: 'auftrag_erteilt', label: 'Auftrag Erteilt', color: '#3b82f6' },
   { value: 'auftrag_abgelehnt', label: 'Auftrag Abgelehnt', color: '#6b7280' },
   { value: 'bauantrag', label: 'Bauantrag', color: '#2563eb' },
@@ -31,11 +32,26 @@ const STATUS_STEPS = [
   { value: 'reklamation_eingegangen', label: 'Reklamation Eingegangen', color: '#ef4444' },
   { value: 'reklamation_bestellt', label: 'Reklamation Bestellt', color: '#dc2626' },
   { value: 'reklamation_abgelehnt', label: 'Reklamation Abgelehnt', color: '#b91c1c' },
+  { value: 'schluss_rechnung_erstellt', label: 'Schlussrechnung Entwurf', color: '#22d3ee' },
+  { value: 'rest_rechnung_erstellt', label: 'Schluss', color: '#0891b2' },
 ];
 
 const isAdminOrOffice = () => {
   const user = getStoredUser();
   return user?.role === 'admin' || user?.role === 'office';
+};
+
+interface ModelScopedField {
+  models?: string[];
+  excludeModels?: string[];
+}
+
+const fieldAppliesToModel = (field: ModelScopedField, selectedModel: string | string[] | undefined) => {
+  const selected = (Array.isArray(selectedModel) ? selectedModel : [selectedModel || '']).filter(Boolean);
+  if (selected.length === 0) return !field.models?.length;
+  if (field.models?.length && !selected.some(modelName => field.models!.includes(modelName))) return false;
+  if (field.excludeModels?.length && selected.some(modelName => field.excludeModels!.includes(modelName))) return false;
+  return true;
 };
 
 interface AufmassFormProps {
@@ -47,10 +63,11 @@ interface AufmassFormProps {
   onSendEmail?: () => void;
   formStatus?: string;
   onStatusChange?: (status: string) => void;
+  onAuftragRequest?: () => void;
   isExistingForm?: boolean;
 }
 
-function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onCancel, onSendEmail, formStatus, onStatusChange, isExistingForm }: AufmassFormProps) {
+function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onCancel, onSendEmail, formStatus, onStatusChange, onAuftragRequest, isExistingForm }: AufmassFormProps) {
   const [formData, setFormData] = useState<FormData>(initialData || {
     datum: new Date().toISOString().split('T')[0],
     aufmasser: '',
@@ -160,6 +177,8 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
       showWhen?: { field: string; value?: string; notEquals?: string };
       conditionalField?: { trigger: string; field: string; label?: string };
       options?: string[];
+      models?: string[];
+      excludeModels?: string[];
     }
 
     for (const wp of formData.weitereProdukte) {
@@ -171,6 +190,7 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
       const wpConfig = productConfig[wp.category]?.[wp.productType];
       if (wpConfig?.fields) {
         for (const field of wpConfig.fields as ProductField[]) {
+          if (!fieldAppliesToModel(field, wp.model)) continue;
           if (excludedFields.includes(field.name)) continue;
           if (field.type === 'markise_trigger' || field.type === 'senkrecht_section' || field.type === 'festes_element_section' || field.type === 'schiebe_element_section' || field.type === 'keil_fenster_section') continue;
 
@@ -247,10 +267,13 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
       showWhen?: { field: string; value?: string; notEquals?: string };
       conditionalField?: { trigger: string; field: string; label?: string };
       options?: string[];
+      models?: string[];
+      excludeModels?: string[];
     }
 
     // Process ALL fields (not just required ones) - except excluded
     for (const field of productTypeConfig.fields as ProductField[]) {
+      if (!fieldAppliesToModel(field, formData.productSelection.model)) continue;
       const value = formData.specifications[field.name];
 
       // Skip excluded fields
@@ -489,12 +512,15 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
       showWhen?: { field: string; value?: string; notEquals?: string };
       conditionalField?: { trigger: string; field: string; label?: string };
       options?: string[];
+      models?: string[];
+      excludeModels?: string[];
     }
 
     // Process ALL fields (not just required ones)
     // Skip main field loop for UNTERBAUELEMENTE - those fields are validated per-element below
     const isUnterbauelementeCategory = category === 'UNTERBAUELEMENTE';
     for (const field of (isUnterbauelementeCategory ? [] : productTypeConfig.fields) as ProductField[]) {
+      if (!fieldAppliesToModel(field, formData.productSelection.model)) continue;
       const value = formData.specifications[field.name];
       const fieldLabel = field.label || field.name;
 
@@ -729,6 +755,7 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
             const ubConfig = productConfig['UNTERBAUELEMENTE']?.[el.produktTyp];
             if (ubConfig?.fields) {
               for (const field of ubConfig.fields as ProductField[]) {
+                if (!fieldAppliesToModel(field, el.modell)) continue;
                 if (excludedFields.includes(field.name)) continue;
 
                 // Handle showWhen conditions
@@ -796,6 +823,7 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
 
         if (wpConfig?.fields) {
           for (const field of wpConfig.fields as ProductField[]) {
+            if (!fieldAppliesToModel(field, wp.model)) continue;
             // Skip excluded fields
             if (excludedFields.includes(field.name)) continue;
             if (field.type === 'markise_trigger' || field.type === 'senkrecht_section' || field.type === 'festes_element_section' || field.type === 'schiebe_element_section' || field.type === 'keil_fenster_section') continue;
@@ -970,9 +998,8 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
         icon: '2',
         canProceed: () => {
           const { category, productType, model } = formData.productSelection;
-          const requiresModel = category !== 'MARKISE';
           const hasModel = Array.isArray(model) ? model.length > 0 : !!model;
-          return !!(category && productType && (!requiresModel || hasModel));
+          return !!(category && productType && hasModel);
         }
       }
     ];
@@ -1469,24 +1496,41 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
             {/* Status Breadcrumb - inside form card, only for admin and existing forms */}
             {isAdminOrOffice() && isExistingForm && formStatus && onStatusChange && (
               <div className="status-breadcrumb-inner">
-                {STATUS_STEPS.map((step) => {
+                {STATUS_STEPS.filter((step) => {
+                  const currentIndex = STATUS_STEPS.findIndex(s => s.value === formStatus);
+                  const sentIndex = STATUS_STEPS.findIndex(s => s.value === 'angebot_versendet');
+                  if (step.value === 'angebot_ausstehend') return currentIndex < sentIndex;
+                  if (step.value === 'angebot_versendet') return currentIndex >= sentIndex;
+                  return true;
+                }).map((step) => {
                   const isActive = step.value === formStatus;
                   const currentIndex = STATUS_STEPS.findIndex(s => s.value === formStatus);
                   const stepIndex = STATUS_STEPS.findIndex(s => s.value === step.value);
                   const isPast = stepIndex < currentIndex;
+                  const isSystemStatus = step.value === 'abnahme'
+                    || step.value === 'angebot_versendet'
+                    || step.value === 'schluss_rechnung_erstellt'
+                    || step.value === 'rest_rechnung_erstellt';
 
                   return (
                     <button
                       key={step.value}
                       className={`breadcrumb-step-inner ${isActive ? 'active' : ''} ${isPast ? 'past' : ''}`}
                       style={{ '--step-color': step.color } as React.CSSProperties}
+                      disabled={isSystemStatus}
+                      title={step.value === 'abnahme' ? 'Abnahme wird im Abnahmeformular erfasst' : undefined}
                       onClick={() => {
+                        if (isSystemStatus) return;
                         // MODÜL B: skip the date dialog for "angebot_versendet"
                         // — the parent intercepts onStatusChange and opens the
                         // LeadFormModal instead. Backend cross-sync sets the
                         // status_date automatically when the lead is saved.
-                        if (step.value === 'angebot_versendet' && onStatusChange) {
+                        if (step.value === 'angebot_ausstehend' && onStatusChange) {
                           onStatusChange(step.value);
+                          return;
+                        }
+                        if (step.value === 'auftrag_erteilt' && onAuftragRequest) {
+                          onAuftragRequest();
                           return;
                         }
                         setPendingStatusValue(step.value);
@@ -1501,7 +1545,9 @@ function AufmassForm({ initialData, onSave, onDraftSave, onSignaturePersist, onC
                           borderColor: step.color
                         }}
                       />
-                      <span className="step-text-inner">{step.label}</span>
+                      <span className="step-text-inner">
+                        {step.label}
+                      </span>
                     </button>
                   );
                 })}

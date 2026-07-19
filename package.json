@@ -8,6 +8,11 @@
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "prices:lewens:check": "node tools/import-lewens-pricebooks-2026.mjs",
+    "prices:lewens:test": "node tools/test-lewens-option-pricing.mjs",
+    "prices:lewens:pdf-audit": "node tools/audit-lewens-pdf-prices.mjs",
+    "prices:aluxe:check": "node tools/import-aluxe-pricebook-2026.mjs",
+    "prices:coverage": "node tools/audit-config-price-coverage.mjs",
     "openapi:test": "cd tools/openapi-esignature-test && npm install && npx tsx run.ts",
     "openapi:test:multi": "cd tools/openapi-esignature-test && npm install && npx tsx run.ts --runs=3"
   },

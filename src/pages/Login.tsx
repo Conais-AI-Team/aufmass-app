@@ -28,20 +28,17 @@ const Login = () => {
 
   return (
     <div className="login-page">
-      <div className="login-container">
+      <section className="login-visual" aria-hidden="true">
+        <div className="login-visual-panel">
+          <span>Aufmaß System</span>
+          <strong>Digital. Klar. Filialfähig.</strong>
+        </div>
+      </section>
+
+      <main className="login-container">
         <div className="login-header">
           <div className="login-logo">
-            <div className="logo-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
-            </div>
-            <div className="logo-text">
-              <span className="logo-name">AYLUX</span>
-              <span className="logo-tagline">Aufmaß System</span>
-            </div>
+            <img src="/aylux-sidebar-logo.png" alt="AYLUX Sonnenschutzsysteme" />
           </div>
           <h1>Willkommen zurück</h1>
           <p>Melden Sie sich an, um fortzufahren</p>
@@ -101,7 +98,14 @@ const Login = () => {
           <p>Haben Sie noch keinen Zugang?</p>
           <p className="contact-admin">Kontaktieren Sie Ihren Administrator</p>
         </div>
-      </div>
+
+        <div className="login-powered">
+          <span>Powered by</span>
+          <a href="https://conais.com" target="_blank" rel="noopener noreferrer" aria-label="Powered by Conais">
+            <img src="https://conais.com/wp-content/uploads/2025/10/Conais-new-Logo.png" alt="Conais" />
+          </a>
+        </div>
+      </main>
     </div>
   );
 };

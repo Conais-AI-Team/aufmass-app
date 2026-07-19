@@ -93,6 +93,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           </svg>
         </button>
         <div className="mobile-logo">
+          <img src="/aylux-sidebar-logo.png" alt="AYLUX Aufmaß" className="mobile-brand-logo" />
           <span className="logo-name">AYLUX</span>
           <span className="logo-tagline">Aufmaß</span>
         </div>
@@ -111,13 +112,7 @@ function Layout({ children }: { children: React.ReactNode }) {
       <aside className={`dashboard-sidebar ${mobileMenuOpen ? 'mobile-open' : ''}`}>
         <div className="sidebar-header">
           <div className="sidebar-logo">
-            <div className="logo-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
-            </div>
+            <img src="/aylux-sidebar-logo.png" alt="AYLUX Aufmaß System" className="sidebar-brand-logo" />
             <div className="logo-text">
               <span className="logo-name">AYLUX</span>
               <span className="logo-tagline">Aufmaß System</span>

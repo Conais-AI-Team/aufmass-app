@@ -4,6 +4,7 @@ import type { jsPDF } from 'jspdf';
 import { drawCoverPage, type CoverData } from './pdfCover';
 import { drawProductDetailPage, type ProductDetailData } from './pdfProductDetail';
 import { drawAgbPages } from './pdfAgb';
+import { loadAyluxPdfLogo } from '../pdfLogo';
 
 export interface PipelineConfig {
   cover?: CoverData;
@@ -14,7 +15,7 @@ export interface PipelineConfig {
 
 export async function executePdfPipeline(pdf: jsPDF, config: PipelineConfig): Promise<void> {
   if (config.cover) {
-    drawCoverPage(pdf, config.cover);
+    drawCoverPage(pdf, { ...config.cover, brandLogo: config.cover.brandLogo ?? await loadAyluxPdfLogo() });
   }
   if (config.productDetail) {
     drawProductDetailPage(pdf, config.productDetail);

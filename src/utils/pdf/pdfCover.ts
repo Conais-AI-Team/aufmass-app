@@ -1,6 +1,7 @@
 // Modül F: Cover page generator (Living-Deluxe-style)
 import type { jsPDF } from 'jspdf';
 import type { BranchCompanyInfoForPdf } from '../pdfGenerator';
+import { drawAyluxPdfLogo, type PdfLogoAsset } from '../pdfLogo';
 
 const COVER_SLOGAN = 'AYLUX SONNENSCHUTZSYSTEME';
 
@@ -12,6 +13,7 @@ export interface CoverData {
   documentDate: Date;
   coverImages: { base64?: string }[];
   companyInfo: BranchCompanyInfoForPdf | null;
+  brandLogo?: PdfLogoAsset | null;
 }
 
 export function drawCoverPage(pdf: jsPDF, data: CoverData): void {
@@ -19,12 +21,14 @@ export function drawCoverPage(pdf: jsPDF, data: CoverData): void {
   const pageHeight = pdf.internal.pageSize.getHeight();
   const margin = 20;
 
+  drawAyluxPdfLogo(pdf, data.brandLogo || null, margin, 12, 42);
+
   // Top-left: Branch firma adı (büyük, yeşil)
   if (data.companyInfo?.company_name) {
     pdf.setTextColor(127, 169, 61);
-    pdf.setFontSize(24);
+    pdf.setFontSize(18);
     pdf.setFont('helvetica', 'bold');
-    pdf.text(data.companyInfo.company_name.toUpperCase(), margin, 28);
+    pdf.text(data.companyInfo.company_name.toUpperCase(), margin, 34);
   }
 
   // Top-right: "IHR [PRODUKT] [TIP]"

@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import {
   api, getProductImages, uploadProductImage, deleteProductImage, setProductImageCoverFlag,
   getProductCoverPdf, uploadProductCoverPdf, setCoverPdfPages, deleteProductCoverPdf,
-  fetchBranchPdfBytes
+  fetchBranchPdfBytes, adjustProductPrice
 } from '../services/api';
 import type { ProductImage, ProductCoverPdf } from '../services/api';
 import { invalidateProductImagesCache } from '../utils/productImagesCache';
@@ -40,6 +40,16 @@ interface Product {
   unit_label?: string;
   description?: string;
   custom_fields?: string;
+  price_variant?: Record<string, unknown> | string | null;
+  price_count?: number;
+  variant_options?: ProductVariantOption[];
+  is_summary?: boolean;
+}
+
+interface ProductVariantOption {
+  key: string;
+  label?: string;
+  count: number;
 }
 
 interface PendingColumn {
@@ -63,6 +73,7 @@ interface ImportProductPayload {
   unit_label?: string | null;
   description?: string | null;
   custom_fields?: string | null;
+  price_variant?: Record<string, unknown> | null;
 }
 
 interface ImportPreviewRow {
@@ -85,6 +96,9 @@ export default function ProductPricing() {
 
   // Expanded accordions
   const [expandedProducts, setExpandedProducts] = useState<Set<string>>(new Set());
+  const [selectedProductVariants, setSelectedProductVariants] = useState<Record<string, string>>({});
+  const [loadedProductNames, setLoadedProductNames] = useState<Set<string>>(new Set());
+  const [loadingProductNames, setLoadingProductNames] = useState<Set<string>>(new Set());
 
   // Edit state for existing cells
   const [editingCell, setEditingCell] = useState<{ productName: string; breite: number; tiefe: number } | null>(null);
@@ -118,6 +132,11 @@ export default function ProductPricing() {
 
   // Delete confirmation
   const [deleteConfirm, setDeleteConfirm] = useState<{ type: 'product' | 'row' | 'column'; productName: string; value?: number } | null>(null);
+
+  // Per-product percentage price adjustment (scales all rows/columns)
+  const [adjustingProduct, setAdjustingProduct] = useState<string | null>(null);
+  const [adjustPercent, setAdjustPercent] = useState('');
+  const [adjustBusy, setAdjustBusy] = useState(false);
 
   // Description editing for existing products
   const [editingDescription, setEditingDescription] = useState<string | null>(null);
@@ -288,12 +307,10 @@ export default function ProductPricing() {
   const loadProducts = async () => {
     try {
       setLoading(true);
-      const data = await api.get<Product[]>('/lead-products');
+      const data = await api.get<Product[]>('/lead-products/summary');
       setProducts(data);
-      const names = [...new Set(data.map(p => p.product_name))];
-      if (names.length > 0) {
-        setExpandedProducts(new Set([names[0]]));
-      }
+      setExpandedProducts(new Set());
+      setLoadedProductNames(new Set());
     } catch (err) {
       console.error('Failed to load products:', err);
       setError('Fehler beim Laden der Produkte');
@@ -302,14 +319,197 @@ export default function ProductPricing() {
     }
   };
 
+  const ensureProductLoaded = async (productName: string, force = false): Promise<Product[]> => {
+    if (!force && loadedProductNames.has(productName)) {
+      return products.filter(p => p.product_name === productName && !p.is_summary);
+    }
+
+    setLoadingProductNames(prev => new Set(prev).add(productName));
+    try {
+      const rows = await api.get<Product[]>(`/lead-products/${encodeURIComponent(productName)}/matrix`);
+      setProducts(prev => [
+        ...prev.filter(p => p.product_name !== productName),
+        ...rows
+      ]);
+      setLoadedProductNames(prev => new Set(prev).add(productName));
+      return rows;
+    } catch (err) {
+      console.error('Failed to load product matrix:', err);
+      setError('Fehler beim Laden der Preismatrix');
+      return [];
+    } finally {
+      setLoadingProductNames(prev => {
+        const next = new Set(prev);
+        next.delete(productName);
+        return next;
+      });
+    }
+  };
+
+  const handleAdjustPrice = async (productName: string) => {
+    const pct = parseFloat(adjustPercent.replace(',', '.'));
+    if (!Number.isFinite(pct) || pct === 0) {
+      setError('Bitte einen gültigen Prozentwert eingeben (z. B. -10 oder 5).');
+      return;
+    }
+    setAdjustBusy(true);
+    try {
+      const res = await adjustProductPrice(productName, pct);
+      setAdjustingProduct(null);
+      setAdjustPercent('');
+      await ensureProductLoaded(productName, true);
+      setError('');
+      console.log(`[price-adjust] ${productName}: ${res.updated} Preise um ${pct}% angepasst`);
+    } catch (err) {
+      console.error('Price adjustment failed:', err);
+      setError('Preisanpassung fehlgeschlagen.');
+    } finally {
+      setAdjustBusy(false);
+    }
+  };
+
+  const normalizeVariantValue = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(normalizeVariantValue);
+    if (value && typeof value === 'object') {
+      return Object.keys(value as Record<string, unknown>)
+        .sort()
+        .reduce<Record<string, unknown>>((acc, key) => {
+          acc[key] = normalizeVariantValue((value as Record<string, unknown>)[key]);
+          return acc;
+        }, {});
+    }
+    return value;
+  };
+
+  const parsePriceVariant = (value: Product['price_variant']): Record<string, unknown> | null => {
+    if (!value) return null;
+    if (typeof value === 'string') {
+      try {
+        const parsed = JSON.parse(value);
+        return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? parsed as Record<string, unknown>
+          : null;
+      } catch {
+        return null;
+      }
+    }
+    return value && typeof value === 'object' && !Array.isArray(value) ? value : null;
+  };
+
+  const getPriceVariantKey = (value: Product['price_variant']) => {
+    const parsed = parsePriceVariant(value);
+    if (parsed?.price_component) {
+      return JSON.stringify({
+        price_component: parsed.price_component,
+        component_label: parsed.component_label || parsed.price_component,
+      });
+    }
+    return parsed ? JSON.stringify(normalizeVariantValue(parsed)) : '__default__';
+  };
+
+  const getPriceVariantLabel = (key: string) => {
+    if (key === '__default__') return 'Standard';
+    try {
+      const variant = JSON.parse(key) as Record<string, unknown>;
+      if (variant.price_component) return String(variant.component_label || variant.price_component);
+      const preferred = [
+        'zone',
+        'snow_load_kn_m2',
+        'glass_division',
+        'roof_type',
+        'rafter_height_mm',
+        'price_basis',
+        'covering',
+        'glass',
+        'freestanding',
+        'tracks',
+        'opening',
+        'closure_type',
+        'component',
+        'price_component',
+        'zip',
+        'type_angle',
+        'fabric',
+        'retraction_brake'
+      ];
+      const labels: Record<string, string> = {
+        zone: 'Schneelastzone',
+        snow_load_kn_m2: 'Bemessungslast',
+        glass_division: 'Glasteilung',
+        roof_type: 'Dachtyp',
+        rafter_height_mm: 'Sparrenhöhe',
+        price_basis: 'Preisbasis',
+        covering: 'Dacheindeckung',
+        glass: 'Glas',
+        freestanding: 'Freistehend',
+        tracks: 'Spuren',
+        opening: 'Öffnung',
+        closure_type: 'Ausführung',
+        component: 'Komponente',
+        price_component: 'Preiskomponente',
+        zip: 'ZIP',
+        type_angle: 'Ausführung',
+        fabric: 'Tuchart',
+        retraction_brake: 'Rückschlagbremse'
+      };
+      const formatValue = (key: string, value: unknown) => {
+        if (typeof value === 'boolean') return value ? 'Ja' : 'Nein';
+        if (key === 'snow_load_kn_m2') return `${String(value).replace('.', ',')} kN/m²`;
+        if (key === 'glass_division') return value === 'with' ? 'Mit' : 'Ohne';
+        if (key === 'roof_type') {
+          if (value === 'B') return 'Bündig (B)';
+          if (value === 'U_50') return 'Überstand bis 50 cm';
+          if (value === 'U_100') return 'Überstand bis 100 cm';
+        }
+        if (key === 'rafter_height_mm') return `${value} mm`;
+        if (key === 'type_angle') return `${value}°`;
+        if (key === 'opening') return value === 'center' ? 'Mittig' : 'Seitlich';
+        if (key === 'glass' && value === 'without') return 'Ohne Glas';
+        if (key === 'glass' && value === 'esg_8') return 'ESG 8 mm';
+        if (key === 'glass' && value === 'esg_10') return 'ESG 10 mm';
+        return String(value).replace(/_/g, ' ');
+      };
+      if ('snow_load_kn_m2' in variant) {
+        return [
+          formatValue('snow_load_kn_m2', variant.snow_load_kn_m2),
+          `Glasteilung: ${formatValue('glass_division', variant.glass_division)}`,
+          `Dachtyp: ${formatValue('roof_type', variant.roof_type)}`,
+          ...('rafter_height_mm' in variant ? [`Sparren: ${formatValue('rafter_height_mm', variant.rafter_height_mm)}`] : []),
+        ].join(' | ');
+      }
+      const keys = [...preferred.filter(k => k in variant), ...Object.keys(variant).filter(k => !preferred.includes(k)).sort()];
+      return keys
+        .map(k => `${labels[k] || k}: ${formatValue(k, variant[k])}`)
+        .join(' | ');
+    } catch {
+      return key;
+    }
+  };
+
+  const getPriceVariantFromKey = (key: string): Record<string, unknown> | null => {
+    if (key === '__default__') return null;
+    try {
+      const parsed = JSON.parse(key);
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : null;
+    } catch {
+      return null;
+    }
+  };
+
   // Group products by name and create matrix structure
   const productMatrices = useMemo(() => {
     const grouped: Record<string, {
       products: Product[];
+      visibleProducts: Product[];
       pricing_type: 'dimension' | 'unit';
       unit_label?: string;
       description?: string;
       custom_fields?: CustomField[];
+      variantOptions: { key: string; label: string; count: number }[];
+      activeVariantKey: string;
+      activePriceVariant: Record<string, unknown> | null;
+      price_count: number;
+      isLoaded: boolean;
       breiteValues: number[];
       tiefeValues: number[];
       matrix: Record<string, Record<string, Product>>;
@@ -323,10 +523,16 @@ export default function ProductPricing() {
         } catch { parsedCustomFields = undefined; }
         grouped[p.product_name] = {
           products: [],
+          visibleProducts: [],
           pricing_type: (p.pricing_type as 'dimension' | 'unit') || 'dimension',
           unit_label: p.unit_label,
           description: p.description,
           custom_fields: parsedCustomFields,
+          variantOptions: [],
+          activeVariantKey: '__default__',
+          activePriceVariant: null,
+          price_count: p.price_count || 0,
+          isLoaded: !p.is_summary,
           breiteValues: [],
           tiefeValues: [],
           matrix: {}
@@ -337,22 +543,65 @@ export default function ProductPricing() {
           grouped[p.product_name].custom_fields = JSON.parse(p.custom_fields);
         } catch { /* ignore */ }
       }
+      grouped[p.product_name].price_count += p.is_summary ? 0 : 1;
+      if (!p.is_summary) grouped[p.product_name].isLoaded = true;
       grouped[p.product_name].products.push(p);
+    });
 
-      // Only build dimension matrix for dimension-based products
-      if ((p.pricing_type || 'dimension') === 'dimension') {
-        if (!grouped[p.product_name].breiteValues.includes(p.breite)) {
-          grouped[p.product_name].breiteValues.push(p.breite);
-        }
-        if (!grouped[p.product_name].tiefeValues.includes(p.tiefe)) {
-          grouped[p.product_name].tiefeValues.push(p.tiefe);
-        }
-
-        if (!grouped[p.product_name].matrix[p.breite]) {
-          grouped[p.product_name].matrix[p.breite] = {};
-        }
-        grouped[p.product_name].matrix[p.breite][p.tiefe] = p;
+    Object.entries(grouped).forEach(([productName, g]) => {
+      const variantCounts = new Map<string, number>();
+      const summary = g.products.find(product => product.is_summary);
+      if (summary?.variant_options?.length) {
+        g.variantOptions = summary.variant_options
+          .map(option => ({
+            ...option,
+            label: option.label || getPriceVariantLabel(option.key)
+          }))
+          .sort((a, b) => a.label.localeCompare(b.label, 'de'));
+        g.price_count = summary.price_count || g.price_count;
+      } else {
+        g.products.forEach(product => {
+          const key = getPriceVariantKey(product.price_variant);
+          variantCounts.set(key, (variantCounts.get(key) || 0) + 1);
+        });
+        g.variantOptions = Array.from(variantCounts.entries())
+          .map(([key, count]) => ({ key, label: getPriceVariantLabel(key), count }))
+          .sort((a, b) => a.label.localeCompare(b.label, 'de'));
       }
+
+      g.variantOptions.forEach(option => {
+        variantCounts.set(option.key, option.count);
+      });
+      const requestedVariant = selectedProductVariants[productName];
+      const activeVariant = requestedVariant && variantCounts.has(requestedVariant)
+        ? requestedVariant
+        : (g.variantOptions[0]?.key || '__default__');
+      g.activeVariantKey = activeVariant;
+      g.activePriceVariant = getPriceVariantFromKey(activeVariant);
+      g.visibleProducts = g.isLoaded
+        ? g.products.filter(product => !product.is_summary && getPriceVariantKey(product.price_variant) === activeVariant)
+        : [];
+      const rowsForMatrix = g.variantOptions.length > 1 ? g.visibleProducts : g.products;
+
+      rowsForMatrix.forEach(p => {
+        if (p.is_summary) return;
+        g.unit_label ||= p.unit_label;
+        g.description ||= p.description;
+
+      if ((p.pricing_type || 'dimension') === 'dimension') {
+        if (!g.breiteValues.includes(p.breite)) {
+          g.breiteValues.push(p.breite);
+        }
+        if (!g.tiefeValues.includes(p.tiefe)) {
+          g.tiefeValues.push(p.tiefe);
+        }
+
+        if (!g.matrix[p.breite]) {
+          g.matrix[p.breite] = {};
+        }
+        g.matrix[p.breite][p.tiefe] = p;
+      }
+      });
     });
 
     Object.values(grouped).forEach(g => {
@@ -361,7 +610,7 @@ export default function ProductPricing() {
     });
 
     return grouped;
-  }, [products]);
+  }, [products, selectedProductVariants]);
 
   // Get unique categories and product types from actual products in DB
   const filterOptions = useMemo(() => {
@@ -437,6 +686,7 @@ export default function ProductPricing() {
         next.delete(name);
       } else {
         next.add(name);
+        void ensureProductLoaded(name);
       }
       return next;
     });
@@ -655,7 +905,8 @@ export default function ProductPricing() {
             product_name: productName,
             breite: entry.breite,
             tiefe: entry.tiefe,
-            price: entry.price
+            price: entry.price,
+            price_variant: data.activePriceVariant
           })
         )
       );
@@ -816,7 +1067,10 @@ export default function ProductPricing() {
 
   // ========== DELETE HANDLERS ==========
   const handleDeleteProduct = async (productName: string) => {
-    const productsToDelete = products.filter(p => p.product_name === productName);
+    const loadedRows = loadedProductNames.has(productName)
+      ? products.filter(p => p.product_name === productName && !p.is_summary)
+      : await ensureProductLoaded(productName);
+    const productsToDelete = loadedRows.filter(p => !p.is_summary);
     try {
       await Promise.all(productsToDelete.map(p => api.delete(`/lead-products/${p.id}`)));
       await loadProducts();
@@ -827,7 +1081,7 @@ export default function ProductPricing() {
   };
 
   const handleDeleteRow = async (productName: string, tiefe: number) => {
-    const productsToDelete = products.filter(p => p.product_name === productName && p.tiefe === tiefe);
+    const productsToDelete = products.filter(p => p.product_name === productName && !p.is_summary && p.tiefe === tiefe);
     try {
       await Promise.all(productsToDelete.map(p => api.delete(`/lead-products/${p.id}`)));
       await loadProducts();
@@ -838,7 +1092,7 @@ export default function ProductPricing() {
   };
 
   const handleDeleteColumn = async (productName: string, breite: number) => {
-    const productsToDelete = products.filter(p => p.product_name === productName && p.breite === breite);
+    const productsToDelete = products.filter(p => p.product_name === productName && !p.is_summary && p.breite === breite);
     try {
       await Promise.all(productsToDelete.map(p => api.delete(`/lead-products/${p.id}`)));
       await loadProducts();
@@ -850,7 +1104,10 @@ export default function ProductPricing() {
 
   // ========== DESCRIPTION EDITING ==========
   const saveDescription = async (productName: string) => {
-    const productsToUpdate = products.filter(p => p.product_name === productName);
+    const rows = loadedProductNames.has(productName)
+      ? products.filter(p => p.product_name === productName && !p.is_summary)
+      : await ensureProductLoaded(productName);
+    const productsToUpdate = rows.filter(p => !p.is_summary);
     if (productsToUpdate.length === 0) return;
 
     try {
@@ -885,7 +1142,10 @@ export default function ProductPricing() {
   };
 
   const saveCustomFields = async (productName: string) => {
-    const productsToUpdate = products.filter(p => p.product_name === productName);
+    const rows = loadedProductNames.has(productName)
+      ? products.filter(p => p.product_name === productName && !p.is_summary)
+      : await ensureProductLoaded(productName);
+    const productsToUpdate = rows.filter(p => !p.is_summary);
     if (productsToUpdate.length === 0) return;
 
     // Filter out fields with empty labels
@@ -991,6 +1251,8 @@ export default function ProductPricing() {
     if (isNaN(price) || price <= 0) return;
 
     const { productName, breite, tiefe } = addingPrice;
+    const activeProductData = productMatrices[productName];
+    const priceVariant = activeProductData?.activePriceVariant || null;
 
     // Optimistic update - add to local state immediately
     const tempProduct: Product = {
@@ -999,7 +1261,8 @@ export default function ProductPricing() {
       breite,
       tiefe,
       price,
-      branch_id: null
+      branch_id: null,
+      price_variant: priceVariant
     };
     setProducts(prev => [...prev, tempProduct]);
     cancelAddingPrice();
@@ -1009,7 +1272,8 @@ export default function ProductPricing() {
         product_name: productName,
         breite,
         tiefe,
-        price
+        price,
+        price_variant: priceVariant
       });
       // Replace temp product with real one from server
       setProducts(prev => prev.map(p =>
@@ -1036,17 +1300,22 @@ export default function ProductPricing() {
     return n.toLocaleString('de-DE', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
   };
 
-  const exportProductCsv = (productName: string) => {
+  const exportProductCsv = async (productName: string) => {
+    if (!loadedProductNames.has(productName)) {
+      await ensureProductLoaded(productName);
+    }
     const data = productMatrices[productName];
-    const firstProduct = data?.products[0];
-    if (!data || !firstProduct) return;
+    if (!data) return;
+    const exportRows = data.variantOptions.length > 1 ? data.visibleProducts : data.products;
+    const firstProduct = exportRows[0];
+    if (!firstProduct) return;
 
     const makeLine = (values: unknown[]) => values.map(csvEscape).join(';');
     const lines: string[] = [];
 
     if (data.pricing_type === 'unit') {
       lines.push(makeLine(['Einheit', 'Preis']));
-      data.products.forEach(product => {
+      exportRows.forEach(product => {
         lines.push(makeLine([product.unit_label || data.unit_label || 'Stk.', formatCsvPrice(product.price)]));
       });
     } else {
@@ -1103,6 +1372,18 @@ export default function ProductPricing() {
     if (value === null || value === undefined) return null;
     const text = String(value).trim();
     return text || null;
+  };
+
+  const buildImportPriceVariant = (row: Record<string, unknown>): Record<string, unknown> | null => {
+    const entries: [string, string | null][] = [
+      ['zone', parseImportText(getImportValue(row, ['zone', 'schneelastzone', 'snow_zone', 'snowzone']))],
+      ['covering', parseImportText(getImportValue(row, ['covering', 'eindeckung', 'dacheindeckung', 'deckung']))],
+      ['glass', parseImportText(getImportValue(row, ['glass', 'glas', 'glasart', 'glass_type']))],
+      ['price_basis', parseImportText(getImportValue(row, ['price_basis', 'preisbasis', 'preis_basis', 'basis']))],
+      ['tracks', parseImportText(getImportValue(row, ['tracks', 'spuren', 'laufspuren']))],
+    ];
+    const variant = Object.fromEntries(entries.filter(([, value]) => value));
+    return Object.keys(variant).length > 0 ? variant : null;
   };
 
   const getImportProductNameFromFile = (fileName: string): string => {
@@ -1259,6 +1540,7 @@ export default function ProductPricing() {
       const priceValue = parseImportNumber(getImportValue(row, ['price', 'preis', 'betrag', 'fiyat', 'netto', 'brutto']));
       const description = parseImportText(getImportValue(row, ['description', 'beschreibung', 'aciklama', 'açıklama']));
       const customFields = parseImportText(getImportValue(row, ['custom_fields', 'formularfelder', 'fields']));
+      const priceVariant = buildImportPriceVariant(row);
       const pricingType: 'dimension' | 'unit' =
         rawPricingType && ['unit', 'einheit', 'einheitspreis', 'piece', 'stuck', 'stueck'].includes(normalizeHeader(rawPricingType))
           ? 'unit'
@@ -1274,7 +1556,8 @@ export default function ProductPricing() {
         price: priceValue ?? 0,
         unit_label: unitLabel,
         description,
-        custom_fields: customFields
+        custom_fields: customFields,
+        price_variant: priceVariant
       };
 
       const errors: string[] = [];
@@ -1410,8 +1693,8 @@ export default function ProductPricing() {
         const allModelNames = Object.keys(productMatrices);
         const totalModels = allModelNames.length;
         const modelsWithPrice = allModelNames.filter(name => {
-          const rows = products.filter(p => p.product_name === name);
-          return rows.some(r => r.price != null && Number(r.price) > 0);
+          const data = productMatrices[name];
+          return (data?.price_count || data?.products.length || 0) > 0;
         }).length;
         const modelsWithoutPrice = totalModels - modelsWithPrice;
 
@@ -1551,7 +1834,10 @@ export default function ProductPricing() {
           {filteredProductNames.map(productName => {
             const data = productMatrices[productName];
             const isExpanded = expandedProducts.has(productName);
-            const totalPrices = data.products.length;
+            const isProductLoading = loadingProductNames.has(productName);
+            const displayedProducts = data.variantOptions.length > 1 ? data.visibleProducts : data.products;
+            const activeVariantCount = data.variantOptions.find(option => option.key === data.activeVariantKey)?.count;
+            const totalPrices = data.isLoaded ? displayedProducts.length : (activeVariantCount || data.price_count || 0);
             const pCols = pendingColumns[productName] || [];
             const pRows = pendingRows[productName] || [];
             const hasChanges = hasPendingChanges(productName);
@@ -1570,12 +1856,15 @@ export default function ProductPricing() {
                         : `${totalPrices} Preise`
                       }
                     </span>
+                    {data.variantOptions.length > 1 && (
+                      <span className="price-count">{data.variantOptions.length} Varianten</span>
+                    )}
                   </div>
                   <div className="accordion-actions" onClick={e => e.stopPropagation()}>
                     <button
                       className="btn-icon-small export"
-                      onClick={() => exportProductCsv(productName)}
-                      title={`${productName} als CSV exportieren`}
+                      onClick={() => data.isLoaded ? void exportProductCsv(productName) : void ensureProductLoaded(productName)}
+                      title={data.isLoaded ? `${productName} als CSV exportieren` : 'Preise zuerst laden'}
                     >
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4" />
@@ -1584,7 +1873,7 @@ export default function ProductPricing() {
                       </svg>
                       CSV
                     </button>
-                    {data.pricing_type !== 'unit' && (
+                    {data.isLoaded && data.pricing_type !== 'unit' && (
                       <>
                         <button className="btn-icon-small" onClick={() => addPendingColumn(productName)}>
                           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1600,9 +1889,41 @@ export default function ProductPricing() {
                         </button>
                       </>
                     )}
+                    {adjustingProduct === productName ? (
+                      <div className="price-adjust-inline" onClick={e => e.stopPropagation()}>
+                        <input
+                          type="number"
+                          className="price-adjust-input"
+                          value={adjustPercent}
+                          onChange={e => setAdjustPercent(e.target.value)}
+                          placeholder="z. B. -10"
+                          step="0.5"
+                          autoFocus
+                          disabled={adjustBusy}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') void handleAdjustPrice(productName);
+                            if (e.key === 'Escape') { setAdjustingProduct(null); setAdjustPercent(''); }
+                          }}
+                        />
+                        <span className="price-adjust-suffix">%</span>
+                        <button className="btn-icon-small" disabled={adjustBusy} onClick={() => void handleAdjustPrice(productName)} title="Anwenden">
+                          {adjustBusy ? '…' : '✓'}
+                        </button>
+                        <button className="btn-icon-small" disabled={adjustBusy} onClick={() => { setAdjustingProduct(null); setAdjustPercent(''); }} title="Abbrechen">✕</button>
+                      </div>
+                    ) : (
+                      <button
+                        className="btn-icon-small"
+                        onClick={() => { setAdjustingProduct(productName); setAdjustPercent(''); }}
+                        title="Alle Preise dieses Produkts um Prozent anpassen (Auf-/Abschlag)"
+                      >
+                        %
+                      </button>
+                    )}
                     <button
                       className="btn-icon-small delete"
                       onClick={() => setDeleteConfirm({ type: 'product', productName })}
+                      disabled={isProductLoading}
                     >
                       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                         <polyline points="3 6 5 6 21 6" />
@@ -1621,6 +1942,29 @@ export default function ProductPricing() {
                       exit={{ height: 0, opacity: 0 }}
                       transition={{ duration: 0.2 }}
                     >
+                      {data.variantOptions.length > 1 && (
+                        <div className="variant-selector-row">
+                          <label>Variante</label>
+                          <select
+                            value={data.activeVariantKey}
+                            onChange={e => setSelectedProductVariants(prev => ({ ...prev, [productName]: e.target.value }))}
+                          >
+                            {data.variantOptions.map(option => (
+                              <option key={option.key} value={option.key}>
+                                {option.label} ({option.count})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      )}
+
+                      {!data.isLoaded ? (
+                        <div className="matrix-loading-state">
+                          <div className="spinner"></div>
+                          <span>{isProductLoading ? 'Preise werden geladen...' : 'Preise laden...'}</span>
+                        </div>
+                      ) : (
+                      <>
                       {data.pricing_type === 'unit' ? (
                         <div className="unit-pricing-card">
                           <div className="unit-pricing-row">
@@ -1632,7 +1976,7 @@ export default function ProductPricing() {
                                   value={editValue}
                                   onChange={e => setEditValue(e.target.value)}
                                   onBlur={async () => {
-                                    const product = data.products[0];
+                                    const product = displayedProducts[0];
                                     if (product && editValue !== (data.unit_label || '')) {
                                       await api.put(`/lead-products/${product.id}`, { unit_label: editValue });
                                       await loadProducts();
@@ -1660,7 +2004,7 @@ export default function ProductPricing() {
                                   value={editValue}
                                   onChange={e => setEditValue(e.target.value)}
                                   onBlur={async () => {
-                                    const product = data.products[0];
+                                    const product = displayedProducts[0];
                                     if (product && editValue) {
                                       await api.put(`/lead-products/${product.id}`, { price: parseFloat(editValue) });
                                       await loadProducts();
@@ -1675,9 +2019,9 @@ export default function ProductPricing() {
                               ) : (
                                 <span
                                   className="unit-value clickable price"
-                                  onClick={() => { setEditingCell({ productName, breite: -2, tiefe: 0 }); setEditValue(String(data.products[0]?.price || 0)); }}
+                                  onClick={() => { setEditingCell({ productName, breite: -2, tiefe: 0 }); setEditValue(String(displayedProducts[0]?.price || 0)); }}
                                 >
-                                  {(data.products[0]?.price || 0).toLocaleString('de-DE', { minimumFractionDigits: 2 })} €
+                                  {(displayedProducts[0]?.price || 0).toLocaleString('de-DE', { minimumFractionDigits: 2 })} €
                                 </span>
                               )}
                             </div>
@@ -1909,9 +2253,11 @@ export default function ProductPricing() {
                         )}
                       </div>
                       )}
+                      </>
+                      )}
 
                       {/* Description Section - below table */}
-                      <div className="description-section">
+                      {data.isLoaded && <div className="description-section">
                         {editingDescription === productName ? (
                           <div className="description-editor">
                             <textarea
@@ -1956,10 +2302,10 @@ export default function ProductPricing() {
                             )}
                           </button>
                         )}
-                      </div>
+                      </div>}
 
                       {/* Product Images & Cover-PDF Section */}
-                      {data.products[0]?.id && (() => {
+                      {data.isLoaded && data.products[0]?.id && (() => {
                         const productId = data.products[0].id;
                         if (!productImages[productId] && imageUploadingFor !== productId) {
                           ensureImagesLoaded(productId);

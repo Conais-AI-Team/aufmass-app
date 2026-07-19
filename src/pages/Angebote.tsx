@@ -168,6 +168,7 @@ export default function Angebote() {
   const [leadModalOpen, setLeadModalOpen] = useState(false);
   const [statusDropdownOpen, setStatusDropdownOpen] = useState<number | null>(null);
   const [emailComposer, setEmailComposer] = useState<{ to: string; subject: string; body: string; leadId?: number; emailType?: string; attachmentName?: string; angebote?: import('../components/EmailComposer').AngebotAttachment[]; angebotPdfData?: import('../utils/angebotPdfGenerator').AngebotPdfData } | null>(null);
+  const autoSendLeadRef = useRef<number | null>(null);
   const [editLeadData, setEditLeadData] = useState<LeadDetail | null>(null);
   const [editAngebotId, setEditAngebotId] = useState<number | null>(null);
   const [newAngebotLeadId, setNewAngebotLeadId] = useState<number | null>(null);
@@ -447,7 +448,9 @@ export default function Angebote() {
     const subtotalFromItems = items.reduce((sum, item) => sum + ((item.unit_price || 0) * (item.quantity || 0)), 0) + extras.reduce((sum, extra) => sum + (extra.price || 0), 0);
     const subtotal = angebot?.subtotal ?? lead.subtotal ?? subtotalFromItems;
     const totalDiscount = angebot?.total_discount ?? lead.total_discount ?? 0;
-    const totalDiscountPercent = subtotal > 0 ? Math.round(((itemDiscounts + totalDiscount) / subtotal) * 100) : 0;
+    const totalDiscountPercent = subtotal > 0
+      ? Math.round((((itemDiscounts + totalDiscount) / subtotal) * 100 + Number.EPSILON) * 100) / 100
+      : 0;
 
     return {
       customer_firstname: lead.customer_firstname,
@@ -469,7 +472,7 @@ export default function Angebote() {
         total_price: item.total_price,
         discount: item.discount || 0,
         discount_percent: item.discount && item.unit_price && item.quantity
-          ? Math.round((item.discount / (item.unit_price * item.quantity)) * 100)
+          ? Math.round((((item.discount / (item.unit_price * item.quantity)) * 100) + Number.EPSILON) * 100) / 100
           : 0,
         pricing_type: item.pricing_type,
         unit_label: item.unit_label,
@@ -639,6 +642,23 @@ export default function Angebote() {
       toast.error('Fehler', 'E-Mail konnte nicht vorbereitet werden.');
     }
   };
+
+  useEffect(() => {
+    const leadId = Number(searchParams.get('sendLead'));
+    if (!Number.isInteger(leadId) || leadId <= 0 || loading || emailComposer || autoSendLeadRef.current === leadId) return;
+    const lead = leads.find((entry) => entry.id === leadId);
+    if (!lead) return;
+
+    autoSendLeadRef.current = leadId;
+    const next = new URLSearchParams(searchParams);
+    next.delete('sendLead');
+    setSearchParams(next, { replace: true });
+    void handleSendLeadByEmail(lead).finally(() => {
+      autoSendLeadRef.current = null;
+    });
+  // handleSendLeadByEmail intentionally consumes the latest lead snapshot here.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [emailComposer, leads, loading, searchParams, setSearchParams]);
 
   // Send a specific angebot by e-mail (used from the per-angebot row)
   const handleSendAngebotByEmail = async (leadId: number, angebotId: number) => {
@@ -1097,6 +1117,8 @@ export default function Angebote() {
                         <div className="angebot-row-info">
                           <span className="angebot-row-nummer">{ang.angebot_nummer || `Angebot ${idx + 1}`}</span>
                           <span className="angebot-row-price">{formatPrice(ang.total_price)}</span>
+                          {ang.status === 'angenommen' && <span className="angebot-accepted-badge">Angenommen</span>}
+                          {ang.status === 'versendet' && <span className="angebot-sent-badge">Versendet</span>}
                         </div>
                         <div className="angebot-row-actions">
                           <button className="btn-icon-sm" title="PDF" onClick={() => openAngebotPdfWithFallback(lead.id, ang.id)}>
@@ -1170,6 +1192,7 @@ export default function Angebote() {
           setNewAngebotLeadId(null);
           setFromAufmassFormId(null);
           loadLeads();
+          getForms().then(setAufmassForms).catch(err => console.error('Reload Aufmaße after Angebot save failed:', err));
           if (expandedLeadId) loadAngebote(expandedLeadId);
           // MODÜL B Soru-3 (a): if the user ticked the "send by e-mail" box,
           // open the EmailComposer for the freshly saved lead. The composer
@@ -1223,6 +1246,29 @@ export default function Angebote() {
                   {selectedLead.customer_address && <p>{selectedLead.customer_address}</p>}
                 </section>
 
+                {selectedLead.angebote && selectedLead.angebote.length > 0 && (
+                  <section className="detail-section angebot-pdf-preview-section">
+                    <h3>PDF-Vorschau</h3>
+                    <div className="angebot-pdf-preview-list">
+                      {selectedLead.angebote.map((angebot, index) => (
+                        <button
+                          key={`preview-${angebot.id}`}
+                          className="angebot-pdf-preview-item"
+                          onClick={() => openAngebotPdfWithFallback(selectedLead.id, angebot.id, selectedLead)}
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /></svg>
+                          <span>
+                            <strong>{angebot.angebot_nummer || `Angebot ${index + 1}`}</strong>
+                            <small>{formatPrice(angebot.total_price)}</small>
+                          </span>
+                          {angebot.status === 'angenommen' && <em>Angenommen</em>}
+                          {angebot.status === 'versendet' && <em>Versendet</em>}
+                        </button>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
                 {/* Show each angebot separately */}
                 {selectedLead.angebote && selectedLead.angebote.length > 0 ? (
                   selectedLead.angebote.map((ang, idx) => (
@@ -1230,6 +1276,8 @@ export default function Angebote() {
                       <div className="detail-angebot-header">
                         <h3>{ang.angebot_nummer || `Angebot ${idx + 1}`}</h3>
                         <span className="detail-angebot-price">{formatPrice(ang.total_price)}</span>
+                        {ang.status === 'angenommen' && <span className="angebot-accepted-badge">Angenommen</span>}
+                        {ang.status === 'versendet' && <span className="angebot-sent-badge">Versendet</span>}
                       </div>
 
                       {ang.items.length > 0 && (
@@ -1353,18 +1401,20 @@ export default function Angebote() {
 
               <div className="modal-footer">
                 <button className="btn-cancel" onClick={() => setDetailModalOpen(false)}>Schließen</button>
-                <button
-                  className="btn-secondary"
-                  onClick={() => openLeadPdfWithFallback(selectedLead.id, selectedLead)}
-                >
-                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 16, height: 16 }}>
-                    <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
-                    <polyline points="14 2 14 8 20 8" />
-                    <line x1="16" y1="13" x2="8" y2="13" />
-                    <line x1="16" y1="17" x2="8" y2="17" />
-                  </svg>
-                  PDF anzeigen
-                </button>
+                {(!selectedLead.angebote || selectedLead.angebote.length === 0) && (
+                  <button
+                    className="btn-secondary"
+                    onClick={() => openLeadPdfWithFallback(selectedLead.id, selectedLead)}
+                  >
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" style={{ width: 16, height: 16 }}>
+                      <path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" />
+                      <polyline points="14 2 14 8 20 8" />
+                      <line x1="16" y1="13" x2="8" y2="13" />
+                      <line x1="16" y1="17" x2="8" y2="17" />
+                    </svg>
+                    PDF anzeigen
+                  </button>
+                )}
                 <button
                   className="btn-secondary"
                   onClick={() => handleSendLeadByEmail(selectedLead)}
@@ -1407,7 +1457,8 @@ export default function Angebote() {
               const sentLeadId = emailComposer.leadId;
               const isAngebot = emailComposer.emailType === 'angebot';
               if (sentLeadId && isAngebot) {
-                markLeadAngebotAsSent(sentLeadId)
+                const sentAngebotIds = emailComposer.angebote?.filter((angebot) => angebot.ready).map((angebot) => angebot.id);
+                markLeadAngebotAsSent(sentLeadId, sentAngebotIds)
                   .then(() => Promise.all([
                     loadLeads(),
                     getForms().then(setAufmassForms).catch(() => {}),

@@ -253,8 +253,8 @@ const RechnungForm = ({ formId, type, onClose, onSaved }: RechnungFormProps) => 
                     <span>{formatPrice(brutto)} EUR</span>
                   </div>
                   <label style={{ ...labelStyle, marginBottom: '6px' }}>Anzahlungsbetrag (EUR, brutto)</label>
-                  <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
-                    {[20, 30, 50].map((pct) => (
+                  <div style={{ display: 'flex', gap: '6px', marginBottom: '8px', flexWrap: 'wrap' }}>
+                    {[10, 20, 30, 45, 50, 75, 100].map((pct) => (
                       <button
                         key={pct}
                         type="button"
@@ -267,16 +267,6 @@ const RechnungForm = ({ formId, type, onClose, onSaved }: RechnungFormProps) => 
                         }}
                       >{pct}%</button>
                     ))}
-                    <button
-                      type="button"
-                      onClick={() => setAnzahlungBetragStr(brutto.toFixed(2).replace('.', ','))}
-                      style={{
-                        padding: '6px 12px', borderRadius: '6px',
-                        border: '1px solid var(--border-primary)',
-                        background: 'var(--bg-tertiary)', color: 'var(--text-secondary)',
-                        fontSize: '12px', fontWeight: 600, cursor: 'pointer',
-                      }}
-                    >100%</button>
                   </div>
                   <input
                     type="text"

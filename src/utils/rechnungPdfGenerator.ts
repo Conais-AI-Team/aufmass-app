@@ -1,5 +1,6 @@
 import { jsPDF } from 'jspdf';
 import { getCompanyInfoForPdf } from './companyInfoCache';
+import { drawAyluxPdfLogo, loadAyluxPdfLogo } from './pdfLogo';
 import type { RechnungItem, ZahlungsMethode } from '../services/api';
 
 export interface RechnungPdfAnzahlung {
@@ -49,6 +50,7 @@ export const generateRechnungPDF = async (
   const companyName = companyInfo?.company_name || 'AYLUX Sonnenschutzsysteme';
 
   const pdf = new jsPDF();
+  const brandLogo = await loadAyluxPdfLogo();
   const pageWidth = pdf.internal.pageSize.getWidth();
   const pageHeight = pdf.internal.pageSize.getHeight();
   const margin = 20;
@@ -64,14 +66,7 @@ export const generateRechnungPDF = async (
   };
 
   // ============ HEADER (logo + branch sender line) ============
-  pdf.setFillColor(127, 169, 61);
-  pdf.rect(pageWidth - 70, 10, 50, 25, 'F');
-  pdf.setTextColor(255, 255, 255);
-  pdf.setFontSize(18);
-  pdf.setFont('helvetica', 'bold');
-  pdf.text('AYLUX', pageWidth - 60, 22);
-  pdf.setFontSize(7);
-  pdf.text('SONNENSCHUTZSYSTEME', pageWidth - 65, 28);
+  drawAyluxPdfLogo(pdf, brandLogo, pageWidth - 72, 12, 52);
 
   if (companyInfo && companyInfo.company_name) {
     const absenderParts: string[] = [companyInfo.company_name];
