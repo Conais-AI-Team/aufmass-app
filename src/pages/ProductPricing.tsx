@@ -4,7 +4,7 @@ import * as XLSX from 'xlsx';
 import {
   api, getProductImages, uploadProductImage, deleteProductImage, setProductImageCoverFlag,
   getProductCoverPdf, uploadProductCoverPdf, setCoverPdfPages, deleteProductCoverPdf,
-  fetchBranchPdfBytes, adjustProductPrice
+  fetchBranchPdfBytes, adjustProductPrice, renameProduct
 } from '../services/api';
 import type { ProductImage, ProductCoverPdf } from '../services/api';
 import { invalidateProductImagesCache } from '../utils/productImagesCache';
@@ -137,6 +137,11 @@ export default function ProductPricing() {
   const [adjustingProduct, setAdjustingProduct] = useState<string | null>(null);
   const [adjustPercent, setAdjustPercent] = useState('');
   const [adjustBusy, setAdjustBusy] = useState(false);
+
+  // Product rename
+  const [renamingProduct, setRenamingProduct] = useState<string | null>(null);
+  const [renameValue, setRenameValue] = useState('');
+  const [renameBusy, setRenameBusy] = useState(false);
 
   // Description editing for existing products
   const [editingDescription, setEditingDescription] = useState<string | null>(null);
@@ -365,6 +370,24 @@ export default function ProductPricing() {
       setError('Preisanpassung fehlgeschlagen.');
     } finally {
       setAdjustBusy(false);
+    }
+  };
+
+  const handleRenameProduct = async (oldName: string) => {
+    const newName = renameValue.trim();
+    if (!newName || newName === oldName) { setRenamingProduct(null); setRenameValue(''); return; }
+    setRenameBusy(true);
+    try {
+      await renameProduct(oldName, newName);
+      setRenamingProduct(null);
+      setRenameValue('');
+      await loadProducts();
+      setError('');
+    } catch (err) {
+      console.error('Rename failed:', err);
+      setError('Umbenennen fehlgeschlagen.');
+    } finally {
+      setRenameBusy(false);
     }
   };
 
@@ -1849,7 +1872,37 @@ export default function ProductPricing() {
                     <svg className="accordion-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <polyline points="9 18 15 12 9 6" />
                     </svg>
-                    <span className="product-name">{productName}</span>
+                    {renamingProduct === productName ? (
+                      <span className="product-rename-inline" onClick={e => e.stopPropagation()}>
+                        <input
+                          type="text"
+                          className="product-rename-input"
+                          value={renameValue}
+                          onChange={e => setRenameValue(e.target.value)}
+                          autoFocus
+                          disabled={renameBusy}
+                          onKeyDown={e => {
+                            if (e.key === 'Enter') void handleRenameProduct(productName);
+                            if (e.key === 'Escape') { setRenamingProduct(null); setRenameValue(''); }
+                          }}
+                        />
+                        <button className="btn-icon-small" disabled={renameBusy} onClick={() => void handleRenameProduct(productName)} title="Speichern">{renameBusy ? '…' : '✓'}</button>
+                        <button className="btn-icon-small" disabled={renameBusy} onClick={() => { setRenamingProduct(null); setRenameValue(''); }} title="Abbrechen">✕</button>
+                      </span>
+                    ) : (
+                      <span className="product-name">
+                        {productName}
+                        <button
+                          className="product-rename-btn"
+                          title="Produkt umbenennen"
+                          onClick={e => { e.stopPropagation(); setRenamingProduct(productName); setRenameValue(productName); }}
+                        >
+                          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" width="14" height="14">
+                            <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                          </svg>
+                        </button>
+                      </span>
+                    )}
                     <span className="price-count">
                       {data.pricing_type === 'unit'
                         ? `Einheitspreis${data.unit_label ? ` (${data.unit_label})` : ''}`
@@ -1915,9 +1968,12 @@ export default function ProductPricing() {
                       <button
                         className="btn-icon-small"
                         onClick={() => { setAdjustingProduct(productName); setAdjustPercent(''); }}
-                        title="Alle Preise dieses Produkts um Prozent anpassen (Auf-/Abschlag)"
+                        title="Alle Preise dieses Produkts prozentual ändern — Aufschlag (+) oder Abschlag (−). z. B. -10 = alle Preise 10 % günstiger"
                       >
-                        %
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                          <line x1="19" y1="5" x2="5" y2="19" /><circle cx="6.5" cy="6.5" r="2.5" /><circle cx="17.5" cy="17.5" r="2.5" />
+                        </svg>
+                        Auf-/Abschlag
                       </button>
                     )}
                     <button

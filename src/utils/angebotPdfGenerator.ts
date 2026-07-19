@@ -257,7 +257,7 @@ export const generateAngebotPDF = async (
     const titleY = headerBottom + 8;
     pdf.setTextColor(0, 0, 0);
     pdf.setFont('helvetica', 'bold');
-    const titleText = 'ANGEBOT / RECHNUNG / AUFTRAGSFORMULAR / KAUFVERTRAG';
+    const titleText = 'ANGEBOT / AUFTRAGSFORMULAR / KAUFVERTRAG';
     const availableTitleWidth = pageWidth - 2 * margin;
     let titleSize = 14;
     pdf.setFontSize(titleSize);
