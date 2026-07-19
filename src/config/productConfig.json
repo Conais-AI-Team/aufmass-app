@@ -5,6 +5,7 @@
         "Arona",
         "Arona XL",
         "Orangeline",
+        "Orangeline Plus",
         "Trendline",
         "Trendline Plus",
         "Topline",
@@ -13,13 +14,18 @@
         "Designline",
         "Ultraline",
         "Skyline",
+        "Carport",
         "Murano Puro",
-        "Murano Int. Zip"
+        "Murano Modulare",
+        "Murano Vetro",
+        "Murano Integrale",
+        "Murano Integrale Z"
       ],
       "modelColors": {
         "Arona": ["RAL 7016", "RAL 9007", "RAL 9010", "RAL 9016", "RAL 9006", "RAL 8014"],
         "Arona XL": ["RAL 7016", "RAL 9007", "RAL 9010", "RAL 9016", "RAL 9006", "RAL 8014"],
         "Orangeline": ["RAL 7016", "RAL 9007", "RAL 9010"],
+        "Orangeline Plus": ["RAL 7016", "RAL 9007", "RAL 9010"],
         "Trendline": ["RAL 7016", "RAL 9007"],
         "Trendline Plus": ["RAL 7016", "RAL 9007", "RAL 9010"],
         "Topline": ["RAL 7016", "RAL 9007", "RAL 9010", "RAL 9005"],
@@ -28,8 +34,8 @@
         "Designline": ["RAL 9010", "RAL 9005", "DB703"],
         "Ultraline": ["RAL 7016", "RAL 9007", "RAL 9010", "RAL 9005"],
         "Skyline": ["RAL 7016"],
-        "Murano Puro": [],
-        "Murano Int. Zip": []
+        "Carport": ["RAL 7016"],
+        "Murano Puro": []
       },
       "fields": [
         {
@@ -120,10 +126,64 @@
           "required": true
         },
         {
+          "name": "schneelastzone",
+          "label": "Schneelastzone",
+          "type": "select",
+          "options": ["Zone 1", "Zone 1a + 2", "Zone 2a + 3"],
+          "required": false
+        },
+        {
+          "name": "lewensSnowLoad",
+          "label": "Bemessungslast",
+          "type": "select",
+          "options": ["0,65 kN/m²", "0,85 kN/m²", "1,10 kN/m²", "1,50 kN/m²", "2,00 kN/m²", "2,50 kN/m²", "4,00 kN/m²"],
+          "required": true,
+          "models": ["Murano Modulare", "Murano Puro", "Murano Vetro", "Murano Integrale", "Murano Integrale Z"]
+        },
+        {
+          "name": "lewensGlassDivision",
+          "label": "Glasteilung",
+          "type": "select",
+          "options": ["Ohne Glasteilung", "Mit Glasteilung"],
+          "required": true,
+          "models": ["Murano Modulare", "Murano Puro", "Murano Vetro", "Murano Integrale", "Murano Integrale Z"]
+        },
+        {
+          "name": "lewensSteelReinforcement",
+          "label": "Stahlverstärkung",
+          "type": "select",
+          "options": ["Ohne Stahlverstärkung", "Mit Stahlverstärkung"],
+          "required": true,
+          "models": ["Murano Modulare", "Murano Puro", "Murano Vetro", "Murano Integrale", "Murano Integrale Z"]
+        },
+        {
+          "name": "lewensRoofType",
+          "label": "Dachtyp",
+          "type": "select",
+          "options": ["Bündig (B)", "Überstand bis 50 cm", "Überstand bis 100 cm"],
+          "required": true,
+          "models": ["Murano Puro", "Murano Vetro", "Murano Integrale", "Murano Integrale Z"]
+        },
+        {
+          "name": "lewensRafterHeight",
+          "label": "Sparrenhöhe",
+          "type": "select",
+          "options": ["130 mm", "160 mm"],
+          "required": true,
+          "models": ["Murano Modulare"]
+        },
+        {
+          "name": "preisBasis",
+          "label": "Preisbasis",
+          "type": "select",
+          "options": ["inkl. Dacheindeckung", "exkl. Dacheindeckung"],
+          "required": false
+        },
+        {
           "name": "eindeckung",
           "label": "Eindeckung",
           "type": "select",
-          "options": ["8 MM KLAR", "8 MM MILCH", "10 MM KLAR", "10 MM MILCH", "16 MM PCS KLAR", "16 MM PCS MILCH"],
+          "options": ["8 MM KLAR", "8 MM MILCH", "10 MM KLAR", "10 MM MILCH", "16 MM PCS KLAR", "16 MM PCS MILCH", "Polycarbonat klar/opal", "Polycarbonat IR-Gold", "Glas klar", "Glas matt/milch", "Sonnenschutzglas"],
           "required": true
         },
         {
@@ -868,11 +928,37 @@
           "required": false
         }
       ]
+    },
+    "Freistehende Konstruktion": {
+      "models": ["Freistehende Konstruktion"],
+      "fields": [
+        {
+          "name": "breite",
+          "label": "Breite",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "fundamente",
+          "label": "Fundamente",
+          "type": "select",
+          "options": ["Ohne Fundamente", "Mit Fundamenten"],
+          "required": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
     }
   },
   "MARKISE": {
     "AUFGLAS": {
-      "models": ["W350", "ANCONA AG"],
+      "models": ["W350", "ANCONA AG", "Ancona Aufglas", "Amalfi Aufglas", "Portofino Aufglas", "Capri Aufglas"],
       "modelColors": {
         "W350": ["RAL 7016", "RAL 9007", "RAL 9010"],
         "ANCONA AG": ["RAL 7016", "RAL 9007", "RAL 9010"]
@@ -910,7 +996,8 @@
           "label": "ZIP",
           "type": "select",
           "options": ["JA", "NEIN"],
-          "required": true
+          "required": true,
+          "models": ["Amalfi Aufglas"]
         },
         {
           "name": "antrieb",
@@ -936,10 +1023,9 @@
       ]
     },
     "UNTERGLAS": {
-      "models": ["T350", "ANCONA UG"],
+      "models": ["T350", "Ancona Unterglas", "Amalfi Unterglas", "Portofino Unterglas"],
       "modelColors": {
-        "T350": ["RAL 7016", "RAL 9007", "RAL 9010"],
-        "ANCONA UG": ["RAL 7016", "RAL 9007", "RAL 9010"]
+        "T350": ["RAL 7016", "RAL 9007", "RAL 9010"]
       },
       "fields": [
         {
@@ -975,7 +1061,8 @@
           "label": "Markisenhöhe",
           "type": "number",
           "unit": "mm",
-          "required": true
+          "required": true,
+          "excludeModels": ["Ancona Unterglas", "Amalfi Unterglas", "Portofino Unterglas"]
         },
         {
           "name": "stoffNummer",
@@ -988,7 +1075,8 @@
           "label": "ZIP",
           "type": "select",
           "options": ["JA", "NEIN"],
-          "required": true
+          "required": true,
+          "models": ["Amalfi Unterglas"]
         },
         {
           "name": "antrieb",
@@ -1014,7 +1102,7 @@
       ]
     },
     "SENKRECHT": {
-      "models": ["2020Z", "1616Z"],
+      "models": ["2020Z", "1616Z", "Micro 100", "Micro 150", "Micro 300", "Micro 860", "Micro 1060", "Micro 2020", "Micro 4000", "Micro Doppio"],
       "modelColors": {
         "2020Z": ["RAL 7016", "RAL 9007", "RAL 9010"],
         "1616Z": ["RAL 7016", "RAL 9007", "RAL 9010"]
@@ -1056,6 +1144,16 @@
           "type": "select",
           "options": ["JA", "NEIN"],
           "required": true,
+          "models": ["Micro 860", "Micro 1060"],
+          "gridGroup": "dimensions"
+        },
+        {
+          "name": "lewensTypeAngle",
+          "label": "Ausführung",
+          "type": "select",
+          "options": ["90°", "135°"],
+          "required": true,
+          "models": ["Micro 100"],
           "gridGroup": "dimensions"
         },
         {
@@ -1107,10 +1205,8 @@
       ]
     },
     "VOLKASSETTE": {
-      "models": ["TRENTINO"],
-      "modelColors": {
-        "TRENTINO": ["RAL 7016", "RAL 9007", "RAL 9010"]
-      },
+      "models": ["Trentino Mini", "Trentino", "Toscana Mini", "Toscana", "Toscana Grande"],
+      "modelColors": {},
       "fields": [
         {
           "name": "befestigungsart",
@@ -1243,15 +1339,238 @@
           "required": false
         }
       ]
+    },
+    "GELENKARM": {
+      "models": ["Economy", "Family Classic", "Family Design", "Family Compact"],
+      "fields": [
+        {
+          "name": "befestigungsart",
+          "label": "Befestigungsart",
+          "type": "select",
+          "options": ["Wand", "Decke", "Dachsparren"],
+          "required": true
+        },
+        {
+          "name": "gestellfarbe",
+          "label": "Gestellfarbe",
+          "type": "modelColorSelect",
+          "required": true,
+          "hasCustomOption": true
+        },
+        {
+          "name": "markisenbreite",
+          "label": "Markisenbreite",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "markisenlaenge",
+          "label": "Ausfall",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "stoffNummer",
+          "label": "Stoff Nummer",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "antrieb",
+          "label": "Antrieb",
+          "type": "select",
+          "options": ["Funk Motor", "E-Motor (Schalter)", "Kurbel"],
+          "required": true
+        },
+        {
+          "name": "antriebsseite",
+          "label": "Antriebsseite",
+          "type": "select",
+          "options": ["Links", "Rechts"],
+          "required": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "PERGOLA": {
+      "models": ["Portofino Pergola", "Capri Pergola", "Positano"],
+      "fields": [
+        {
+          "name": "gestellfarbe",
+          "label": "Gestellfarbe",
+          "type": "modelColorSelect",
+          "required": true,
+          "hasCustomOption": true
+        },
+        {
+          "name": "markisenbreite",
+          "label": "Markisenbreite",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "markisenlaenge",
+          "label": "Ausfall",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "stoffNummer",
+          "label": "Stoff Nummer",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "antrieb",
+          "label": "Antrieb",
+          "type": "select",
+          "options": ["Funk Motor", "E-Motor (Schalter)"],
+          "required": true
+        },
+        {
+          "name": "antriebsseite",
+          "label": "Antriebsseite",
+          "type": "select",
+          "options": ["Links", "Rechts"],
+          "required": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "SEITENMARKISE": {
+      "models": ["Micro 700"],
+      "fields": [
+        {
+          "name": "markisenbreite",
+          "label": "Höhe",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "markisenlaenge",
+          "label": "Auszug",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "lewensFabric",
+          "label": "Tuchart",
+          "type": "select",
+          "options": ["Acryl / Polyester", "Soltis Perform 92"],
+          "required": true
+        },
+        {
+          "name": "gestellfarbe",
+          "label": "Gestellfarbe",
+          "type": "modelColorSelect",
+          "required": true,
+          "hasCustomOption": true
+        },
+        {
+          "name": "stoffNummer",
+          "label": "Stoff Nummer",
+          "type": "text",
+          "required": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "TRAGRAHMEN": {
+      "models": ["Universal-Tragrahmen"],
+      "fields": [
+        {
+          "name": "markisenbreite",
+          "label": "Breite",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "markisenlaenge",
+          "label": "Tiefe",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "gestellfarbe",
+          "label": "Gestellfarbe",
+          "type": "modelColorSelect",
+          "required": true,
+          "hasCustomOption": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "SONNENSCHUTZPANEEL": {
+      "models": ["Sonnenschutzpaneel"],
+      "modelColors": {
+        "Sonnenschutzpaneel": ["RAL 7016", "RAL 9007", "RAL 9010"]
+      },
+      "fields": [
+        {
+          "name": "hoehe",
+          "label": "HÃ¶he",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "gestellfarbe",
+          "label": "Gestellfarbe",
+          "type": "modelColorSelect",
+          "required": true,
+          "hasCustomOption": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
     }
   },
   "UNTERBAUELEMENTE": {
     "GG Schiebe Element": {
-      "models": ["AL22", "AL23", "AL24", "BELLAVISTA", "APT"],
+      "models": ["AL22", "AL23", "AL24", "AL25", "AL26", "BELLAVISTA", "APT", "Murano Glissando", "Murano Glissando Due"],
       "modelColors": {
         "AL22": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"],
         "AL23": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"],
         "AL24": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"],
+        "AL25": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"],
+        "AL26": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"],
         "BELLAVISTA": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"],
         "APT": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"]
       },
@@ -1269,6 +1588,14 @@
           "type": "number",
           "unit": "mm",
           "required": true
+        },
+        {
+          "name": "lewensSlidingGlass",
+          "label": "Verglasung",
+          "type": "select",
+          "options": ["Ohne Glas", "ESG 8 mm", "ESG 10 mm"],
+          "required": true,
+          "models": ["Murano Glissando", "Murano Glissando Due"]
         },
         {
           "name": "gestellfarbe",
@@ -1292,6 +1619,22 @@
           "required": true
         },
         {
+          "name": "spuren",
+          "label": "Spuren",
+          "type": "select",
+          "options": ["2", "3", "4", "5", "6"],
+          "required": false,
+          "excludeModels": ["Murano Glissando", "Murano Glissando Due"]
+        },
+        {
+          "name": "spuren",
+          "label": "Spuren",
+          "type": "select",
+          "options": ["2", "3", "4", "5"],
+          "required": true,
+          "models": ["Murano Glissando", "Murano Glissando Due"]
+        },
+        {
           "name": "anzahlFluegel",
           "label": "Anzahl Flügel",
           "type": "select",
@@ -1312,6 +1655,19 @@
           "options": ["SENOL", "APO", "IZAR"],
           "required": false
         }
+      ]
+    },
+    "LEWENS ABSCHLUSS": {
+      "models": ["Murano Dreieckschluss", "Murano Dreiecksbespannung", "Murano Finestra"],
+      "fields": [
+        { "name": "breite", "label": "Tiefe / Breite", "type": "number", "unit": "mm", "required": true },
+        { "name": "hoehe", "label": "Höhe", "type": "number", "unit": "mm", "required": true },
+        { "name": "lewensClosureType", "label": "Ausführung", "type": "select", "options": ["Typ A", "Typ B"], "required": true, "models": ["Murano Dreieckschluss"] },
+        { "name": "lewensClosureType", "label": "Ausführung", "type": "select", "options": ["Standard", "M2020"], "required": true, "models": ["Murano Dreiecksbespannung"] },
+        { "name": "lewensClosureType", "label": "Ausführung", "type": "select", "options": ["Rechteck", "Schrägelement"], "required": true, "models": ["Murano Finestra"] },
+        { "name": "gestellfarbe", "label": "Gestellfarbe", "type": "modelColorSelect", "required": true, "hasCustomOption": true },
+        { "name": "position", "label": "Position", "type": "select", "options": ["LINKS", "RECHTS", "FRONT"], "required": true },
+        { "name": "montageteam", "label": "Montageteam", "type": "select", "options": ["SENOL", "APO", "IZAR"], "required": false }
       ]
     },
     "Rahmen Schiebe Element": {
@@ -1457,11 +1813,12 @@
       ]
     },
     "Keil": {
-      "models": ["ALUXE", "APT", "BELLAVISTA"],
+      "models": ["ALUXE", "APT", "BELLAVISTA", "Keilfenster"],
       "modelColors": {
         "ALUXE": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"],
         "APT": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"],
-        "BELLAVISTA": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"]
+        "BELLAVISTA": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"],
+        "Keilfenster": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"]
       },
       "fields": [
         {
@@ -1491,6 +1848,13 @@
           "type": "modelColorSelect",
           "required": true,
           "hasCustomOption": true
+        },
+        {
+          "name": "glasart",
+          "label": "Glasart",
+          "type": "select",
+          "options": ["VSG 44.2 klar", "VSG 44.2 matt", "Isolierglas"],
+          "required": true
         },
         {
           "name": "position",
@@ -1557,6 +1921,316 @@
           "type": "fundament",
           "options": ["Aylux", "Kunde", "Fundament Vorhanden"],
           "required": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "Seitenwand": {
+      "models": ["Aluminium-Seitenwand"],
+      "modelColors": {
+        "Aluminium-Seitenwand": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"]
+      },
+      "fields": [
+        {
+          "name": "breite",
+          "label": "Breite",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "gestellfarbe",
+          "label": "Gestellfarbe",
+          "type": "modelColorSelect",
+          "required": true,
+          "hasCustomOption": true
+        },
+        {
+          "name": "glasart",
+          "label": "Glasart",
+          "type": "select",
+          "options": ["VSG 44.2 klar", "VSG 44.2 matt", "Isolierglas"],
+          "required": true
+        },
+        {
+          "name": "position",
+          "label": "Position",
+          "type": "select",
+          "options": ["LINKS", "RECHTS"],
+          "required": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "Frontwand": {
+      "models": ["Aluminium Frontwand"],
+      "modelColors": {
+        "Aluminium Frontwand": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"]
+      },
+      "fields": [
+        {
+          "name": "breite",
+          "label": "Breite",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "gestellfarbe",
+          "label": "Gestellfarbe",
+          "type": "modelColorSelect",
+          "required": true,
+          "hasCustomOption": true
+        },
+        {
+          "name": "glasart",
+          "label": "Glasart",
+          "type": "select",
+          "options": ["VSG 44.2 klar", "VSG 44.2 matt", "Isolierglas"],
+          "required": true
+        },
+        {
+          "name": "position",
+          "label": "Position",
+          "type": "select",
+          "options": ["FRONT", "FRONT LINKS", "FRONT RECHTS"],
+          "required": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "Schiebetür": {
+      "models": ["Gerahmte Aluminium Schiebetüren"],
+      "modelColors": {
+        "Gerahmte Aluminium Schiebetüren": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"]
+      },
+      "fields": [
+        {
+          "name": "breite",
+          "label": "Breite",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "hoehe",
+          "label": "Hoehe",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "gestellfarbe",
+          "label": "Gestellfarbe",
+          "type": "modelColorSelect",
+          "required": true,
+          "hasCustomOption": true
+        },
+        {
+          "name": "glasart",
+          "label": "Glasart",
+          "type": "select",
+          "options": ["VSG 44.2 klar", "VSG 44.2 matt", "Isolierglas"],
+          "required": true
+        },
+        {
+          "name": "position",
+          "label": "Position",
+          "type": "select",
+          "options": ["LINKS", "RECHTS", "FRONT", "FRONT LINKS", "FRONT RECHTS"],
+          "required": true
+        },
+        {
+          "name": "spuren",
+          "label": "Spuren",
+          "type": "select",
+          "options": ["2", "3", "4", "5", "6"],
+          "required": false
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "Zaun": {
+      "models": ["Aluminium Planken / Zaunelemente"],
+      "modelColors": {
+        "Aluminium Planken / Zaunelemente": ["RAL 7016", "RAL 9007", "RAL 9006", "RAL 9010", "RAL 9016", "RAL 8014", "RAL 9005"]
+      },
+      "fields": [
+        {
+          "name": "breite",
+          "label": "Breite",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "hoehe",
+          "label": "Hoehe",
+          "type": "number",
+          "unit": "mm",
+          "required": true
+        },
+        {
+          "name": "gestellfarbe",
+          "label": "Gestellfarbe",
+          "type": "modelColorSelect",
+          "required": true,
+          "hasCustomOption": true
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    }
+  },
+  "ZUBEHÖR": {
+    "Beleuchtung": {
+      "models": [
+        "10er led set IP55 erweiterbar bis max. 13 spots (fest Preis)",
+        "1er led erweiterung IP55 (11665)",
+        "LED 6er Set (max. 12 Spots) inkl. Dimmer (11948) (fest Preis)",
+        "LED Erweiterung 2er Set (11949) (fest Preis)",
+        "LED Set IP55, 6 Spots inkl. Dimmer, max. 9 (fest Preis) (11664)",
+        "LED Spot (11324) (fest Preis)",
+        "LED Stripe 5m (11321) (fest Preis)",
+        "LED Stripe 6m (11917) (fest Preis)",
+        "LED Stripe 7m (11918) (fest Preis)",
+        "LED Stripe 8m (11322) (fest Preis)"
+      ],
+      "fields": [
+        {
+          "name": "menge",
+          "label": "Menge",
+          "type": "number",
+          "unit": "Einheit",
+          "required": true
+        },
+        {
+          "name": "bemerkungen",
+          "label": "Bemerkungen",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "Steuerung / Sensorik": {
+      "models": [
+        "Anschlussbox Somfy (11380) (fest Preis)",
+        "Dimm-Controller (11382) (fest Preis)",
+        "Fernbedienung (11383) (fest Preis)",
+        "Regensensor (11632)",
+        "Verlängerungskabel 1m, 4er Set (11435) (fest Preis)",
+        "Verlängerungskabel 2m, 4er Set (11666) (fest Preis)",
+        "Verlängerungskabel 3m, 4er Set (11444) (fest Preis)",
+        "Y-Kabel, 4er Set (11414) (fest Preis)"
+      ],
+      "fields": [
+        {
+          "name": "menge",
+          "label": "Menge",
+          "type": "number",
+          "unit": "Einheit",
+          "required": true
+        },
+        {
+          "name": "bemerkungen",
+          "label": "Bemerkungen",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    }
+  },
+  "MONTAGE": {
+    "Fundament": {
+      "models": [
+        "Punkt Fundament mit Stahl Füße",
+        "Punkt Fundament ohne Stahl Füße",
+        "Streifen Fundament Klassik",
+        "Streifen Fundament mit Ausgleich Profil"
+      ],
+      "fields": [
+        {
+          "name": "menge",
+          "label": "Menge",
+          "type": "number",
+          "unit": "Einheit",
+          "required": true
+        },
+        {
+          "name": "bemerkungen",
+          "label": "Bemerkungen",
+          "type": "text",
+          "required": false
+        },
+        {
+          "name": "montageteam",
+          "label": "Montageteam",
+          "type": "select",
+          "options": ["SENOL", "APO", "IZAR"],
+          "required": false
+        }
+      ]
+    },
+    "Überdachung Montage": {
+      "models": [
+        "Montage Terrasenüberdachung 500 cm Breite"
+      ],
+      "fields": [
+        {
+          "name": "menge",
+          "label": "Menge",
+          "type": "number",
+          "unit": "Einheit",
+          "required": true
+        },
+        {
+          "name": "bemerkungen",
+          "label": "Bemerkungen",
+          "type": "text",
+          "required": false
         },
         {
           "name": "montageteam",

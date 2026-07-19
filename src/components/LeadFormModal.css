@@ -78,11 +78,11 @@
 }
 
 .lead-section h3 {
-  font-size: 0.875rem;
-  font-weight: 600;
-  color: #8b95a5;
+  font-size: 1rem;
+  font-weight: 700;
+  color: #c9d1d9;
   text-transform: uppercase;
-  letter-spacing: 0.5px;
+  letter-spacing: 0.6px;
   margin: 0 0 16px 0;
 }
 
@@ -104,8 +104,9 @@
 
 .form-group label,
 .select-group label {
-  font-size: 0.813rem;
-  color: #8b95a5;
+  font-size: 0.875rem;
+  font-weight: 600;
+  color: #c9d1d9;
 }
 
 .lead-modal input[type="text"],
@@ -176,8 +177,8 @@
 }
 
 .lead-product-number {
-  font-size: 0.813rem;
-  font-weight: 600;
+  font-size: 0.95rem;
+  font-weight: 700;
   color: #a3e635;
   line-height: 1;
 }
@@ -210,7 +211,7 @@
 
 .product-row-selects {
   display: grid;
-  grid-template-columns: 2fr 1fr 1fr 80px;
+  grid-template-columns: 1.2fr 1.8fr 1fr 1fr;
   gap: 12px;
 }
 
@@ -493,13 +494,23 @@
   align-items: end;
 }
 
-.extra-row .extra-desc {
+/* NOTE: these need the .lead-modal prefix to out-specify the global
+   `.lead-modal input[type="number"] { width: 100% }` rule (0,2,1).
+   Without it the price input stays 100% wide + flex-shrink:0 and crushes
+   the Bezeichnung field down to nothing. */
+.lead-modal .extra-row .extra-desc {
   flex: 1;
   min-width: 0;
+  width: auto;
 }
 
-.extra-row .extra-price {
+.lead-modal .extra-row .extra-price {
   width: 140px;
+  flex-shrink: 0;
+}
+
+.lead-modal .extra-row .extra-assign {
+  width: 160px;
   flex-shrink: 0;
 }
 
@@ -764,25 +775,37 @@
     grid-template-columns: 1fr 1fr;
   }
 
-  .product-row-selects .select-group:first-child {
+  .product-row-selects .select-group:nth-child(-n+2) {
     grid-column: 1 / -1;
   }
 
   .extra-row {
+    display: grid;
     grid-template-columns: 1fr 40px;
+    gap: 8px 12px;
+    align-items: center;
   }
 
-  .extra-row .extra-desc {
+  .lead-modal .extra-row .extra-desc {
     grid-column: 1 / -1;
     grid-row: 1;
+    width: auto;
   }
 
-  .extra-row .extra-price {
+  .lead-modal .extra-row .extra-price {
     grid-column: 1;
     grid-row: 2;
+    width: auto;
+  }
+
+  .lead-modal .extra-row .extra-assign {
+    grid-column: 1 / -1;
+    grid-row: 3;
+    width: auto;
   }
 
   .extra-row .btn-remove-extra {
+    grid-column: 2;
     grid-row: 2;
   }
 }
@@ -821,12 +844,12 @@
 }
 
 .light-theme .lead-section h3 {
-  color: #6b7280;
+  color: #1f2937;
 }
 
 .light-theme .form-group label,
 .light-theme .select-group label {
-  color: #6b7280;
+  color: #374151;
 }
 
 .light-theme .lead-modal input[type="text"],

@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { motion, AnimatePresence } from 'framer-motion';
-import { api, getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getForm, savePdf, getBranchFeatures, sendAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl, markLeadAngebotAsSent, markFormPostSent } from '../services/api';
+import { api, getForms, deleteForm, getMontageteamStats, getMontageteams, updateForm, getImageUrl, getStoredUser, getStatusHistory, getAbnahme, saveAbnahme, uploadAbnahmeImages, getAbnahmeImages, getAbnahmeImageUrl, deleteAbnahmeImage, uploadImages, getForm, savePdf, getBranchFeatures, sendAesSignature, getEsignatureStatus, downloadBoldSignDocument, refreshSignatureStatus, getAngebot, saveAngebot, sendAngebotAesSignature, getSignatureNotifications, downloadSignedDocument, getLeadPdfUrl, getAngebotPdfUrl, createAbnahmeSignRequest, saveFormPdfSnapshot, getFormPdfSnapshots, getFormPdfSnapshotUrl, markLeadAngebotAsSent, markFormPostSent } from '../services/api';
 import type { BranchFeatures, EsignatureStatus, EsignatureRequest, AngebotItem, SignatureNotification, FormPdfDocType, FormPdfSnapshot } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
 import type { AbnahmeImage } from '../services/api';
@@ -12,8 +12,11 @@ import EmailComposer from '../components/EmailComposer';
 import LeadFormModal from '../components/LeadFormModal';
 import RechnungForm from '../components/RechnungForm';
 import AnzahlungForm from '../components/AnzahlungForm';
+import AuftragAngebotSelection from '../components/AuftragAngebotSelection';
+import type { AuftragAngebotOption } from '../components/AuftragAngebotSelection';
 import type { Rechnung, RechnungType } from '../services/api';
 import { getRechnungenByForm, markRechnungSent, getAnzahlungenByForm, num, getRechnungPdfUrl } from '../services/api';
+import { canCreateAdditionalRechnung, canCreateSchlussrechnung, canEditAufmass, canOpenAbnahmeForm, WORKFLOW_STATUS_ORDER } from '../utils/workflow';
 import './Dashboard.css';
 
 // Check if current user is admin or office (both have elevated permissions)
@@ -27,11 +30,12 @@ const isAdmin = () => getStoredUser()?.role === 'admin';
 
 // Status options for forms - ordered workflow
 const STATUS_OPTIONS = [
-  { value: 'alle', label: 'Alle Aufmaße', color: '#7fa93d' },
+  { value: 'alle', label: 'Alle', color: '#7fa93d' },
   { value: 'entwurf', label: 'Entwurf', color: '#f97316' },
   { value: 'auftrag_abgelehnt', label: 'Auftrag Abgelehnt', color: '#6b7280' },
   { value: 'neu', label: 'Aufmaß Genommen', color: '#8b5cf6' },
-  { value: 'angebot_versendet', label: 'Angebot Versendet', color: '#a78bfa' },
+  { value: 'angebot_ausstehend', label: 'Angebot versenden', color: '#a78bfa' },
+  { value: 'angebot_versendet', label: 'Angebot versendet', color: '#a78bfa' },
   { value: 'auftrag_erteilt', label: 'Auftrag Erteilt', color: '#3b82f6' },
   { value: 'rechnung_erstellt', label: 'Rechnung Entwurf', color: '#38bdf8' },
   { value: 'gesendet', label: 'Rechnung Gesendet', color: '#0ea5e9' },
@@ -41,11 +45,11 @@ const STATUS_OPTIONS = [
   { value: 'montage_geplant', label: 'Montage Geplant', color: '#a855f7' },
   { value: 'montage_gestartet', label: 'Montage Gestartet', color: '#ec4899' },
   { value: 'abnahme', label: 'Abnahme', color: '#10b981' },
-  { value: 'schluss_rechnung_erstellt', label: 'Schlussrechnung Entwurf', color: '#22d3ee' },
-  { value: 'rest_rechnung_erstellt', label: 'Schlussrechnung Gesendet', color: '#0891b2' },
   { value: 'reklamation_eingegangen', label: 'Reklamation Eingegangen', color: '#ef4444' },
   { value: 'reklamation_bestellt', label: 'Reklamation Bestellt', color: '#dc2626' },
   { value: 'reklamation_abgelehnt', label: 'Reklamation Abgelehnt', color: '#b91c1c' },
+  { value: 'schluss_rechnung_erstellt', label: 'Schlussrechnung Entwurf', color: '#22d3ee' },
+  { value: 'rest_rechnung_erstellt', label: 'Schluss', color: '#0891b2' },
   // Virtual filters — these don't map to a status, they filter on the
   // email_sent_at / post_sent_at flags. Filter and counter logic below
   // recognise these special values and short-circuit the status check.
@@ -55,38 +59,10 @@ const STATUS_OPTIONS = [
 ];
 
 // Status order for edit lock check (after auftrag_erteilt, editing is locked for non-admins)
-const STATUS_ORDER = [
-  'entwurf',
-  'auftrag_abgelehnt',
-  'neu',
-  'angebot_versendet',
-  'auftrag_erteilt',  // lock starts AFTER this
-  'rechnung_erstellt',
-  'gesendet',
-  'bauantrag',
-  'anzahlung',
-  'bestellt',
-  'montage_geplant',
-  'montage_gestartet',
-  'abnahme',
-  'schluss_rechnung_erstellt',
-  'rest_rechnung_erstellt',
-  'reklamation_eingegangen',
-  'reklamation_bestellt',
-  'reklamation_abgelehnt',
-];
-
-// Check if form editing is locked (status is after auftrag_erteilt)
-const isFormLocked = (status: string): boolean => {
-  const statusIndex = STATUS_ORDER.indexOf(status);
-  const lockThreshold = STATUS_ORDER.indexOf('auftrag_erteilt');
-  return statusIndex > lockThreshold;
-};
-
 // Check if status change is going backward
 const isStatusBackward = (currentStatus: string, newStatus: string): boolean => {
-  const currentIndex = STATUS_ORDER.indexOf(currentStatus);
-  const newIndex = STATUS_ORDER.indexOf(newStatus);
+  const currentIndex = WORKFLOW_STATUS_ORDER.indexOf(currentStatus as (typeof WORKFLOW_STATUS_ORDER)[number]);
+  const newIndex = WORKFLOW_STATUS_ORDER.indexOf(newStatus as (typeof WORKFLOW_STATUS_ORDER)[number]);
   return newIndex < currentIndex;
 };
 
@@ -102,11 +78,22 @@ const Dashboard = () => {
   // 'alle' when the param is missing or malformed.
   const [searchParams] = useSearchParams();
   const initialStatus = searchParams.get('status') || 'alle';
+  const autoOpenAbnahmeRef = useRef<number | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [filterStatus, setFilterStatus] = useState<string>(initialStatus);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [formToDelete, setFormToDelete] = useState<number | null>(null);
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  useEffect(() => {
+    const media = window.matchMedia('(max-width: 640px)');
+    const forceGridOnMobile = () => {
+      if (media.matches) setViewMode('grid');
+    };
+
+    forceGridOnMobile();
+    media.addEventListener('change', forceGridOnMobile);
+    return () => media.removeEventListener('change', forceGridOnMobile);
+  }, []);
   // Sort order for the Aufmaß list. Default mirrors the existing backend
   // ordering ("Neueste zuerst" / created_at DESC). Persisted only in this
   // session — fresh navigation resets to default.
@@ -146,6 +133,7 @@ const Dashboard = () => {
   const [attachmentDropdownOpen, setAttachmentDropdownOpen] = useState<number | null>(null);
   // Lazy-loaded list of available PDF snapshots per form
   const [formSnapshots, setFormSnapshots] = useState<Record<number, FormPdfSnapshot[]>>({});
+  const [formAngebote, setFormAngebote] = useState<Record<number, AuftragAngebotOption[]>>({});
   // Lazy-loaded Rechnungen per form — each Rechnung gets its own dropdown
   // entry so Anzahlungsraten / Schlussrechnungen are individually openable.
   const [formRechnungen, setFormRechnungen] = useState<Record<number, Rechnung[]>>({});
@@ -176,6 +164,11 @@ const Dashboard = () => {
   const [statusDateFormId, setStatusDateFormId] = useState<number | null>(null);
   const [statusDateValue, setStatusDateValue] = useState<string>('');
   const [pendingStatus, setPendingStatus] = useState<string>('');
+  const [auftragAngebote, setAuftragAngebote] = useState<AuftragAngebotOption[]>([]);
+  const [selectedAuftragAngebotId, setSelectedAuftragAngebotId] = useState<number | null>(null);
+  const [selectedAuftragItemIds, setSelectedAuftragItemIds] = useState<number[]>([]);
+  const [selectedAuftragExtraIds, setSelectedAuftragExtraIds] = useState<number[]>([]);
+  const [auftragAngeboteLoading, setAuftragAngeboteLoading] = useState(false);
 
   // Angebot modal
   const [angebotModalOpen, setAngebotModalOpen] = useState(false);
@@ -203,6 +196,8 @@ const Dashboard = () => {
 
   useEffect(() => {
     loadData();
+    // Initial load only; subsequent refreshes are triggered explicitly by actions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Polling for pending signatures (every 30 seconds)
@@ -373,6 +368,9 @@ const Dashboard = () => {
 
   const getFormStatus = (form: FormData): string => {
     const status = form.status || 'neu';
+    if ((status === 'neu' || status === 'aufmass_genommen') && form.lead_id) {
+      return 'angebot_ausstehend';
+    }
     // Map legacy statuses to new ones
     if (status === 'completed' || status === 'draft') {
       return 'neu';
@@ -386,7 +384,7 @@ const Dashboard = () => {
   // shouldn't claim "ausstehend" anymore.
   const isInAufmassStage = (form: FormData): boolean => {
     const s = getFormStatus(form);
-    return s === 'entwurf' || s === 'neu' || s === 'aufmass_genommen';
+    return s === 'entwurf' || s === 'neu' || s === 'aufmass_genommen' || s === 'angebot_ausstehend';
   };
 
   // Angebot was drafted (lead_id linked from LeadFormModal save) but the
@@ -399,7 +397,7 @@ const Dashboard = () => {
 
   const getStatusLabel = (status: string): string => {
     const option = STATUS_OPTIONS.find(o => o.value === status);
-    return option?.label || 'Alle Aufmaße';
+    return option?.label || 'Alle';
   };
 
   const getStatusColor = (status: string): string => {
@@ -429,7 +427,8 @@ const Dashboard = () => {
     const currentStatus = form ? getFormStatus(form) : 'neu';
 
     // Prevent non-admin users from going backward in status
-    if (!isAdminOrOffice() && isStatusBackward(currentStatus, newStatus)) {
+    const reopeningAbnahme = newStatus === 'abnahme' && canOpenAbnahmeForm(currentStatus);
+    if (!isAdminOrOffice() && isStatusBackward(currentStatus, newStatus) && !reopeningAbnahme) {
       toast.warning('Nicht erlaubt', 'Status kann nur von einem Admin zurückgesetzt werden.');
       setStatusDropdownOpen(null);
       return;
@@ -441,7 +440,7 @@ const Dashboard = () => {
     // modal save chain (markLeadAngebotAsSent → syncFormsFromLead) flips the
     // form status, so we don't write it here. Cancelling the modal leaves
     // the form unchanged.
-    if (newStatus === 'angebot_versendet') {
+    if (newStatus === 'angebot_ausstehend' || newStatus === 'angebot_versendet') {
       try {
         // Always carry the source Aufmaß id so the modal can render the
         // "Aus Aufmaß" banner + photos in both fresh and edit modes.
@@ -537,6 +536,58 @@ const Dashboard = () => {
       return;
     }
 
+    if (newStatus === 'auftrag_erteilt' && form?.lead_id) {
+      setAuftragAngeboteLoading(true);
+      try {
+        const lead = await api.get<{ angebote?: AuftragAngebotOption[]; angebot_sent_at?: string | null }>(`/leads/${form.lead_id}`);
+        const allOffers = lead.angebote || [];
+        const explicitlySent = allOffers.filter((offer) =>
+          ['versendet', 'angenommen', 'abgelehnt'].includes(offer.status || '')
+        );
+        const choices = explicitlySent.length > 0
+          ? explicitlySent
+          : (lead.angebot_sent_at ? allOffers : []);
+        if (choices.length === 0) {
+          toast.warning('Angebot fehlt', 'Bitte versenden Sie zuerst mindestens ein Angebot.');
+          setStatusDropdownOpen(null);
+          return;
+        }
+        setAuftragAngebote(choices);
+        const existingOffer = choices.find((offer) => offer.id === form.selectedAngebotId);
+        const selectedOffer = existingOffer || (choices.length === 1 ? choices[0] : null);
+        setSelectedAuftragAngebotId(selectedOffer?.id || null);
+        if (selectedOffer) {
+          const allowedItemIds = (selectedOffer.items || []).map((item) => item.id);
+          const allowedExtraIds = (selectedOffer.extras || []).map((extra) => extra.id);
+          setSelectedAuftragItemIds(
+            existingOffer && Array.isArray(form.selectedAngebotItemIds)
+              ? form.selectedAngebotItemIds.filter((itemId) => allowedItemIds.includes(itemId))
+              : allowedItemIds
+          );
+          setSelectedAuftragExtraIds(
+            existingOffer && Array.isArray(form.selectedAngebotExtraIds)
+              ? form.selectedAngebotExtraIds.filter((extraId) => allowedExtraIds.includes(extraId))
+              : allowedExtraIds
+          );
+        } else {
+          setSelectedAuftragItemIds([]);
+          setSelectedAuftragExtraIds([]);
+        }
+      } catch (err) {
+        console.error('Failed to load Angebote for Auftrag selection:', err);
+        toast.error('Fehler', 'Angebote konnten nicht geladen werden.');
+        setStatusDropdownOpen(null);
+        return;
+      } finally {
+        setAuftragAngeboteLoading(false);
+      }
+    } else {
+      setAuftragAngebote([]);
+      setSelectedAuftragAngebotId(null);
+      setSelectedAuftragItemIds([]);
+      setSelectedAuftragExtraIds([]);
+    }
+
     // For all other status changes, open date picker modal
     setStatusDateFormId(formId);
     setPendingStatus(newStatus);
@@ -546,6 +597,20 @@ const Dashboard = () => {
     setStatusDateModalOpen(true);
     setStatusDropdownOpen(null);
   };
+
+  useEffect(() => {
+    const formId = Number(searchParams.get('abnahme'));
+    if (!Number.isInteger(formId) || formId <= 0 || autoOpenAbnahmeRef.current === formId) return;
+    if (!forms.some((form) => form.id === formId)) return;
+
+    autoOpenAbnahmeRef.current = formId;
+    void handleStatusChange(formId, 'abnahme').finally(() => {
+      navigate('/aufmasse', { replace: true });
+    });
+  // The ref makes this URL command idempotent; depending on the large handler
+  // would retrigger the effect on every Dashboard render.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [forms, navigate, searchParams]);
 
   // ============ MODUL C: RECHNUNG TRIGGER ============
   const handleOpenRechnung = (formId: number, type: RechnungType) => {
@@ -615,8 +680,19 @@ const Dashboard = () => {
       return `${greet}\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.${totalsLine}\n\nWir bitten um Überweisung des Anzahlungsbetrags innerhalb des angegebenen Zahlungsziels. Den Restbetrag stellen wir Ihnen nach Abnahme mit der Schlussrechnung in Rechnung.\n\nMit freundlichen Grüßen`;
     }
 
-    // Schlussrechnung — remaining-balance invoice, kept simple.
-    return `${greet}\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.\n\nFälliger Restbetrag (brutto): ${fmtEur(num(rechnung.brutto_betrag))}\n\nMit freundlichen Grüßen`;
+    // Schlussrechnung — remaining-balance invoice. brutto_betrag holds the full
+    // project total; the amount actually due is that minus the Anzahlungen the
+    // customer has already paid, mirroring the PDF's Restbetrag calculation.
+    const bruttoTotal = num(rechnung.brutto_betrag);
+    let anzSum = 0;
+    try {
+      const anzahlungen = await getAnzahlungenByForm(rechnung.form_id);
+      anzSum = (anzahlungen || []).reduce((s, a) => s + num(a.betrag), 0);
+    } catch {
+      // Anzahlungen fetch failed — fall back to full brutto rather than block the e-mail.
+    }
+    const faellig = Math.max(0, bruttoTotal - anzSum);
+    return `${greet}\n\nim Anhang finden Sie unsere ${labelDe} mit der Nummer ${rechnung.rechnung_nr}.\n\nFälliger Restbetrag (brutto): ${fmtEur(faellig)}\n\nMit freundlichen Grüßen`;
   };
 
   const handleResendRechnungEmail = async (formId: number) => {
@@ -1152,7 +1228,7 @@ Aylux Team`;
   // Get signature status label and color
   // E-signature available for these statuses (BoldSign AES only)
   const canSendEsignature = (status: string): boolean => {
-    return ['neu', 'angebot_versendet', 'abnahme'].includes(status);
+    return ['neu', 'angebot_ausstehend', 'angebot_versendet', 'abnahme'].includes(status);
   };
 
   // Format date for display
@@ -1250,8 +1326,8 @@ Aylux Team`;
   // Only transitions that *change* what the PDF would contain trigger a snapshot.
   const statusToSnapshotType = (status: string): FormPdfDocType | null => {
     if (status === 'neu') return 'aufmass';                     // "Aufmaß Genommen"
-    if (status === 'angebot_versendet') return 'angebot';
-    if (status === 'abnahme' || status === 'reklamation_eingegangen') return 'abnahme';
+    if (status === 'angebot_ausstehend' || status === 'angebot_versendet') return 'angebot';
+    if (status === 'abnahme' || status.startsWith('reklamation_')) return 'abnahme';
     if (status === 'anzahlung') return 'rechnung';              // placeholder for now
     return null;
   };
@@ -1264,7 +1340,8 @@ Aylux Team`;
       // (saveRechnungPdf endpoint mirrors it to aufmass_form_pdf_snapshots).
       return ['rechnung_erstellt', 'rechnung_gesendet', 'schluss_rechnung_erstellt', 'schluss_rechnung_gesendet',
               'anzahlung', 'auftrag_erteilt', 'bauantrag', 'bestellt', 'montage_geplant',
-              'montage_gestartet', 'abnahme', 'reklamation_eingegangen'].includes(status);
+              'montage_gestartet', 'abnahme', 'gesendet', 'reklamation_eingegangen',
+              'reklamation_bestellt', 'reklamation_abgelehnt', 'rest_rechnung_erstellt'].includes(status);
     }
     // Aufmaß is always available once the form has progressed past "draft"
     if (docType === 'aufmass') {
@@ -1272,12 +1349,14 @@ Aylux Team`;
     }
     // Angebot exists from "angebot_versendet" onward
     if (docType === 'angebot') {
-      return ['angebot_versendet', 'auftrag_erteilt', 'bauantrag', 'anzahlung',
+      return ['angebot_ausstehend', 'angebot_versendet', 'auftrag_erteilt', 'bauantrag', 'anzahlung',
               'bestellt', 'montage_geplant', 'montage_gestartet',
-              'abnahme', 'reklamation_eingegangen'].includes(status);
+              'abnahme', 'reklamation_eingegangen', 'reklamation_bestellt',
+              'reklamation_abgelehnt', 'schluss_rechnung_erstellt', 'rest_rechnung_erstellt'].includes(status);
     }
     if (docType === 'abnahme') {
-      return ['abnahme', 'reklamation_eingegangen'].includes(status);
+      return ['abnahme', 'reklamation_eingegangen', 'reklamation_bestellt',
+              'reklamation_abgelehnt', 'schluss_rechnung_erstellt', 'rest_rechnung_erstellt'].includes(status);
     }
     return false;
   };
@@ -1317,11 +1396,19 @@ Aylux Team`;
       window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
       return;
     }
-    // No snapshot yet — render once, store as snapshot, then open it
+    // No snapshot yet — render once, store as snapshot, then open it. If nothing
+    // could be generated (e.g. an Angebot-PDF was requested but this form has no
+    // linked Angebot/lead), tell the user instead of opening a 404 snapshot URL.
     setPdfGenerating(formId);
     try {
-      await captureSnapshot(formId, docType);
-      window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
+      const created = await captureSnapshot(formId, docType);
+      if (created) {
+        window.open(getFormPdfSnapshotUrl(formId, docType), '_blank');
+      } else if (docType === 'angebot') {
+        toast.warning('Kein Angebot', 'Für diesen Vorgang wurde noch kein Angebot erstellt.');
+      } else {
+        toast.error('Fehler', 'PDF konnte nicht erstellt werden');
+      }
     } catch (e) {
       console.error('Failed to render snapshot on demand:', e);
       toast.error('Fehler', 'PDF konnte nicht erstellt werden');
@@ -1332,10 +1419,10 @@ Aylux Team`;
 
   // Generate the current state's PDF and store it as an immutable snapshot.
   // Best-effort — failures are logged, never block the status update.
-  const captureSnapshot = async (formId: number, docType: FormPdfDocType): Promise<void> => {
+  const captureSnapshot = async (formId: number, docType: FormPdfDocType): Promise<boolean> => {
     if (docType === 'rechnung') {
       // Rechnung-PDF generator yet to be built (handled by separate branch).
-      return;
+      return false;
     }
     try {
       let pdfBlob: Blob | undefined;
@@ -1345,8 +1432,8 @@ Aylux Team`;
         // Aufmaß generator. Find the linked lead → fetch its angebote → render.
         const formData = await getForm(formId);
         if (!formData.lead_id) {
-          // No lead linked yet — nothing to snapshot
-          return;
+          // No lead linked yet — no Angebot exists → caller shows a clear message
+          return false;
         }
         const { generateAngebotPDF } = await import('../utils/angebotPdfGenerator');
         const leadDetail = await api.get<{
@@ -1426,9 +1513,12 @@ Aylux Team`;
           [formId]: [...(prev[formId] || []).filter(s => s.document_type !== docType),
                      { document_type: docType, created_at: new Date().toISOString() }]
         }));
+        return true;
       }
+      return false;
     } catch (err) {
       console.warn(`Snapshot capture failed (${docType}):`, err);
+      return false;
     }
   };
 
@@ -1441,6 +1531,17 @@ Aylux Team`;
     } catch (e) {
       console.warn('Failed to load snapshots:', e);
       setFormSnapshots((prev) => ({ ...prev, [formId]: [] }));
+    }
+  };
+
+  const ensureAngeboteLoaded = async (form: FormData) => {
+    if (!form.id || !form.lead_id || formAngebote[form.id]) return;
+    try {
+      const lead = await api.get<{ angebote?: AuftragAngebotOption[] }>(`/leads/${form.lead_id}`);
+      setFormAngebote((prev) => ({ ...prev, [form.id!]: lead.angebote || [] }));
+    } catch (e) {
+      console.warn('Failed to load Angebot previews:', e);
+      setFormAngebote((prev) => ({ ...prev, [form.id!]: [] }));
     }
   };
 
@@ -1475,7 +1576,7 @@ Aylux Team`;
         refreshStats();
         setDeleteModalOpen(false);
         setFormToDelete(null);
-      } catch (err) {
+      } catch {
         toast.error('Fehler', 'Aufmaß konnte nicht gelöscht werden.');
       }
     }
@@ -1490,7 +1591,7 @@ Aylux Team`;
       ));
       refreshStats();
       toast.success('Wiederhergestellt', 'Aufmaß wurde wiederhergestellt.');
-    } catch (err) {
+    } catch {
       toast.error('Fehler', 'Aufmaß konnte nicht wiederhergestellt werden.');
     }
   };
@@ -1615,10 +1716,19 @@ Aylux Team`;
             </div>
           )}
           <div className="view-toggle">
-            <button className={`view-btn ${viewMode === 'grid' ? 'active' : ''}`} onClick={() => setViewMode('grid')}>
+            <button className={`view-btn grid-view-btn ${viewMode === 'grid' ? 'active' : ''}`} onClick={() => setViewMode('grid')}>
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="3" width="7" height="7" rx="1" /><rect x="14" y="3" width="7" height="7" rx="1" /><rect x="3" y="14" width="7" height="7" rx="1" /><rect x="14" y="14" width="7" height="7" rx="1" /></svg>
             </button>
-            <button className={`view-btn ${viewMode === 'list' ? 'active' : ''}`} onClick={() => setViewMode('list')}>
+            <button
+              className={`view-btn list-view-btn ${viewMode === 'list' ? 'active' : ''}`}
+              onClick={() => {
+                if (window.matchMedia('(max-width: 640px)').matches) {
+                  setViewMode('grid');
+                  return;
+                }
+                setViewMode('list');
+              }}
+            >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" /></svg>
             </button>
           </div>
@@ -1793,16 +1903,47 @@ Aylux Team`;
                                 exit={{ opacity: 0, y: -10 }}
                                 onClick={(e) => e.stopPropagation()}
                               >
-                                {STATUS_OPTIONS.filter(o => o.value !== 'alle' && !o.value.startsWith('__')).map((option) => (
-                                  <button
-                                    key={option.value}
-                                    className={`status-option ${getFormStatus(form) === option.value ? 'selected' : ''}`}
-                                    onClick={() => handleStatusChange(form.id!, option.value)}
-                                  >
-                                    <span className="status-dot" style={{ backgroundColor: option.color }} />
-                                    <span>{option.label}</span>
-                                  </button>
-                                ))}
+                                {STATUS_OPTIONS.filter(o =>
+                                  o.value !== 'alle'
+                                  && !o.value.startsWith('__')
+                                  && !['rechnung_erstellt', 'gesendet'].includes(o.value)
+                                  && (o.value !== 'angebot_ausstehend'
+                                    || WORKFLOW_STATUS_ORDER.indexOf(getFormStatus(form) as (typeof WORKFLOW_STATUS_ORDER)[number])
+                                      < WORKFLOW_STATUS_ORDER.indexOf('angebot_versendet'))
+                                  && (o.value !== 'angebot_versendet'
+                                    || WORKFLOW_STATUS_ORDER.indexOf(getFormStatus(form) as (typeof WORKFLOW_STATUS_ORDER)[number])
+                                      >= WORKFLOW_STATUS_ORDER.indexOf('angebot_versendet'))
+                                ).map((option) => {
+                                  const currentStatus = getFormStatus(form);
+                                  const isSchlussDraft = option.value === 'schluss_rechnung_erstellt';
+                                  const isSchlussFinal = option.value === 'rest_rechnung_erstellt';
+                                  const isSentSystemStatus = option.value === 'angebot_versendet';
+                                  const canStartSchluss = isSchlussDraft && canCreateSchlussrechnung(currentStatus);
+                                  const isSystemStatusDisabled = isSentSystemStatus || isSchlussFinal || (isSchlussDraft && !canStartSchluss);
+                                  const displayLabel = option.label;
+
+                                  return (
+                                    <button
+                                      key={option.value}
+                                      className={`status-option ${currentStatus === option.value ? 'selected' : ''}`}
+                                      disabled={isSystemStatusDisabled}
+                                      title={isSentSystemStatus
+                                        ? 'Dieser Status wird erst nach erfolgreichem E-Mail-Versand gesetzt.'
+                                        : (isSystemStatusDisabled ? 'Dieser Status wird durch den Rechnungsablauf gesetzt.' : undefined)}
+                                      onClick={() => {
+                                        if (canStartSchluss) {
+                                          setStatusDropdownOpen(null);
+                                          handleOpenRechnung(form.id!, 'schlussrechnung');
+                                          return;
+                                        }
+                                        handleStatusChange(form.id!, option.value);
+                                      }}
+                                    >
+                                      <span className="status-dot" style={{ backgroundColor: option.color }} />
+                                      <span>{displayLabel}</span>
+                                    </button>
+                                  );
+                                })}
                               </motion.div>
                             )}
                           </AnimatePresence>
@@ -2011,6 +2152,7 @@ Aylux Team`;
                           if (willOpen) {
                             ensureSnapshotsLoaded(form.id!);
                             ensureRechnungenLoaded(form.id!);
+                            ensureAngeboteLoaded(form);
                           }
                         }}
                         title="Dateien"
@@ -2035,12 +2177,29 @@ Aylux Team`;
                             {(() => {
                               const snapshots = formSnapshots[form.id!] || [];
                               const formStatus = getFormStatus(form);
+                              const angebote = formAngebote[form.id!] || [];
                               const types: { type: FormPdfDocType; label: string }[] = [
                                 { type: 'aufmass', label: 'Aufmaß-PDF' },
-                                { type: 'angebot', label: 'Angebot-PDF' },
+                                ...(form.lead_id && angebote.length > 0 ? [] : [{ type: 'angebot' as const, label: 'Angebot-PDF' }]),
                                 { type: 'abnahme', label: 'Abnahme-PDF' }
                               ];
-                              return types.map(({ type, label }) => {
+                              return <>
+                                {form.lead_id && angebote.map((angebot, index) => (
+                                  <a
+                                    key={`angebot-${angebot.id}`}
+                                    href={getAngebotPdfUrl(form.lead_id!, angebot.id)}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="attachment-option generate-pdf"
+                                    onClick={() => setAttachmentDropdownOpen(null)}
+                                    title="Dieses Angebot separat öffnen"
+                                  >
+                                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" /></svg>
+                                    <span>{angebot.angebot_nummer || `Angebot ${index + 1}`}</span>
+                                    {angebot.id === form.selectedAngebotId && <span className="upload-hint">Angenommen</span>}
+                                  </a>
+                                ))}
+                                {types.map(({ type, label }) => {
                                 const snap = snapshots.find((s) => s.document_type === type);
                                 const availableByStatus = isPdfTypeAvailableForStatus(formStatus, type);
                                 const enabled = !!snap || availableByStatus;
@@ -2081,7 +2240,8 @@ Aylux Team`;
                                     )}
                                   </button>
                                 );
-                              });
+                                })}
+                              </>;
                             })()}
                             {/* Rechnungen — one entry per record. Anzahlungsrechnung
                                 gets numbered when there are multiple, Schlussrechnung
@@ -2221,7 +2381,7 @@ Aylux Team`;
                                             a.download = `${label}_${form.id}_signiert.pdf`;
                                             a.click();
                                             URL.revokeObjectURL(url);
-                                          } catch (err) {
+                                          } catch {
                                             toast.error('Fehler', 'Signiertes Dokument konnte nicht heruntergeladen werden.');
                                           }
                                         }
@@ -2258,18 +2418,29 @@ Aylux Team`;
                       </AnimatePresence>
                     </div>
                     {/* Modul C: Rechnung-Buttons */}
-                    {getFormStatus(form) === 'auftrag_erteilt' && (
+                    {canCreateAdditionalRechnung(getFormStatus(form)) && (
                       <button
                         className="action-btn"
                         style={{ background: 'rgba(14,165,233,0.1)', color: '#0ea5e9', border: '1px solid rgba(14,165,233,0.2)' }}
-                        title="Anzahlungsrechnung erstellen"
-                        onClick={(e) => { e.stopPropagation(); handleOpenRechnung(form.id!, 'anzahlungsrechnung'); }}
+                        title={getFormStatus(form) === 'auftrag_erteilt' ? 'Erste Rechnung (Anzahlung) erstellen' : 'Rechnungen und Anzahlungen verwalten'}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          // First invoice is created directly at auftrag_erteilt; once a Rechnung
+                          // exists (status advances to rechnung_erstellt and beyond) the button
+                          // opens the management view, where further invoices can be created.
+                          if (getFormStatus(form) === 'auftrag_erteilt') {
+                            handleOpenRechnung(form.id!, 'anzahlungsrechnung');
+                          } else {
+                            setAnzahlungFormId(form.id!);
+                            setAnzahlungModalOpen(true);
+                          }
+                        }}
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
                         <span>Rechnung</span>
                       </button>
                     )}
-                    {getFormStatus(form) === 'abnahme' && (
+                    {canCreateSchlussrechnung(getFormStatus(form)) && (
                       <button
                         className="action-btn"
                         style={{ background: 'rgba(8,145,178,0.1)', color: '#0891b2', border: '1px solid rgba(8,145,178,0.2)' }}
@@ -2278,21 +2449,6 @@ Aylux Team`;
                       >
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="9" y1="13" x2="15" y2="13" /><line x1="9" y1="17" x2="13" y2="17" /></svg>
                         <span>Rest-Rechnung</span>
-                      </button>
-                    )}
-                    {getFormStatus(form) === 'anzahlung' && (
-                      <button
-                        className="action-btn"
-                        style={{ background: 'rgba(6,182,212,0.1)', color: '#06b6d4', border: '1px solid rgba(6,182,212,0.2)' }}
-                        title="Anzahlungen verwalten"
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setAnzahlungFormId(form.id!);
-                          setAnzahlungModalOpen(true);
-                        }}
-                      >
-                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="10" /><line x1="12" y1="6" x2="12" y2="12" /><line x1="12" y1="12" x2="16" y2="14" /></svg>
-                        <span>Anzahlungen</span>
                       </button>
                     )}
                     {(getFormStatus(form) === 'rechnung_erstellt' || getFormStatus(form) === 'schluss_rechnung_erstellt') && (
@@ -2341,6 +2497,10 @@ Aylux Team`;
                           title={titleText}
                           onClick={(e) => {
                             e.stopPropagation();
+                            if (angebotPending && form.lead_id) {
+                              navigate(`/angebote?sendLead=${form.lead_id}`);
+                              return;
+                            }
                             const template = getEmailTemplate(form);
                             setEmailComposer({
                               to: template.to || form.kundeEmail || '',
@@ -2413,8 +2573,19 @@ Aylux Team`;
                         <span>E-Signatur</span>
                       </button>
                     )}
-                    {/* BEARBEITEN - only for admin or unlocked forms */}
-                    {(isAdminOrOffice() || !isFormLocked(getFormStatus(form))) ? (
+                    {canOpenAbnahmeForm(getFormStatus(form)) && (
+                      <button
+                        className="action-btn"
+                        style={{ background: 'rgba(16,185,129,0.1)', color: '#10b981', border: '1px solid rgba(16,185,129,0.25)' }}
+                        title="Abnahmeformular durch das Montageteam ausfüllen oder ergänzen"
+                        onClick={(event) => { event.stopPropagation(); handleStatusChange(form.id!, 'abnahme'); }}
+                      >
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4" /><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11" /></svg>
+                        <span>Abnahme</span>
+                      </button>
+                    )}
+                    {/* BEARBEITEN - through Bauantrag, then attachments only */}
+                    {canEditAufmass(getFormStatus(form)) ? (
                       <button className="action-btn edit" onClick={() => handleEditForm(form.id!)}>
                         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" /></svg>
                         <span>Bearbeiten</span>
@@ -2542,7 +2713,7 @@ Aylux Team`;
             onClick={() => setStatusDateModalOpen(false)}
           >
             <motion.div
-              className="modal-modern montage-modal"
+              className={`modal-modern montage-modal ${pendingStatus === 'auftrag_erteilt' ? 'auftrag-modal' : ''}`}
               initial={{ scale: 0.9 }}
               animate={{ scale: 1 }}
               exit={{ scale: 0.9 }}
@@ -2558,6 +2729,26 @@ Aylux Team`;
                   onChange={(e) => setStatusDateValue(e.target.value)}
                 />
               </div>
+              {pendingStatus === 'auftrag_erteilt' && (
+                auftragAngeboteLoading ? (
+                  <p>Angebote werden geladen...</p>
+                ) : (
+                  <AuftragAngebotSelection
+                    angebote={auftragAngebote}
+                    selectedAngebotId={selectedAuftragAngebotId}
+                    selectedItemIds={selectedAuftragItemIds}
+                    selectedExtraIds={selectedAuftragExtraIds}
+                    onSelectAngebot={(angebotId) => {
+                      const angebot = auftragAngebote.find((entry) => entry.id === angebotId);
+                      setSelectedAuftragAngebotId(angebotId);
+                      setSelectedAuftragItemIds((angebot?.items || []).map((item) => item.id));
+                      setSelectedAuftragExtraIds((angebot?.extras || []).map((extra) => extra.id));
+                    }}
+                    onSelectedItemIdsChange={setSelectedAuftragItemIds}
+                    onSelectedExtraIdsChange={setSelectedAuftragExtraIds}
+                  />
+                )
+              )}
               <div className="modal-actions">
                 <button
                   className="modal-cancel"
@@ -2567,15 +2758,20 @@ Aylux Team`;
                 </button>
                 <button
                   className="modal-confirm"
-                  disabled={!statusDateValue}
+                  disabled={!statusDateValue || auftragAngeboteLoading || (pendingStatus === 'auftrag_erteilt' && (!selectedAuftragAngebotId || selectedAuftragItemIds.length === 0))}
                   onClick={async () => {
                     if (!statusDateFormId || !statusDateValue || !pendingStatus) return;
                     try {
                       // Update form with status and date
-                      const updateData: { status: string; statusDate?: string; montageDatum?: string } = {
+                      const updateData: { status: string; statusDate?: string; montageDatum?: string; selectedAngebotId?: number; selectedAngebotItemIds?: number[]; selectedAngebotExtraIds?: number[] } = {
                         status: pendingStatus,
                         statusDate: statusDateValue
                       };
+                      if (pendingStatus === 'auftrag_erteilt' && selectedAuftragAngebotId) {
+                        updateData.selectedAngebotId = selectedAuftragAngebotId;
+                        updateData.selectedAngebotItemIds = selectedAuftragItemIds;
+                        updateData.selectedAngebotExtraIds = selectedAuftragExtraIds;
+                      }
                       // Also update montageDatum for montage_geplant status
                       if (pendingStatus === 'montage_geplant') {
                         updateData.montageDatum = statusDateValue;
@@ -2587,6 +2783,9 @@ Aylux Team`;
                               ...f,
                               status: pendingStatus,
                               statusDate: statusDateValue,
+                              ...(updateData.selectedAngebotId ? { selectedAngebotId: updateData.selectedAngebotId } : {}),
+                              ...(updateData.selectedAngebotItemIds ? { selectedAngebotItemIds: updateData.selectedAngebotItemIds } : {}),
+                              ...(updateData.selectedAngebotExtraIds ? { selectedAngebotExtraIds: updateData.selectedAngebotExtraIds } : {}),
                               ...(pendingStatus === 'montage_geplant' ? { montageDatum: statusDateValue } : {})
                             }
                           : f
@@ -2601,6 +2800,10 @@ Aylux Team`;
                       setStatusDateFormId(null);
                       setStatusDateValue('');
                       setPendingStatus('');
+                      setAuftragAngebote([]);
+                      setSelectedAuftragAngebotId(null);
+                      setSelectedAuftragItemIds([]);
+                      setSelectedAuftragExtraIds([]);
                       refreshStats();
 
                       // Modul C chain: when the user picks an "Entwurf" status,
@@ -3262,28 +3465,19 @@ Aylux Team`;
           setLeadModalOpen(false);
           setLeadModalEditData(null);
           setLeadModalFromAufmassId(null);
-          // MODÜL B v3: Save alone is NOT "versendet". Only mark as sent if
-          // the user ticked "Angebot direkt per E-Mail senden" — otherwise
-          // the form stays in "neu" / "aufmass_genommen" until manual send.
-          if (savedLeadId && sendEmail) {
-            try {
-              await markLeadAngebotAsSent(savedLeadId);
-              // Optimistic local update only when the status actually flipped
-              if (fromFormId) {
-                setForms(prev => prev.map(f =>
-                  f.id === fromFormId
-                    ? { ...f, status: 'angebot_versendet', statusDate: new Date().toISOString().split('T')[0] }
-                    : f
-                ));
-              }
-            } catch (err) {
-              console.error('mark-angebot-sent after save failed:', err);
-            }
-          }
           // MODÜL B v3: After every Angebot save (regardless of send-flag),
           // capture an Angebot-PDF snapshot so the dropdown shows the right doc.
           if (fromFormId) {
             void captureSnapshot(fromFormId, 'angebot');
+            await loadData();
+          }
+
+          // "Versendet" is set only by EmailComposer.onSent after the mail API
+          // succeeds. Saving with the send option opens that real send flow.
+          if (savedLeadId && sendEmail) {
+            setRechnungChainTarget(null);
+            navigate(`/angebote?sendLead=${savedLeadId}`);
+            return;
           }
 
           // Modul C chain: if we were on the way to creating a Rechnung,
@@ -3327,6 +3521,11 @@ Aylux Team`;
           <AnzahlungForm
             formId={anzahlungFormId}
             onClose={() => setAnzahlungModalOpen(false)}
+            onCreateRechnung={() => {
+              const fid = anzahlungFormId;
+              setAnzahlungModalOpen(false);
+              if (fid !== null) handleOpenRechnung(fid, 'anzahlungsrechnung');
+            }}
           />
         )}
       </AnimatePresence>

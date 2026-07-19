@@ -15,6 +15,8 @@ import Firmenangaben from './pages/Firmenangaben';
 import Agb from './pages/Agb';
 import ProductPricing from './pages/ProductPricing';
 import BranchUebersicht from './pages/BranchUebersicht';
+import Hilfe from './pages/Hilfe';
+import SupportTickets from './pages/SupportTickets';
 import { isAdminBranch } from './hooks/useBranchMeta';
 import { getStats, getUsers, getInvitations, createInvitation, deleteInvitation, deleteUser, updateUser } from './services/api';
 import type { Stats, User, Invitation } from './services/api';
@@ -91,6 +93,7 @@ function Layout({ children }: { children: React.ReactNode }) {
           </svg>
         </button>
         <div className="mobile-logo">
+          <img src="/aylux-sidebar-logo.png" alt="AYLUX Aufmaß" className="mobile-brand-logo" />
           <span className="logo-name">AYLUX</span>
           <span className="logo-tagline">Aufmaß</span>
         </div>
@@ -109,13 +112,7 @@ function Layout({ children }: { children: React.ReactNode }) {
       <aside className={`dashboard-sidebar ${mobileMenuOpen ? 'mobile-open' : ''}`}>
         <div className="sidebar-header">
           <div className="sidebar-logo">
-            <div className="logo-icon">
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 2L2 7l10 5 10-5-10-5z" />
-                <path d="M2 17l10 5 10-5" />
-                <path d="M2 12l10 5 10-5" />
-              </svg>
-            </div>
+            <img src="/aylux-sidebar-logo.png" alt="AYLUX Aufmaß System" className="sidebar-brand-logo" />
             <div className="logo-text">
               <span className="logo-name">AYLUX</span>
               <span className="logo-tagline">Aufmaß System</span>
@@ -204,6 +201,26 @@ function Layout({ children }: { children: React.ReactNode }) {
               </svg>
               <span>Montageteams</span>
             </a>
+          </div>
+
+          <div className="nav-section">
+            <span className="nav-section-title">Support</span>
+            <a href="#" className={`nav-item ${isActive('/hilfe') ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); handleNavClick('/hilfe'); }}>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <circle cx="12" cy="12" r="10" />
+                <path d="M9.09 9a3 3 0 015.83 1c0 2-3 3-3 3" />
+                <line x1="12" y1="17" x2="12.01" y2="17" />
+              </svg>
+              <span>Hilfe &amp; Support</span>
+            </a>
+            {isAdminBranch() && (user?.role === 'admin' || user?.role === 'office') && (
+              <a href="#" className={`nav-item ${isActive('/support-anfragen') ? 'active' : ''}`} onClick={(e) => { e.preventDefault(); handleNavClick('/support-anfragen'); }}>
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z" />
+                </svg>
+                <span>Anfragen verwalten</span>
+              </a>
+            )}
           </div>
 
           {(user?.role === 'admin' || user?.role === 'office') && (
@@ -401,6 +418,8 @@ function ProtectedContent() {
                 <Route path="/firmenangaben" element={<Firmenangaben />} />
                 <Route path="/agb" element={<Agb />} />
                 <Route path="/filialen" element={isAdminBranch() ? <BranchUebersicht /> : <Navigate to="/" replace />} />
+                <Route path="/hilfe" element={<Hilfe />} />
+                <Route path="/support-anfragen" element={isAdminBranch() ? <SupportTickets /> : <Navigate to="/" replace />} />
                 <Route path="*" element={<Navigate to="/" replace />} />
               </Routes>
             </Layout>

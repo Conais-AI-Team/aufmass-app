@@ -36,6 +36,17 @@
   flex-shrink: 0;
 }
 
+.abnahme-logo img {
+  display: block;
+  width: 150px;
+  height: auto;
+}
+
+.abnahme-logo img ~ .logo-text,
+.abnahme-logo img ~ .logo-sub {
+  display: none;
+}
+
 .abnahme-logo .logo-text {
   font-size: 1.1rem;
   font-weight: 800;

@@ -10,6 +10,8 @@ interface ProductConfigField {
   label?: string;
   type?: string;
   unit?: string;
+  models?: string[];
+  excludeModels?: string[];
 }
 
 interface ProductConfigType {
@@ -19,7 +21,7 @@ interface ProductConfigType {
 
 const productConfig = productConfigData as Record<string, Record<string, ProductConfigType>>;
 
-export type SizeProfile = 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6' | 'P7' | 'P8';
+export type SizeProfile = 'P1' | 'P2' | 'P3' | 'P4' | 'P5' | 'P6' | 'P7' | 'P8' | 'P9' | 'P10';
 
 export const PROFILE_AXES: Record<SizeProfile, string[]> = {
   P1: ['breite', 'tiefe'],
@@ -30,6 +32,8 @@ export const PROFILE_AXES: Record<SizeProfile, string[]> = {
   P6: ['breite', 'hoehe'],
   P7: ['breite', 'vorneHoehe', 'hintenHoehe'],
   P8: ['laenge', 'vorneHoehe', 'hintenHoehe'],
+  P9: ['breite'],
+  P10: ['hoehe'],
 };
 
 // Display labels for each axis (Almanca)
@@ -56,14 +60,22 @@ export function inferSizeProfile(fields: ProductConfigField[] | undefined): Size
   if (names.includes('laenge') && names.includes('vorneHoehe') && names.includes('hintenHoehe')) return 'P8';
   if (names.includes('breite') && names.includes('hoehe')) return 'P6';
   if (names.includes('breite') && names.includes('tiefe')) return 'P1';
+  if (names.includes('breite')) return 'P9';
+  if (names.includes('hoehe')) return 'P10';
   return null;
 }
 
 /** Get size profile for a given category + product type, or null if unknown. */
-export function getSizeProfileForType(category: string | undefined, productType: string | undefined): SizeProfile | null {
+export function getSizeProfileForType(category: string | undefined, productType: string | undefined, modelName?: string): SizeProfile | null {
   if (!category || !productType) return null;
   const typeData = productConfig[category]?.[productType];
-  return inferSizeProfile(typeData?.fields);
+  const fields = modelName
+    ? typeData?.fields?.filter(field =>
+        (!field.models?.length || field.models.includes(modelName))
+        && (!field.excludeModels?.length || !field.excludeModels.includes(modelName))
+      )
+    : typeData?.fields;
+  return inferSizeProfile(fields);
 }
 
 /** Extract size_values from Aufmaß specifications (numeric mm fields only). */
