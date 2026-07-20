@@ -1197,9 +1197,20 @@ export async function markFormPostSent(formId: number): Promise<{ message: strin
 // ============ LEAD PDF ============
 
 // Save generated PDF for a lead
-export async function saveLeadPdf(leadId: number, pdfBlob: Blob): Promise<{ message: string }> {
+// Instructions for the server to splice branch cover/AGB PDFs into a client-
+// generated base PDF. Covers replace placeholder pages at 1-based `replaceIndex`;
+// AGB pages are appended at the end. Filenames reference files already on the
+// server disk (aufmass-pdfs/branch-uploads/<slug>/), so no bytes travel the wire
+// and the fragile pdf-lib merge no longer runs on (memory-limited) phones.
+export interface AngebotMergePlan {
+  covers: { replaceIndex: number; filename: string; selectedPages: number[] }[];
+  agb: { filename: string; pages: number[] } | null;
+}
+
+export async function saveLeadPdf(leadId: number, pdfBlob: Blob, mergePlan?: AngebotMergePlan): Promise<{ message: string }> {
   const formData = new window.FormData();
   formData.append('pdf', pdfBlob, `angebot_${leadId}.pdf`);
+  if (mergePlan) formData.append('merge_plan', JSON.stringify(mergePlan));
 
   const token = getStoredToken();
   const response = await fetch(`${API_BASE_URL}/leads/${leadId}/pdf`, {
@@ -1224,9 +1235,10 @@ export function getAngebotPdfUrl(leadId: number, angebotId: number): string {
 }
 
 // Save angebot-specific PDF
-export async function saveAngebotPdf(leadId: number, angebotId: number, pdfBlob: Blob): Promise<{ message: string }> {
+export async function saveAngebotPdf(leadId: number, angebotId: number, pdfBlob: Blob, mergePlan?: AngebotMergePlan): Promise<{ message: string }> {
   const formData = new window.FormData();
   formData.append('pdf', pdfBlob, `angebot_${leadId}_${angebotId}.pdf`);
+  if (mergePlan) formData.append('merge_plan', JSON.stringify(mergePlan));
 
   const token = getStoredToken();
   const response = await fetch(`${API_BASE_URL}/leads/${leadId}/angebote/${angebotId}/pdf`, {

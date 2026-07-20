@@ -9,6 +9,7 @@ import { drawAyluxPdfLogo, loadAyluxPdfLogo } from './pdfLogo';
 import { getCachedProductImages, fetchImageAsBase64 } from './productImagesCache';
 import { getCachedBranchTerms } from './branchTermsCache';
 import { getProductCoverPdfByName, fetchBranchPdfBytes } from '../services/api';
+import type { AngebotMergePlan } from '../services/api';
 import {
   fetchServerImageAsBase64,
   fixImageOrientationAuto,
@@ -137,8 +138,12 @@ export const generateAngebotPDF = async (
      *  Speeds up split-per-product flows: AGB ships once as an email attachment,
      *  not embedded N times. */
     skipAgbMerge?: boolean;
+    /** When true, DON'T merge cover/AGB PDFs on the client. Instead return a
+     *  `mergePlan` describing which server-side files to splice in, so the merge
+     *  runs on the server (reliable on phones, no big blobs over the wire). */
+    deferServerMerge?: boolean;
   }
-): Promise<{ blob: Blob; fileName: string } | void> => {
+): Promise<{ blob: Blob; fileName: string; mergePlan?: AngebotMergePlan } | void> => {
   const companyInfo = options?.companyInfo || (await getCompanyInfoForPdf()) || undefined;
   const companyName = companyInfo?.company_name || 'AYLUX Sonnenschutzsysteme';
   const branchTerms = await getCachedBranchTerms();
@@ -658,20 +663,26 @@ export const generateAngebotPDF = async (
   // MAIN FLOW
   // ===================================================================
 
+  const deferServerMerge = !!options?.deferServerMerge;
   const coverPageNumbers: number[] = [];
   const coverReplaceIndices: number[] = [];
   const coverPdfsToMerge: { bytes: Uint8Array; selectedPages: number[] }[] = [];
+  // Server-merge plan (only populated when deferServerMerge): the server splices
+  // these branch files in using its local disk copies.
+  const serverCoverPlan: AngebotMergePlan['covers'] = [];
   type ProductAssets = {
     item: AngebotPdfItem;
     coverImages: { base64?: string }[];
     detailImages: { base64?: string }[];
     coverPdfData: { bytes: Uint8Array; selectedPages: number[] } | null;
+    coverPdfMeta: { filename: string; selectedPages: number[] } | null;
   };
 
   const productAssets: ProductAssets[] = await Promise.all(data.items.map(async (item) => {
     let coverImages: { base64?: string }[] = [];
     let detailImages: { base64?: string }[] = [];
     let coverPdfData: ProductAssets['coverPdfData'] = null;
+    let coverPdfMeta: ProductAssets['coverPdfMeta'] = null;
 
     // Cover PDF is product-level → resolve by product NAME. Angebot line items often
     // carry a null (or size-specific, non-matching) product_id, which made the umbrella
@@ -679,20 +690,26 @@ export const generateAngebotPDF = async (
     if (item.product_name) {
       try {
         const cp = await getProductCoverPdfByName(item.product_name);
-        if (cp?.selected_pages?.length) {
-          const bytes = await fetchBranchPdfBytes(cp.file_path);
-          if (bytes) coverPdfData = { bytes, selectedPages: cp.selected_pages };
+        if (cp?.selected_pages?.length && cp.file_path) {
+          coverPdfMeta = { filename: cp.file_path, selectedPages: cp.selected_pages };
+          // Client-merge mode needs the actual bytes; server-merge mode only needs the plan.
+          if (!deferServerMerge) {
+            const bytes = await fetchBranchPdfBytes(cp.file_path);
+            coverPdfData = bytes ? { bytes, selectedPages: cp.selected_pages } : null;
+          }
         }
       } catch (error) {
         console.warn('Could not load cover PDF for', item.product_name, error);
       }
     }
 
+    const hasCoverPdf = deferServerMerge ? !!coverPdfMeta : !!coverPdfData;
+
     // Product images are keyed by product_id (only available when the item has one).
     if (item.product_id) {
       try {
         const allImages = await getCachedProductImages(item.product_id);
-        if (!coverPdfData) {
+        if (!hasCoverPdf) {
           const flagged = allImages.filter((image) => image.show_on_cover).slice(0, 2);
           coverImages = await Promise.all(flagged.map(async (image) => ({
             base64: await fetchImageAsBase64(image.image_path),
@@ -707,19 +724,24 @@ export const generateAngebotPDF = async (
       }
     }
 
-    return { item, coverImages, detailImages, coverPdfData };
+    return { item, coverImages, detailImages, coverPdfData, coverPdfMeta };
   }));
 
   // Covers are front matter. No cover asset means no generated mockup page.
   for (const assets of productAssets) {
+    const hasCoverPdf = deferServerMerge ? !!assets.coverPdfMeta : !!assets.coverPdfData;
     const hasCoverImage = assets.coverImages.some((image) => Boolean(image.base64));
-    if (!assets.coverPdfData && !hasCoverImage) continue;
+    if (!hasCoverPdf && !hasCoverImage) continue;
 
     const coverPageNum = (pdf as unknown as { internal: { getNumberOfPages: () => number } }).internal.getNumberOfPages();
     coverPageNumbers.push(coverPageNum);
-    if (assets.coverPdfData) {
+    if (hasCoverPdf) {
       coverReplaceIndices.push(coverPageNum);
-      coverPdfsToMerge.push(assets.coverPdfData);
+      if (deferServerMerge && assets.coverPdfMeta) {
+        serverCoverPlan.push({ replaceIndex: coverPageNum, filename: assets.coverPdfMeta.filename, selectedPages: assets.coverPdfMeta.selectedPages });
+      } else if (assets.coverPdfData) {
+        coverPdfsToMerge.push(assets.coverPdfData);
+      }
     }
     drawCoverPage(pdf, {
       productName: assets.item.product_name || 'INDIVIDUELL',
@@ -735,7 +757,7 @@ export const generateAngebotPDF = async (
 
   // Product detail pages follow every cover and still precede the prices.
   for (const assets of productAssets) {
-    const hasCoverAsset = Boolean(assets.coverPdfData)
+    const hasCoverAsset = Boolean(assets.coverPdfData) || Boolean(assets.coverPdfMeta)
       || assets.coverImages.some((image) => Boolean(image.base64));
     if (!hasCoverAsset) continue;
     if (!assets.item.description?.trim()) continue;
@@ -762,13 +784,18 @@ export const generateAngebotPDF = async (
   // AGB — use uploaded PDF if present (merged at the end via pdf-lib), otherwise render text inline.
   // skipAgbMerge=true (split-per-product flow) bypasses both: AGB ships as a separate email attachment.
   let agbPdfMergeData: { bytes: Uint8Array; selectedPages: number[] } | null = null;
+  let agbServerPlan: AngebotMergePlan['agb'] = null;
   if (!options?.skipAgbMerge && branchTerms?.show_on_angebot) {
     if (branchTerms.agb_pdf_path && branchTerms.agb_pdf_pages && branchTerms.agb_pdf_pages.length > 0) {
-      try {
-        const bytes = await fetchBranchPdfBytes(branchTerms.agb_pdf_path);
-        if (bytes) agbPdfMergeData = { bytes, selectedPages: branchTerms.agb_pdf_pages };
-      } catch (e) {
-        console.warn('Could not load AGB PDF:', e);
+      if (deferServerMerge) {
+        agbServerPlan = { filename: branchTerms.agb_pdf_path, pages: branchTerms.agb_pdf_pages };
+      } else {
+        try {
+          const bytes = await fetchBranchPdfBytes(branchTerms.agb_pdf_path);
+          if (bytes) agbPdfMergeData = { bytes, selectedPages: branchTerms.agb_pdf_pages };
+        } catch (e) {
+          console.warn('Could not load AGB PDF:', e);
+        }
       }
     } else if (branchTerms.content?.trim()) {
       yPos = drawAgbPages(pdf, branchTerms.content);
@@ -860,9 +887,17 @@ export const generateAngebotPDF = async (
   const customerName = `${data.customer_firstname}_${data.customer_lastname}`.replace(/\s+/g, '_');
   const fileName = `Angebot_${customerName}_${dateStr.replace(/\./g, '-')}.pdf`;
 
-  // Merge cover PDFs (replace) and append AGB PDF
+  // Merge cover PDFs (replace) and append AGB PDF.
   let finalBlob: Blob = pdf.output('blob');
-  if (coverPdfsToMerge.length > 0 || agbPdfMergeData) {
+  let mergePlan: AngebotMergePlan | undefined;
+
+  if (deferServerMerge) {
+    // Hand the plan back so the SERVER splices its local cover/AGB files in —
+    // deterministic and memory-safe on phones. The base (placeholder) PDF ships as-is.
+    if (serverCoverPlan.length > 0 || agbServerPlan) {
+      mergePlan = { covers: serverCoverPlan, agb: agbServerPlan };
+    }
+  } else if (coverPdfsToMerge.length > 0 || agbPdfMergeData) {
     try {
       finalBlob = await mergePdf({
         basePdf: finalBlob,
@@ -877,7 +912,7 @@ export const generateAngebotPDF = async (
   }
 
   if (options?.returnBlob) {
-    return { blob: finalBlob, fileName };
+    return { blob: finalBlob, fileName, mergePlan };
   }
 
   const url = URL.createObjectURL(finalBlob);

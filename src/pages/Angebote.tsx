@@ -532,11 +532,11 @@ export default function Angebote() {
       if (latestAngebot) {
         // Always regenerate from current lead/angebot data to guarantee fresh content (Beschreibung etc.)
         const bilder = await fetchAufmassBilder(leadDetail);
-        const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail, latestAngebot), bilder }, { returnBlob: true });
+        const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail, latestAngebot), bilder }, { returnBlob: true, deferServerMerge: true });
         if (!pdfResult?.blob) {
           throw new Error('PDF blob could not be generated');
         }
-        await saveAngebotPdf(leadId, latestAngebot.id, pdfResult.blob);
+        await saveAngebotPdf(leadId, latestAngebot.id, pdfResult.blob, pdfResult.mergePlan);
         pdfWindow.location.href = getAngebotPdfUrl(leadId, latestAngebot.id);
         return;
       }
@@ -550,11 +550,11 @@ export default function Angebote() {
       }
 
       const bilder = await fetchAufmassBilder(leadDetail);
-      const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail), bilder }, { returnBlob: true });
+      const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail), bilder }, { returnBlob: true, deferServerMerge: true });
       if (!pdfResult?.blob) {
         throw new Error('PDF blob could not be generated');
       }
-      await saveLeadPdf(leadId, pdfResult.blob);
+      await saveLeadPdf(leadId, pdfResult.blob, pdfResult.mergePlan);
       pdfWindow.location.href = pdfUrl;
     } catch (err) {
       pdfWindow.close();
@@ -577,12 +577,12 @@ export default function Angebote() {
       }
 
       const bilder = await fetchAufmassBilder(leadDetail);
-      const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail, angebot), bilder }, { returnBlob: true });
+      const pdfResult = await generateAngebotPDF({ ...buildPdfPayload(leadDetail, angebot), bilder }, { returnBlob: true, deferServerMerge: true });
       if (!pdfResult?.blob) {
         throw new Error('PDF blob could not be generated');
       }
 
-      await saveAngebotPdf(leadId, angebotId, pdfResult.blob);
+      await saveAngebotPdf(leadId, angebotId, pdfResult.blob, pdfResult.mergePlan);
       pdfWindow.location.href = pdfUrl;
     } catch (err) {
       pdfWindow.close();
@@ -612,32 +612,37 @@ export default function Angebote() {
       // MODÜL B: fetch source-Aufmaß bilder once and reuse for every PDF below
       const bilder = await fetchAufmassBilder(leadDetail);
 
-      // Generate and save PDFs for all Angebote in parallel (was sequential — much slower)
-      const tasks = angeboteList.map(async (ang) => {
+      // Generate + save each Angebot PDF SEQUENTIALLY. Parallel generation ran
+      // jsPDF + image fetches + pdf-lib cover merge for every Angebot at the same
+      // time, which exhausted memory on phones (the product cover was silently
+      // dropped, never appearing) and was racy on desktop. One-at-a-time keeps
+      // peak memory low so the cover embeds reliably on every device.
+      const angeboteAttachments: import('../components/EmailComposer').AngebotAttachment[] = [];
+      for (const ang of angeboteList) {
         try {
           const pdfResult = await generateAngebotPDF(
             { ...buildPdfPayload(leadDetail, ang), bilder },
-            { returnBlob: true }
+            { returnBlob: true, deferServerMerge: true }
           );
           if (pdfResult?.blob) {
-            await saveAngebotPdf(leadDetail.id, ang.id, pdfResult.blob);
-            return { id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: true };
+            await saveAngebotPdf(leadDetail.id, ang.id, pdfResult.blob, pdfResult.mergePlan);
+            angeboteAttachments.push({ id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: true });
+            continue;
           }
-        } catch {
-          // fall through to ready:false
+        } catch (genErr) {
+          console.error('Angebot PDF generation failed for', ang.id, genErr);
         }
-        return { id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: false };
-      });
-      const angeboteAttachments: import('../components/EmailComposer').AngebotAttachment[] = await Promise.all(tasks);
+        angeboteAttachments.push({ id: ang.id, angebot_nummer: ang.angebot_nummer || `#${ang.id}`, ready: false });
+      }
 
       // If no angebote, generate lead-level PDF
       if (angeboteList.length === 0) {
         const pdfResult = await generateAngebotPDF(
           { ...buildPdfPayload(leadDetail, undefined), bilder },
-          { returnBlob: true }
+          { returnBlob: true, deferServerMerge: true }
         );
         if (pdfResult?.blob) {
-          await saveLeadPdf(leadDetail.id, pdfResult.blob);
+          await saveLeadPdf(leadDetail.id, pdfResult.blob, pdfResult.mergePlan);
         }
       }
 
@@ -693,11 +698,11 @@ export default function Angebote() {
       const bilder = await fetchAufmassBilder(leadDetail);
       const pdfResult = await generateAngebotPDF(
         { ...buildPdfPayload(leadDetail, angebot), bilder },
-        { returnBlob: true }
+        { returnBlob: true, deferServerMerge: true }
       );
       if (!pdfResult?.blob) throw new Error('PDF blob could not be generated');
 
-      await saveAngebotPdf(leadId, angebotId, pdfResult.blob);
+      await saveAngebotPdf(leadId, angebotId, pdfResult.blob, pdfResult.mergePlan);
 
       const customerName = `${leadDetail.customer_firstname || ''} ${leadDetail.customer_lastname || ''}`.trim();
       const nrPart = angebot.angebot_nummer ? ` Nr. ${angebot.angebot_nummer}` : '';
