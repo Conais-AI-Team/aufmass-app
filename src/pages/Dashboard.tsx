@@ -1426,6 +1426,7 @@ Aylux Team`;
     }
     try {
       let pdfBlob: Blob | undefined;
+      let mergePlan: import('../services/api').AngebotMergePlan | undefined;
 
       if (docType === 'angebot') {
         // MODÜL B v3: Angebot snapshots must use generateAngebotPDF, not the
@@ -1474,8 +1475,9 @@ Aylux Team`;
           item_discounts: itemDiscounts,
           total_discount: leadDetail.total_discount,
           total_price: leadDetail.total_price,
-        }, { returnBlob: true });
+        }, { returnBlob: true, deferServerMerge: true });
         pdfBlob = result?.blob;
+        mergePlan = result?.mergePlan;
       } else {
         // aufmass / abnahme — Aufmaß generator (existing behavior)
         const [formData, abnahmeData, abnahmeImages] = await Promise.all([
@@ -1507,7 +1509,7 @@ Aylux Team`;
       }
 
       if (pdfBlob) {
-        await saveFormPdfSnapshot(formId, docType, pdfBlob);
+        await saveFormPdfSnapshot(formId, docType, pdfBlob, mergePlan);
         setFormSnapshots((prev) => ({
           ...prev,
           [formId]: [...(prev[formId] || []).filter(s => s.document_type !== docType),

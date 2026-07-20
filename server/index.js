@@ -2181,7 +2181,10 @@ app.post('/api/forms/:id/pdf-snapshot', authenticateToken, (req, res, next) => {
 
     const filename = `form${formId}_${docType}_${Date.now()}.pdf`;
     const filePath = path.join(dir, filename);
-    fs.writeFileSync(filePath, req.file.buffer);
+    // Angebot snapshots from the Aufmaß side carry a merge_plan too, so the cover
+    // is embedded server-side just like the Angebote-page flow.
+    const pdfBuffer = await applyMergePlan(req);
+    fs.writeFileSync(filePath, pdfBuffer);
 
     // Upsert; remove old file if present
     const old = await pool.query(
@@ -7160,19 +7163,22 @@ app.delete('/api/leads/:id/angebote/:angebotId', authenticateToken, async (req, 
 // client merge, no cover bytes travelling the wire) and consistent on desktop.
 async function mergeAngebotPdfServer(baseBytes, mergePlan, branchSlug) {
   const { PDFDocument } = await import('pdf-lib');
-  const branchDir = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug);
-  const safe = (name) => typeof name === 'string' && /^[\w\-.]+\.pdf$/i.test(name);
+  const uploadsRoot = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads');
+  const safeName = (name) => typeof name === 'string' && /^[\w\-.]+\.pdf$/i.test(name);
+  const safeSlug = (s) => (typeof s === 'string' && /^[a-z0-9-]+$/.test(s)) ? s : branchSlug;
 
   const baseDoc = await PDFDocument.load(baseBytes);
   const basePageCount = baseDoc.getPageCount();
   const out = await PDFDocument.create();
 
   // Preload cover docs keyed by the 1-based placeholder page they replace.
+  // Each cover carries its OWN branchSlug (covers are global) so the file is read
+  // from the branch folder it was uploaded to, whatever branch is sending.
   const replaceMap = new Map();
   for (const cv of (Array.isArray(mergePlan.covers) ? mergePlan.covers : [])) {
-    if (!cv || !safe(cv.filename)) continue;
-    const fp = path.join(branchDir, cv.filename);
-    if (!fs.existsSync(fp)) { console.warn('Cover file missing on merge:', cv.filename); continue; }
+    if (!cv || !safeName(cv.filename)) continue;
+    const fp = path.join(uploadsRoot, safeSlug(cv.branchSlug), cv.filename);
+    if (!fs.existsSync(fp)) { console.warn('Cover file missing on merge:', fp); continue; }
     try {
       const doc = await PDFDocument.load(fs.readFileSync(fp));
       replaceMap.set(Number(cv.replaceIndex), { doc, pages: Array.isArray(cv.selectedPages) ? cv.selectedPages : [] });
@@ -7193,10 +7199,11 @@ async function mergeAngebotPdfServer(baseBytes, mergePlan, branchSlug) {
     out.addPage(pg);
   }
 
-  // AGB pages appended at the very end.
+  // AGB pages appended at the very end. AGB stays branch-specific (legal terms
+  // differ per branch), so it is read from the sending branch's folder.
   const agb = mergePlan.agb;
-  if (agb && safe(agb.filename)) {
-    const fp = path.join(branchDir, agb.filename);
+  if (agb && safeName(agb.filename)) {
+    const fp = path.join(uploadsRoot, branchSlug, agb.filename);
     if (fs.existsSync(fp)) {
       try {
         const agbDoc = await PDFDocument.load(fs.readFileSync(fp));
@@ -7221,8 +7228,11 @@ async function applyMergePlan(req) {
     const plan = JSON.parse(req.body.merge_plan);
     const hasWork = plan && ((Array.isArray(plan.covers) && plan.covers.length > 0) || plan.agb);
     const branchSlug = branchFromReq(req);
+    console.log(`[merge] plan received: covers=${plan?.covers?.length || 0} agb=${!!plan?.agb} branch=${branchSlug} hasWork=${!!hasWork}`);
     if (hasWork && branchSlug) {
-      return await mergeAngebotPdfServer(req.file.buffer, plan, branchSlug);
+      const merged = await mergeAngebotPdfServer(req.file.buffer, plan, branchSlug);
+      console.log(`[merge] done: base=${req.file.buffer.length}b merged=${merged.length}b`);
+      return merged;
     }
   } catch (mergeErr) {
     console.error('Server-side PDF merge failed, storing base PDF:', mergeErr);
@@ -8720,16 +8730,28 @@ app.get('/api/product-cover-by-name/:productName', authenticateToken, async (req
     const branchSlug = resolveBranchSlug(req, res);
     if (!branchSlug) return;
     const productName = decodeURIComponent(req.params.productName);
+    // Covers are GLOBAL across branches: a cover uploaded for a product (in any
+    // branch) applies to that product name everywhere. Match by product NAME
+    // across all branches, prefer this branch's own cover, newest first.
     const result = await pool.query(
-      `SELECT c.id, c.file_path, c.selected_pages, c.page_count, c.uploaded_at
+      `SELECT c.id, c.file_path, c.selected_pages, c.page_count, c.branch_slug, c.uploaded_at
        FROM aufmass_product_cover_pdfs c
-       WHERE c.branch_slug = $1
-         AND c.product_id IN (SELECT id FROM aufmass_lead_products WHERE branch_id = $1 AND product_name = $2)
-       ORDER BY c.uploaded_at DESC
-       LIMIT 1`,
+       JOIN aufmass_lead_products p ON p.id = c.product_id
+       WHERE p.product_name = $2
+       ORDER BY (c.branch_slug = $1) DESC, c.uploaded_at DESC`,
       [branchSlug, productName]
     );
-    res.json(result.rows[0] || null);
+    // Return the first candidate whose file actually exists on disk — some DB
+    // rows are orphaned (file re-uploaded/removed), and picking a missing file
+    // would silently drop the cover at merge time.
+    const uploadsRoot = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads');
+    for (const row of result.rows) {
+      if (!/^[a-z0-9-]+$/.test(row.branch_slug || '') || !/^[\w\-.]+\.pdf$/i.test(row.file_path || '')) continue;
+      if (fs.existsSync(path.join(uploadsRoot, row.branch_slug, row.file_path))) {
+        return res.json(row);
+      }
+    }
+    res.json(null);
   } catch (err) {
     console.error('Error fetching cover PDF by name:', err);
     res.status(500).json({ error: 'Failed to fetch cover PDF' });
