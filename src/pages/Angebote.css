@@ -1023,24 +1023,62 @@
     gap: 1rem;
   }
 
+  .lead-card {
+    padding: 1.1rem;
+  }
+
+  /* Header: name/badges stack above the status badge */
   .lead-header {
     flex-direction: column;
     gap: 0.75rem;
   }
 
+  /* Badges + e-mail must wrap instead of overflowing off the card edge */
+  .lead-meta {
+    flex-wrap: wrap;
+    gap: 0.4rem;
+  }
+
+  .lead-email {
+    width: 100%;
+    word-break: break-word;
+  }
+
+  .lead-status {
+    align-self: flex-start;
+  }
+
+  /* Keep the status dropdown inside the viewport on small screens */
+  .lead-status-dropdown {
+    right: auto;
+    left: 0;
+    min-width: min(260px, calc(100vw - 3rem));
+  }
+
+  .lead-details {
+    gap: 0.75rem 1.25rem;
+    margin-bottom: 1rem;
+    padding-bottom: 1rem;
+  }
+
   .lead-footer {
     flex-direction: column;
-    align-items: flex-start;
+    align-items: stretch;
     gap: 1rem;
   }
 
+  /* Actions wrap onto multiple rows; the two labelled buttons grow to fill */
   .lead-actions {
     width: 100%;
-    justify-content: flex-end;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    justify-content: flex-start;
   }
 
+  .btn-new-angebot,
   .btn-aufmass {
-    flex: 1;
+    flex: 1 1 auto;
+    min-width: 140px;
     justify-content: center;
   }
 
@@ -1059,6 +1097,37 @@
     white-space: nowrap;
     font-size: 0.8rem;
     padding: 0.4rem 0.75rem;
+  }
+
+  /* Top-level Schnellangebot / Aus Aufmaß tabs stay scrollable, never squashed */
+  .angebote-tabs {
+    overflow-x: auto;
+    scrollbar-width: none;
+  }
+
+  .angebote-tabs::-webkit-scrollbar {
+    display: none;
+  }
+}
+
+@media (max-width: 480px) {
+  .lead-card {
+    padding: 0.9rem;
+  }
+
+  .lead-customer h3 {
+    font-size: 1rem;
+  }
+
+  /* Each labelled action takes a full row so nothing overlaps on narrow phones */
+  .btn-new-angebot,
+  .btn-aufmass {
+    flex: 1 1 100%;
+  }
+
+  /* Icon buttons share one row, evenly spread */
+  .lead-actions .btn-icon {
+    flex: 0 0 auto;
   }
 }
 

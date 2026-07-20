@@ -255,12 +255,13 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
 
   return (
     <motion.div
-      className="modal-overlay-modern"
+      className="modal-overlay-modern email-composer-overlay"
       initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
       onClick={onClose}
       style={{ zIndex: 10000 }}
     >
       <motion.div
+        className="email-composer-modal"
         onClick={(e) => e.stopPropagation()}
         initial={{ scale: 0.95, opacity: 0, y: 20 }}
         animate={{ scale: 1, opacity: 1, y: 0 }}
@@ -270,13 +271,17 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
           width: '100%', maxWidth: '560px', margin: 'auto', borderRadius: '16px',
           background: 'var(--bg-primary)', border: '1px solid var(--border-primary)',
           boxShadow: '0 25px 60px rgba(0,0,0,0.4)', overflow: 'hidden',
+          // Cap the modal to the viewport and let the body scroll, so the footer
+          // (Senden button) stays reachable on mobile instead of sliding off-screen.
+          display: 'flex', flexDirection: 'column', maxHeight: 'calc(100dvh - 2rem)',
+          boxSizing: 'border-box',
         }}
       >
         {/* Header */}
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'space-between',
           padding: '16px 20px', borderBottom: '1px solid var(--border-primary)',
-          background: 'var(--bg-secondary)',
+          background: 'var(--bg-secondary)', flexShrink: 0,
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
             <div style={{
@@ -297,7 +302,7 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
         </div>
 
         {/* Body */}
-        <div style={{ padding: '16px 20px' }}>
+        <div style={{ padding: '16px 20px', flex: 1, overflowY: 'auto', minHeight: 0 }}>
           {/* Not configured warning */}
           {statusLoaded && !emailStatus?.configured && (
             <div style={{ padding: '10px 14px', borderRadius: '10px', marginBottom: '14px', background: 'rgba(239,68,68,0.06)', border: '1px solid rgba(239,68,68,0.15)', display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -509,6 +514,7 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
         <div style={{
           display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: '8px',
           padding: '12px 20px', borderTop: '1px solid var(--border-primary)', background: 'var(--bg-secondary)',
+          flexShrink: 0,
         }}>
           <button onClick={onClose} style={{ padding: '8px 16px', borderRadius: '8px', border: '1px solid var(--border-primary)', background: 'transparent', color: 'var(--text-secondary)', fontSize: '13px', fontWeight: 500, cursor: 'pointer' }}>
             Abbrechen
@@ -536,7 +542,22 @@ const EmailComposer = ({ to, subject: initialSubject, body: initialBody, formId,
           </button>
         </div>
 
-        <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        <style>{`
+          @keyframes spin { to { transform: rotate(360deg); } }
+          /* Mobile: render the composer full-screen instead of a floating popup.
+             Overrides the inline modal styles (hence !important); desktop is untouched. */
+          @media (max-width: 768px) {
+            .email-composer-overlay { padding: 0 !important; }
+            .email-composer-modal {
+              width: 100% !important;
+              max-width: 100% !important;
+              height: 100dvh !important;
+              max-height: 100dvh !important;
+              border-radius: 0 !important;
+              border: none !important;
+            }
+          }
+        `}</style>
       </motion.div>
     </motion.div>
   );

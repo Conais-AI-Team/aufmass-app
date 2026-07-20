@@ -1033,8 +1033,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
           };
           void (async () => {
             try {
-              const pdfResult = await generateAngebotPDF(einzelPdfPayload, { returnBlob: true });
-              if (pdfResult?.blob) await saveLeadPdf(einzelLeadId, pdfResult.blob);
+              const pdfResult = await generateAngebotPDF(einzelPdfPayload, { returnBlob: true, deferServerMerge: true });
+              if (pdfResult?.blob) await saveLeadPdf(einzelLeadId, pdfResult.blob, pdfResult.mergePlan);
             } catch (pdfErr) {
               console.error('Einzelangebot PDF failed:', pdfErr);
             }
@@ -1086,8 +1086,8 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         };
         void (async () => {
           try {
-            const pdfResult = await generateAngebotPDF(newAngPdfPayload, { returnBlob: true });
-            if (pdfResult?.blob) await saveAngebotPdf(newAngLeadId, newAngId, pdfResult.blob);
+            const pdfResult = await generateAngebotPDF(newAngPdfPayload, { returnBlob: true, deferServerMerge: true });
+            if (pdfResult?.blob) await saveAngebotPdf(newAngLeadId, newAngId, pdfResult.blob, pdfResult.mergePlan);
           } catch (pdfErr) {
             console.error('Angebot PDF generation failed:', pdfErr);
           }
@@ -1140,13 +1140,13 @@ export default function LeadFormModal({ isOpen, onClose, onSuccess, editData, ed
         };
         void (async () => {
           try {
-            const pdfResult = await generateAngebotPDF(normalPdfPayload, { returnBlob: true });
+            const pdfResult = await generateAngebotPDF(normalPdfPayload, { returnBlob: true, deferServerMerge: true });
             if (!pdfResult?.blob) return;
             if (normalAngebotId) {
               const { saveAngebotPdf } = await import('../services/api');
-              await saveAngebotPdf(normalLeadId, normalAngebotId, pdfResult.blob);
+              await saveAngebotPdf(normalLeadId, normalAngebotId, pdfResult.blob, pdfResult.mergePlan);
             } else {
-              await saveLeadPdf(normalLeadId, pdfResult.blob);
+              await saveLeadPdf(normalLeadId, pdfResult.blob, pdfResult.mergePlan);
             }
           } catch (pdfErr) {
             console.error('Angebot PDF generation failed:', pdfErr);
