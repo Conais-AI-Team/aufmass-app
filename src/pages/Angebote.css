@@ -724,6 +724,73 @@
   padding: 1.5rem;
 }
 
+/* Aufmaß Angebot picker */
+.aufmass-picker-modal {
+  max-width: 520px;
+}
+
+.aufmass-picker-hint {
+  margin: 0 0 1rem;
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}
+
+.aufmass-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.6rem;
+}
+
+.aufmass-picker-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  width: 100%;
+  padding: 0.9rem 1rem;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.aufmass-picker-item:hover {
+  border-color: var(--accent-color, #7fa93d);
+  background: var(--bg-hover, rgba(127, 169, 61, 0.08));
+}
+
+.aufmass-picker-item-main {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  min-width: 0;
+}
+
+.aufmass-picker-nr {
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--text-primary);
+}
+
+.aufmass-picker-products {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 300px;
+}
+
+.aufmass-picker-price {
+  font-weight: 700;
+  font-size: 0.95rem;
+  color: var(--accent-color, #7fa93d);
+  white-space: nowrap;
+}
+
 .detail-section {
   margin-bottom: 1.5rem;
 }
