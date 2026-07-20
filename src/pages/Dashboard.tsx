@@ -8,6 +8,7 @@ import type { AbnahmeImage } from '../services/api';
 import type { FormData, MontageteamStats, Montageteam, StatusHistoryEntry, AbnahmeData } from '../services/api';
 import { useStats } from '../AppWrapper';
 import { useToast } from '../components/Toast';
+import { regenerateAndSaveAngebotPdf } from '../utils/angebotPdf';
 import EmailComposer from '../components/EmailComposer';
 import LeadFormModal from '../components/LeadFormModal';
 import RechnungForm from '../components/RechnungForm';
@@ -1536,6 +1537,24 @@ Aylux Team`;
     }
   };
 
+  // Open a single Angebot PDF from the Aufmaß dropdown. Regenerate + save first
+  // (the server merges the product cover) so the opened PDF is never a stale,
+  // cover-less cache — matching what the Angebote page shows.
+  const openAngebotRegenerated = async (leadId: number, angebotId: number | null) => {
+    const pdfWindow = window.open('', '_blank');
+    if (pdfWindow) pdfWindow.document.write('PDF wird geladen...');
+    try {
+      await regenerateAndSaveAngebotPdf(leadId, angebotId);
+      const url = angebotId ? getAngebotPdfUrl(leadId, angebotId) : getLeadPdfUrl(leadId);
+      if (pdfWindow) pdfWindow.location.href = url;
+      else window.open(url, '_blank');
+    } catch (err) {
+      console.error('Angebot regenerate failed:', err);
+      if (pdfWindow) pdfWindow.close();
+      toast.error('Fehler', 'Angebot-PDF konnte nicht erstellt werden.');
+    }
+  };
+
   const ensureAngeboteLoaded = async (form: FormData) => {
     if (!form.id || !form.lead_id || formAngebote[form.id]) return;
     try {
@@ -2187,19 +2206,17 @@ Aylux Team`;
                               ];
                               return <>
                                 {form.lead_id && angebote.map((angebot, index) => (
-                                  <a
+                                  <button
                                     key={`angebot-${angebot.id}`}
-                                    href={getAngebotPdfUrl(form.lead_id!, angebot.id)}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
+                                    type="button"
                                     className="attachment-option generate-pdf"
-                                    onClick={() => setAttachmentDropdownOpen(null)}
-                                    title="Dieses Angebot separat öffnen"
+                                    onClick={() => { setAttachmentDropdownOpen(null); openAngebotRegenerated(form.lead_id!, angebot.id); }}
+                                    title="Dieses Angebot separat öffnen (mit Deckblatt)"
                                   >
                                     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14,2 14,8 20,8" /></svg>
                                     <span>{angebot.angebot_nummer || `Angebot ${index + 1}`}</span>
                                     {angebot.id === form.selectedAngebotId && <span className="upload-hint">Angenommen</span>}
-                                  </a>
+                                  </button>
                                 ))}
                                 {types.map(({ type, label }) => {
                                 const snap = snapshots.find((s) => s.document_type === type);
@@ -2341,16 +2358,14 @@ Aylux Team`;
                             {form.lead_id && (
                               <>
                                 <div className="attachment-divider">Initial Angebot</div>
-                                <a
-                                  href={getLeadPdfUrl(form.lead_id)}
-                                  target="_blank"
-                                  rel="noopener noreferrer"
+                                <button
+                                  type="button"
                                   className="attachment-option pdf-file"
-                                  onClick={() => setAttachmentDropdownOpen(null)}
+                                  onClick={() => { setAttachmentDropdownOpen(null); openAngebotRegenerated(form.lead_id!, null); }}
                                 >
                                   <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z" /><polyline points="14,2 14,8 20,8" /><path d="M9 15h6"/><path d="M9 11h6"/></svg>
                                   <span className="pdf-filename">Angebot_{form.lead_id}.pdf</span>
-                                </a>
+                                </button>
                               </>
                             )}
                             {/* E-Signature Status Section */}
