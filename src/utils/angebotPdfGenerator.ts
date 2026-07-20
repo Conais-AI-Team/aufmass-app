@@ -8,7 +8,7 @@ import { mergePdf } from './pdf/pdfMerger';
 import { drawAyluxPdfLogo, loadAyluxPdfLogo } from './pdfLogo';
 import { getCachedProductImages, fetchImageAsBase64 } from './productImagesCache';
 import { getCachedBranchTerms } from './branchTermsCache';
-import { getProductCoverPdf, fetchBranchPdfBytes } from '../services/api';
+import { getProductCoverPdfByName, fetchBranchPdfBytes } from '../services/api';
 import {
   fetchServerImageAsBase64,
   fixImageOrientationAuto,
@@ -673,13 +673,24 @@ export const generateAngebotPDF = async (
     let detailImages: { base64?: string }[] = [];
     let coverPdfData: ProductAssets['coverPdfData'] = null;
 
-    if (item.product_id) {
+    // Cover PDF is product-level → resolve by product NAME. Angebot line items often
+    // carry a null (or size-specific, non-matching) product_id, which made the umbrella
+    // Angebot PDF silently drop the cover while single-Angebot PDFs kept it.
+    if (item.product_name) {
       try {
-        const cp = await getProductCoverPdf(item.product_id);
+        const cp = await getProductCoverPdfByName(item.product_name);
         if (cp?.selected_pages?.length) {
           const bytes = await fetchBranchPdfBytes(cp.file_path);
           if (bytes) coverPdfData = { bytes, selectedPages: cp.selected_pages };
         }
+      } catch (error) {
+        console.warn('Could not load cover PDF for', item.product_name, error);
+      }
+    }
+
+    // Product images are keyed by product_id (only available when the item has one).
+    if (item.product_id) {
+      try {
         const allImages = await getCachedProductImages(item.product_id);
         if (!coverPdfData) {
           const flagged = allImages.filter((image) => image.show_on_cover).slice(0, 2);
@@ -692,7 +703,7 @@ export const generateAngebotPDF = async (
           base64: await fetchImageAsBase64(image.image_path),
         })));
       } catch (error) {
-        console.warn('Could not load cover assets for item', item.product_id, error);
+        console.warn('Could not load images for item', item.product_id, error);
       }
     }
 
