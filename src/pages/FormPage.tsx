@@ -3,7 +3,8 @@ import { useNavigate, useParams, useLocation } from 'react-router-dom';
 import { AnimatePresence } from 'framer-motion';
 import { AufmassForm } from '../App';
 import { FormData } from '../types';
-import { DynamicFormData } from '../types/productConfig';
+import { DynamicFormData, ProductSelection, ProductConfig } from '../types/productConfig';
+import productConfigData from '../config/productConfig.json';
 import { api, getForm, createForm, updateForm, uploadImages, savePdf, updateLeadStatus, getAbnahme, getAbnahmeImages, FormData as ApiFormData } from '../services/api';
 import type { Rechnung, RechnungType } from '../services/api';
 import { generatePDF } from '../utils/pdfGenerator';
@@ -25,6 +26,38 @@ interface LeadItem {
   unit_price: number;
   total_price: number;
 }
+
+const productConfig = productConfigData as ProductConfig;
+
+// Reverse lookup: given a lead product's name (a model), find its category +
+// productType from productConfig so it carries into the Aufmaß form. Matches
+// case-insensitively. Returns null when the product isn't in the config
+// (e.g. accessories / unmapped catalog items) — the form is then left empty
+// for that entry rather than force-mapped to a wrong product.
+const resolveProductSelection = (
+  productName: string
+): { category: string; productType: string; model: string } | null => {
+  if (!productName) return null;
+  const target = productName.trim().toLowerCase();
+  for (const category of Object.keys(productConfig)) {
+    const productTypes = productConfig[category];
+    for (const productType of Object.keys(productTypes)) {
+      const models = productTypes[productType]?.models || [];
+      const match = models.find(m => m.toLowerCase() === target);
+      if (match) return { category, productType, model: match };
+    }
+  }
+  return null;
+};
+
+// Lead items are stored in mm (LeadFormModal works in mm) — the same unit the
+// Aufmaß form uses. Carry breite/tiefe across directly, no cm conversion.
+const buildSpecsFromLeadItem = (item: LeadItem): DynamicFormData => {
+  const specs: DynamicFormData = {};
+  if (Number.isFinite(item.breite) && item.breite > 0) specs.breite = item.breite;
+  if (Number.isFinite(item.tiefe) && item.tiefe > 0) specs.tiefe = item.tiefe;
+  return specs;
+};
 
 interface LeadExtra {
   id: number;
@@ -328,38 +361,37 @@ const FormPage = () => {
       if (id === 'new') {
         // Check if coming from lead with pre-filled data
         if (leadState?.fromLead) {
-          // Map lead product to form product selection
-          let productSelection = { category: '', productType: '', model: '' };
-          const specifications: DynamicFormData = {};
+          // Map lead product to form product selection. The product identity is
+          // resolved from productConfig by its real name (not hardcoded), so any
+          // catalogued product carries over — not just one special case.
+          let productSelection: ProductSelection = { category: '', productType: '', model: '' };
+          let specifications: DynamicFormData = {};
 
           // Get first lead item for main product
           const firstItem = leadState.leadItems?.[0];
           if (firstItem) {
-            // Map PREMIUMLINE product to form structure
-            if (firstItem.product_name.toUpperCase().includes('PREMIUMLINE')) {
+            const resolved = resolveProductSelection(firstItem.product_name);
+            if (resolved) {
+              // ÜBERDACHUNG > Glasdach uses a multi-select model (string[]).
+              const isMultiModel = resolved.category === 'ÜBERDACHUNG' && resolved.productType === 'Glasdach';
               productSelection = {
-                category: 'ÜBERDACHUNG',
-                productType: 'Glasdach',
-                model: 'Arona'
+                category: resolved.category,
+                productType: resolved.productType,
+                model: isMultiModel ? [resolved.model] : resolved.model
               };
             }
-            // Convert cm to mm for the form (form uses mm)
-            specifications.breite = firstItem.breite * 10;
-            specifications.tiefe = firstItem.tiefe * 10;
+            specifications = buildSpecsFromLeadItem(firstItem);
           }
 
-          // Build weitereProdukte from additional lead items
+          // Build weitereProdukte from additional lead items, each resolved by name.
           const weitereProdukte = (leadState.leadItems || []).slice(1).map((item, index) => {
-            const wpSpecs: DynamicFormData = {
-              breite: item.breite * 10,
-              tiefe: item.tiefe * 10
-            };
+            const resolved = resolveProductSelection(item.product_name);
             return {
               id: `lead-wp-${index}`,
-              category: 'ÜBERDACHUNG',
-              productType: 'Glasdach',
-              model: 'Arona',
-              specifications: wpSpecs
+              category: resolved?.category || '',
+              productType: resolved?.productType || '',
+              model: resolved?.model || '',
+              specifications: buildSpecsFromLeadItem(item)
             };
           });
 

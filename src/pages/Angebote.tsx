@@ -174,6 +174,9 @@ export default function Angebote() {
   const [newAngebotLeadId, setNewAngebotLeadId] = useState<number | null>(null);
   const [detailModalOpen, setDetailModalOpen] = useState(false);
   const [selectedLead, setSelectedLead] = useState<LeadDetail | null>(null);
+  // When a lead has more than one Angebot, the user first picks which one the
+  // new Aufmaß should be seeded from (products + dimensions).
+  const [aufmassPicker, setAufmassPicker] = useState<{ lead: LeadDetail; angebote: Angebot[] } | null>(null);
   const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
   const [deleteAngebotConfirm, setDeleteAngebotConfirm] = useState<{ leadId: number; angebotId: number } | null>(null);
   // MODÜL B: id of the lead awaiting confirm for the manual "Versendet" override
@@ -303,29 +306,45 @@ export default function Angebote() {
   const handleCreateAufmass = async (lead: Lead | LeadDetail) => {
     try {
       let leadDetail: LeadDetail;
-      if ('items' in lead) {
+      if ('items' in lead && 'angebote' in lead) {
         leadDetail = lead;
       } else {
         leadDetail = await api.get<LeadDetail>(`/leads/${lead.id}`);
       }
 
-      navigate('/form/new', {
-        state: {
-          fromLead: true,
-          leadId: leadDetail.id,
-          kundeVorname: leadDetail.customer_firstname,
-          kundeNachname: leadDetail.customer_lastname,
-          kundeEmail: leadDetail.customer_email,
-          kundeTelefon: leadDetail.customer_phone,
-          kundenlokation: leadDetail.customer_address,
-          leadItems: leadDetail.items,
-          leadExtras: leadDetail.extras,
-          leadNotes: leadDetail.notes
-        }
-      });
+      const angebote = leadDetail.angebote || [];
+      if (angebote.length > 1) {
+        // Multiple offers: let the user choose which one drives the Aufmaß.
+        setAufmassPicker({ lead: leadDetail, angebote });
+        return;
+      }
+      // 0 or 1 offer: proceed straight to the form, seeding from the single
+      // offer's items when one exists (otherwise the base lead items).
+      proceedToAufmass(leadDetail, angebote[0]);
     } catch (err) {
       console.error('Failed to load lead details:', err);
     }
+  };
+
+  // Navigate to the new-Aufmaß form, seeding customer + products/dimensions from
+  // the chosen Angebot (falls back to the lead's base items when none is given).
+  const proceedToAufmass = (leadDetail: LeadDetail, angebot?: Angebot) => {
+    setAufmassPicker(null);
+    navigate('/form/new', {
+      state: {
+        fromLead: true,
+        leadId: leadDetail.id,
+        angebotId: angebot?.id,
+        kundeVorname: leadDetail.customer_firstname,
+        kundeNachname: leadDetail.customer_lastname,
+        kundeEmail: leadDetail.customer_email,
+        kundeTelefon: leadDetail.customer_phone,
+        kundenlokation: leadDetail.customer_address,
+        leadItems: angebot?.items || leadDetail.items,
+        leadExtras: angebot?.extras || leadDetail.extras,
+        leadNotes: angebot?.notes || leadDetail.notes
+      }
+    });
   };
 
   const handleLeadStatusChange = async (leadId: number, newStatus: string) => {
@@ -1210,6 +1229,61 @@ export default function Angebote() {
         newAngebotForLeadId={newAngebotLeadId}
         fromAufmassFormId={fromAufmassFormId}
       />
+
+      {/* Angebot picker for Aufmaß (only when a lead has multiple Angebote) */}
+      <AnimatePresence>
+        {aufmassPicker && (
+          <motion.div
+            className="modal-overlay"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            onClick={() => setAufmassPicker(null)}
+          >
+            <motion.div
+              className="detail-modal aufmass-picker-modal"
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              onClick={e => e.stopPropagation()}
+            >
+              <div className="modal-header">
+                <h2>Angebot auswählen</h2>
+                <button className="close-btn" onClick={() => setAufmassPicker(null)}>
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M18 6L6 18M6 6l12 12" />
+                  </svg>
+                </button>
+              </div>
+              <div className="modal-body">
+                <p className="aufmass-picker-hint">
+                  Aus welchem Angebot soll das Aufmaß erstellt werden? Die Produkte und Maße
+                  werden ins Formular übernommen.
+                </p>
+                <div className="aufmass-picker-list">
+                  {aufmassPicker.angebote.map(ang => (
+                    <button
+                      key={`aufmass-pick-${ang.id}`}
+                      className="aufmass-picker-item"
+                      onClick={() => proceedToAufmass(aufmassPicker.lead, ang)}
+                    >
+                      <div className="aufmass-picker-item-main">
+                        <span className="aufmass-picker-nr">{ang.angebot_nummer || `#${ang.id}`}</span>
+                        <span className="aufmass-picker-products">
+                          {ang.items.length > 0
+                            ? ang.items.map(i => i.product_name).join(', ')
+                            : 'Keine Produkte'}
+                        </span>
+                      </div>
+                      <span className="aufmass-picker-price">{formatPrice(ang.total_price)}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
 
       {/* Detail Modal */}
       <AnimatePresence>
