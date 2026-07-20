@@ -8634,6 +8634,30 @@ app.get('/api/products/:productId/cover-pdf', authenticateToken, async (req, res
   }
 });
 
+// Cover PDF lookup by product NAME. Product covers are product-level, but Angebot
+// line items frequently carry a null (or size-specific, non-matching) product_id, so
+// the by-id lookup misses. Resolving via the product name finds the cover reliably.
+app.get('/api/product-cover-by-name/:productName', authenticateToken, async (req, res) => {
+  try {
+    const branchSlug = resolveBranchSlug(req, res);
+    if (!branchSlug) return;
+    const productName = decodeURIComponent(req.params.productName);
+    const result = await pool.query(
+      `SELECT c.id, c.file_path, c.selected_pages, c.page_count, c.uploaded_at
+       FROM aufmass_product_cover_pdfs c
+       WHERE c.branch_slug = $1
+         AND c.product_id IN (SELECT id FROM aufmass_lead_products WHERE branch_id = $1 AND product_name = $2)
+       ORDER BY c.uploaded_at DESC
+       LIMIT 1`,
+      [branchSlug, productName]
+    );
+    res.json(result.rows[0] || null);
+  } catch (err) {
+    console.error('Error fetching cover PDF by name:', err);
+    res.status(500).json({ error: 'Failed to fetch cover PDF' });
+  }
+});
+
 app.post('/api/products/:productId/cover-pdf', authenticateToken, requireAdmin, (req, res) => {
   branchPdfUpload.single('pdf')(req, res, async (err) => {
     if (err) return res.status(400).json({ error: err.message });

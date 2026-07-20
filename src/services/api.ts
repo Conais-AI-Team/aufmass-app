@@ -1557,6 +1557,10 @@ export interface BranchAgbPdf {
 export const getProductCoverPdf = (productId: number): Promise<ProductCoverPdf | null> =>
   api.get(`/products/${productId}/cover-pdf`);
 
+/** Resolve a product's cover PDF by product name (robust when line items lack a product_id). */
+export const getProductCoverPdfByName = (productName: string): Promise<ProductCoverPdf | null> =>
+  api.get(`/product-cover-by-name/${encodeURIComponent(productName)}`);
+
 export const uploadProductCoverPdf = async (productId: number, file: File): Promise<ProductCoverPdf> => {
   const formData = new FormData();
   formData.append('pdf', file);
