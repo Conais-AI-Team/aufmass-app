@@ -1108,6 +1108,29 @@
   .angebote-tabs::-webkit-scrollbar {
     display: none;
   }
+
+  /* Expanded "N Angebote" rows: stack info above the action icons so nothing
+     overflows the card edge on mobile */
+  .angebote-expanded {
+    padding: 0.6rem 0.75rem;
+  }
+
+  .angebot-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.5rem;
+  }
+
+  .angebot-row-info {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .angebot-row-actions {
+    width: 100%;
+    justify-content: flex-start;
+    flex-wrap: wrap;
+  }
 }
 
 @media (max-width: 480px) {

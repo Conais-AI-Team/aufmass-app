@@ -675,7 +675,7 @@ export const generateAngebotPDF = async (
     coverImages: { base64?: string }[];
     detailImages: { base64?: string }[];
     coverPdfData: { bytes: Uint8Array; selectedPages: number[] } | null;
-    coverPdfMeta: { filename: string; selectedPages: number[] } | null;
+    coverPdfMeta: { filename: string; selectedPages: number[]; branchSlug?: string } | null;
   };
 
   const productAssets: ProductAssets[] = await Promise.all(data.items.map(async (item) => {
@@ -691,7 +691,7 @@ export const generateAngebotPDF = async (
       try {
         const cp = await getProductCoverPdfByName(item.product_name);
         if (cp?.selected_pages?.length && cp.file_path) {
-          coverPdfMeta = { filename: cp.file_path, selectedPages: cp.selected_pages };
+          coverPdfMeta = { filename: cp.file_path, selectedPages: cp.selected_pages, branchSlug: cp.branch_slug };
           // Client-merge mode needs the actual bytes; server-merge mode only needs the plan.
           if (!deferServerMerge) {
             const bytes = await fetchBranchPdfBytes(cp.file_path);
@@ -738,7 +738,7 @@ export const generateAngebotPDF = async (
     if (hasCoverPdf) {
       coverReplaceIndices.push(coverPageNum);
       if (deferServerMerge && assets.coverPdfMeta) {
-        serverCoverPlan.push({ replaceIndex: coverPageNum, filename: assets.coverPdfMeta.filename, selectedPages: assets.coverPdfMeta.selectedPages });
+        serverCoverPlan.push({ replaceIndex: coverPageNum, filename: assets.coverPdfMeta.filename, selectedPages: assets.coverPdfMeta.selectedPages, branchSlug: assets.coverPdfMeta.branchSlug });
       } else if (assets.coverPdfData) {
         coverPdfsToMerge.push(assets.coverPdfData);
       }

@@ -845,11 +845,13 @@ export interface FormPdfSnapshot {
 export async function saveFormPdfSnapshot(
   formId: number,
   docType: FormPdfDocType,
-  pdfBlob: Blob
+  pdfBlob: Blob,
+  mergePlan?: AngebotMergePlan
 ): Promise<{ success: boolean; document_type: FormPdfDocType; created_at: string }> {
   const formData = new window.FormData();
   formData.append('pdf', pdfBlob, `form_${formId}_${docType}.pdf`);
   formData.append('document_type', docType);
+  if (mergePlan) formData.append('merge_plan', JSON.stringify(mergePlan));
 
   const token = getStoredToken();
   const response = await fetch(`${API_BASE_URL}/forms/${formId}/pdf-snapshot`, {
@@ -1203,7 +1205,7 @@ export async function markFormPostSent(formId: number): Promise<{ message: strin
 // server disk (aufmass-pdfs/branch-uploads/<slug>/), so no bytes travel the wire
 // and the fragile pdf-lib merge no longer runs on (memory-limited) phones.
 export interface AngebotMergePlan {
-  covers: { replaceIndex: number; filename: string; selectedPages: number[] }[];
+  covers: { replaceIndex: number; filename: string; selectedPages: number[]; branchSlug?: string }[];
   agb: { filename: string; pages: number[] } | null;
 }
 
@@ -1557,6 +1559,9 @@ export interface ProductCoverPdf {
   file_path: string;
   selected_pages: number[];
   page_count: number;
+  // Branch the cover file lives under (covers are global; may differ from the
+  // requesting branch). Used to read the file from the correct folder on merge.
+  branch_slug?: string;
   uploaded_at: string;
 }
 
