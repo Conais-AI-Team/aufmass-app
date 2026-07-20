@@ -7154,6 +7154,82 @@ app.delete('/api/leads/:id/angebote/:angebotId', authenticateToken, async (req, 
 });
 
 // Save PDF for a specific angebot
+// Server-side merge: splice branch cover/AGB PDFs (already on disk) into a
+// client-generated base Angebot PDF. Running this on the server — instead of the
+// browser's pdf-lib — makes the product cover reliable on phones (no memory-heavy
+// client merge, no cover bytes travelling the wire) and consistent on desktop.
+async function mergeAngebotPdfServer(baseBytes, mergePlan, branchSlug) {
+  const { PDFDocument } = await import('pdf-lib');
+  const branchDir = path.join(process.cwd(), 'aufmass-pdfs', 'branch-uploads', branchSlug);
+  const safe = (name) => typeof name === 'string' && /^[\w\-.]+\.pdf$/i.test(name);
+
+  const baseDoc = await PDFDocument.load(baseBytes);
+  const basePageCount = baseDoc.getPageCount();
+  const out = await PDFDocument.create();
+
+  // Preload cover docs keyed by the 1-based placeholder page they replace.
+  const replaceMap = new Map();
+  for (const cv of (Array.isArray(mergePlan.covers) ? mergePlan.covers : [])) {
+    if (!cv || !safe(cv.filename)) continue;
+    const fp = path.join(branchDir, cv.filename);
+    if (!fs.existsSync(fp)) { console.warn('Cover file missing on merge:', cv.filename); continue; }
+    try {
+      const doc = await PDFDocument.load(fs.readFileSync(fp));
+      replaceMap.set(Number(cv.replaceIndex), { doc, pages: Array.isArray(cv.selectedPages) ? cv.selectedPages : [] });
+    } catch (e) { console.warn('Cover load failed:', cv.filename, e.message); }
+  }
+
+  for (let i = 1; i <= basePageCount; i++) {
+    const rep = replaceMap.get(i);
+    if (rep) {
+      const valid = rep.pages.filter((p) => p >= 1 && p <= rep.doc.getPageCount());
+      if (valid.length > 0) {
+        const copied = await out.copyPages(rep.doc, valid.map((p) => p - 1));
+        copied.forEach((pg) => out.addPage(pg));
+        continue;
+      }
+    }
+    const [pg] = await out.copyPages(baseDoc, [i - 1]);
+    out.addPage(pg);
+  }
+
+  // AGB pages appended at the very end.
+  const agb = mergePlan.agb;
+  if (agb && safe(agb.filename)) {
+    const fp = path.join(branchDir, agb.filename);
+    if (fs.existsSync(fp)) {
+      try {
+        const agbDoc = await PDFDocument.load(fs.readFileSync(fp));
+        const valid = (Array.isArray(agb.pages) ? agb.pages : []).filter((p) => p >= 1 && p <= agbDoc.getPageCount());
+        if (valid.length > 0) {
+          const copied = await out.copyPages(agbDoc, valid.map((p) => p - 1));
+          copied.forEach((pg) => out.addPage(pg));
+        }
+      } catch (e) { console.warn('AGB load failed on merge:', e.message); }
+    }
+  }
+
+  return Buffer.from(await out.save());
+}
+
+// Apply the merge plan (if any) to an uploaded base PDF, returning the buffer to
+// persist. Never throws — on any failure it falls back to the base PDF so the
+// send still succeeds (just without the embedded cover).
+async function applyMergePlan(req) {
+  if (!req.body || !req.body.merge_plan) return req.file.buffer;
+  try {
+    const plan = JSON.parse(req.body.merge_plan);
+    const hasWork = plan && ((Array.isArray(plan.covers) && plan.covers.length > 0) || plan.agb);
+    const branchSlug = branchFromReq(req);
+    if (hasWork && branchSlug) {
+      return await mergeAngebotPdfServer(req.file.buffer, plan, branchSlug);
+    }
+  } catch (mergeErr) {
+    console.error('Server-side PDF merge failed, storing base PDF:', mergeErr);
+  }
+  return req.file.buffer;
+}
+
 app.post('/api/leads/:id/angebote/:angebotId/pdf', authenticateToken, upload.single('pdf'), async (req, res) => {
   try {
     const { id, angebotId } = req.params;
@@ -7163,8 +7239,9 @@ app.post('/api/leads/:id/angebote/:angebotId/pdf', authenticateToken, upload.sin
     const check = await pool.query('SELECT id FROM aufmass_lead_angebote WHERE id = $1 AND lead_id = $2', [angebotId, id]);
     if (check.rows.length === 0) return res.status(404).json({ error: 'Angebot not found' });
 
+    const pdfBuffer = await applyMergePlan(req);
     const pdfPath = path.join(LEAD_PDF_DIR, `${id}_${angebotId}.pdf`);
-    fs.writeFileSync(pdfPath, req.file.buffer);
+    fs.writeFileSync(pdfPath, pdfBuffer);
 
     // MODÜL B v3: mirror to form_pdf_snapshots so the Aufmaß dropdown sees it
     try {
@@ -7174,7 +7251,7 @@ app.post('/api/leads/:id/angebote/:angebotId/pdf', authenticateToken, upload.sin
         const snapDir = path.join(PDF_DIR, 'snapshots');
         if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
         const snapFilename = `form${formId}_angebot_${Date.now()}.pdf`;
-        fs.writeFileSync(path.join(snapDir, snapFilename), req.file.buffer);
+        fs.writeFileSync(path.join(snapDir, snapFilename), pdfBuffer);
 
         const old = await pool.query(
           `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'angebot'`,
@@ -7261,8 +7338,9 @@ app.post('/api/leads/:id/pdf', authenticateToken, upload.single('pdf'), async (r
       return res.status(404).json({ error: 'Lead not found' });
     }
 
+    const pdfBuffer = await applyMergePlan(req);
     const pdfPath = path.join(LEAD_PDF_DIR, `${id}.pdf`);
-    fs.writeFileSync(pdfPath, req.file.buffer);
+    fs.writeFileSync(pdfPath, pdfBuffer);
 
     // MODÜL B v3: also write a form snapshot (Angebot-PDF) so the Aufmaß
     // dropdown's "PDF Vorschau → Angebot-PDF" finds the right document.
@@ -7274,7 +7352,7 @@ app.post('/api/leads/:id/pdf', authenticateToken, upload.single('pdf'), async (r
         const snapDir = path.join(PDF_DIR, 'snapshots');
         if (!fs.existsSync(snapDir)) fs.mkdirSync(snapDir, { recursive: true });
         const snapFilename = `form${formId}_angebot_${Date.now()}.pdf`;
-        fs.writeFileSync(path.join(snapDir, snapFilename), req.file.buffer);
+        fs.writeFileSync(path.join(snapDir, snapFilename), pdfBuffer);
 
         const old = await pool.query(
           `SELECT file_path FROM aufmass_form_pdf_snapshots WHERE form_id = $1 AND document_type = 'angebot'`,
