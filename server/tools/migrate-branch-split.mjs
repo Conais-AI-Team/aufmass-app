@@ -310,40 +310,38 @@ async function branchBusinessSummary(client, slug) {
 }
 
 async function branchAssetSummary(client, slug) {
-  const [images, covers, terms] = await Promise.all([
-    client.query(
-      `SELECT image.id,
-              image.product_id,
-              image.image_path,
-              product.id IS NULL AS orphaned
-       FROM aufmass_product_images image
-       LEFT JOIN aufmass_lead_products product
-         ON product.id = image.product_id
-        AND product.branch_id = image.branch_slug
-       WHERE image.branch_slug = $1
-       ORDER BY image.id`,
-      [slug],
-    ),
-    client.query(
-      `SELECT cover.id,
-              cover.product_id,
-              cover.file_path,
-              product.id IS NULL AS orphaned
-       FROM aufmass_product_cover_pdfs cover
-       LEFT JOIN aufmass_lead_products product
-         ON product.id = cover.product_id
-        AND product.branch_id = cover.branch_slug
-       WHERE cover.branch_slug = $1
-       ORDER BY cover.id`,
-      [slug],
-    ),
-    client.query(
-      `SELECT branch_slug, agb_pdf_path
-       FROM aufmass_branch_terms
-       WHERE branch_slug = $1`,
-      [slug],
-    ),
-  ]);
+  const images = await client.query(
+    `SELECT image.id,
+            image.product_id,
+            image.image_path,
+            product.id IS NULL AS orphaned
+     FROM aufmass_product_images image
+     LEFT JOIN aufmass_lead_products product
+       ON product.id = image.product_id
+      AND product.branch_id = image.branch_slug
+     WHERE image.branch_slug = $1
+     ORDER BY image.id`,
+    [slug],
+  );
+  const covers = await client.query(
+    `SELECT cover.id,
+            cover.product_id,
+            cover.file_path,
+            product.id IS NULL AS orphaned
+     FROM aufmass_product_cover_pdfs cover
+     LEFT JOIN aufmass_lead_products product
+       ON product.id = cover.product_id
+      AND product.branch_id = cover.branch_slug
+     WHERE cover.branch_slug = $1
+     ORDER BY cover.id`,
+    [slug],
+  );
+  const terms = await client.query(
+    `SELECT branch_slug, agb_pdf_path
+     FROM aufmass_branch_terms
+     WHERE branch_slug = $1`,
+    [slug],
+  );
 
   const missingImages = images.rows.filter((row) => (
     !fs.existsSync(path.join(productImagesDirectory, row.image_path))
