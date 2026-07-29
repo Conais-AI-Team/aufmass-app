@@ -12,11 +12,11 @@ if (branches.length === 0) {
 }
 
 const pool = new pg.Pool({
-  host: process.env.PG_HOST,
+  host: process.env.PG_HOST || 'localhost',
   port: Number(process.env.PG_PORT || 5432),
-  database: process.env.PG_DATABASE,
-  user: process.env.PG_USER,
-  password: process.env.PG_PASSWORD,
+  database: process.env.PG_DATABASE || 'aylux_aufmass_db',
+  user: process.env.PG_USER || 'aylux_admin',
+  password: process.env.PG_PASSWORD || 'Aylux2026DB',
   connectionTimeoutMillis: 15000,
   idleTimeoutMillis: 30000,
 });
