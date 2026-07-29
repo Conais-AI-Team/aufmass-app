@@ -367,7 +367,11 @@ async function initializeTables() {
     // Backfill kunden_nummer for existing leads that don't have one
     const leadsWithoutKN = await pool.query(`SELECT id, branch_id, created_at FROM aufmass_leads WHERE kunden_nummer IS NULL ORDER BY created_at ASC`);
     if (leadsWithoutKN.rows.length > 0) {
-      const branchPrefixMap = { 'koblenz': 'KOB', 'ayluxtr': 'AYT', 'aylux': 'AYL', 'ayluxus': 'AYU', 'ayluxgkmu': 'GKM', 'ayluxmau': 'MAU', 'ayluxa': 'AYA' };
+      const branchPrefixMap = {
+        'koblenz': 'KOB', 'ayluxtr': 'AYT', 'aylux': 'AYL', 'ayluxus': 'AYU',
+        'ayluxgkmu': 'GKM', 'ayluxmau': 'MAU', 'ayluxa': 'AYA',
+        'ayluxd': 'DUS', 'ayluxsi': 'SIE'
+      };
       // Count per branch+year for numbering
       const counters = {};
       for (const lead of leadsWithoutKN.rows) {
@@ -771,11 +775,13 @@ async function seedLeadProductsFromConfig() {
   }
   const productConfig = JSON.parse(fs.readFileSync(configPath, 'utf-8'));
 
-  // Active branches: every distinct branch_id ever seen in any data table, plus a default.
-  // We don't have a branches table here so we union from existing user/lead data.
+  // Seed only active tenant records. Reading historical branch IDs from users/products
+  // kept retired tenants (for example Leipzig) alive indefinitely.
   const branchesResult = await pool.query(`
-    SELECT DISTINCT branch_id AS slug FROM aufmass_users WHERE branch_id IS NOT NULL
-    UNION SELECT DISTINCT branch_id FROM aufmass_lead_products WHERE branch_id IS NOT NULL
+    SELECT slug
+    FROM aufmass_branches
+    WHERE is_active = true
+    ORDER BY slug
   `);
   const branches = branchesResult.rows.map(r => r.slug).filter(Boolean);
   if (branches.length === 0) branches.push('koblenz');  // safety default
@@ -6501,7 +6507,8 @@ app.get('/api/leads', authenticateToken, async (req, res) => {
 // Single source of truth for branch prefix mapping (used by both number generators)
 const BRANCH_PREFIX_MAP = {
   'koblenz': 'KOB', 'ayluxtr': 'AYT', 'aylux': 'AYL', 'ayluxus': 'AYU',
-  'ayluxgkmu': 'GKM', 'ayluxmau': 'MAU', 'ayluxa': 'AYA'
+  'ayluxgkmu': 'GKM', 'ayluxmau': 'MAU', 'ayluxa': 'AYA',
+  'ayluxd': 'DUS', 'ayluxsi': 'SIE'
 };
 function branchPrefixFor(branchId) {
   if (!branchId) return 'ANG';
@@ -9125,7 +9132,9 @@ app.get('/api/admin/branch-stats', authenticateToken, requireAdmin, async (req, 
     const dateTo = to || '2099-12-31';
 
     // 1. All branches
-    const branchesResult = await pool.query('SELECT slug, name FROM aufmass_branches ORDER BY name');
+    const branchesResult = await pool.query(
+      'SELECT slug, name FROM aufmass_branches WHERE is_active = true ORDER BY name'
+    );
     const branches = branchesResult.rows;
 
     // 2. Aufmaß counts per branch
