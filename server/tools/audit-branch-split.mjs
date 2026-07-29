@@ -4,10 +4,13 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import pg from 'pg';
 
-const envPath = fileURLToPath(new URL('../.env', import.meta.url));
-const envResult = dotenv.config({ path: envPath });
-if (envResult.error) {
-  throw new Error(`Could not load server/.env: ${envResult.error.message}`);
+const LOCAL_PEER = process.argv.includes('--local-peer');
+if (!LOCAL_PEER) {
+  const envPath = fileURLToPath(new URL('../.env', import.meta.url));
+  const envResult = dotenv.config({ path: envPath });
+  if (envResult.error) {
+    throw new Error(`Could not load server/.env: ${envResult.error.message}`);
+  }
 }
 
 const branches = process.argv.slice(2).filter((arg) => !arg.startsWith('-'));
@@ -15,22 +18,29 @@ if (branches.length === 0) {
   branches.push('ayluxmau', 'ayluxgkmu');
 }
 
-const databaseConfig = {
-  host: (
-    process.env.PG_HOST
-    || process.env.DB_HOST
-    || process.env.DB_SERVER
-    || 'localhost'
-  ),
-  port: Number(process.env.PG_PORT || process.env.DB_PORT || 5432),
-  database: process.env.PG_DATABASE || process.env.DB_DATABASE,
-  user: process.env.PG_USER || process.env.DB_USER,
-  password: (
-    process.env.PG_PASSWORD
-    || process.env.DB_PASSWORD
-    || process.env.POSTGRES_PASSWORD
-  ),
-};
+const databaseConfig = LOCAL_PEER
+  ? {
+    host: '/var/run/postgresql',
+    port: 5432,
+    database: 'aylux_aufmass_db',
+    user: 'postgres',
+  }
+  : {
+    host: (
+      process.env.PG_HOST
+      || process.env.DB_HOST
+      || process.env.DB_SERVER
+      || 'localhost'
+    ),
+    port: Number(process.env.PG_PORT || process.env.DB_PORT || 5432),
+    database: process.env.PG_DATABASE || process.env.DB_DATABASE,
+    user: process.env.PG_USER || process.env.DB_USER,
+    password: (
+      process.env.PG_PASSWORD
+      || process.env.DB_PASSWORD
+      || process.env.POSTGRES_PASSWORD
+    ),
+  };
 
 const missingDatabaseSettings = Object.entries(databaseConfig)
   .filter(([, value]) => value === undefined || value === null || value === '')
@@ -77,9 +87,13 @@ function existingFileCount(paths) {
   }).length;
 }
 
-const configuredPdfDir = process.env.PDF_DIR
-  ? path.resolve(serverDirectory, process.env.PDF_DIR)
-  : '/var/www/aufmass-pdfs';
+const pdfDirectories = Array.from(new Set([
+  ...(process.env.PDF_DIR
+    ? [path.resolve(serverDirectory, process.env.PDF_DIR)]
+    : []),
+  '/var/www/aufmass-pdfs',
+  path.resolve(serverDirectory, 'aufmass-pdfs'),
+]));
 
 const database = await rowsOrEmpty(
   `SELECT current_database() AS database,
@@ -91,8 +105,9 @@ const database = await rowsOrEmpty(
 
 const report = {
   mode: 'read-only',
+  connectionMode: LOCAL_PEER ? 'local-peer' : 'environment',
   database: database[0] || null,
-  pdfDirectory: configuredPdfDir,
+  pdfDirectories,
   branches: [],
 };
 
@@ -358,9 +373,11 @@ for (const branch of branches) {
     [branch],
     `${branch} form ids`,
   );
-  const physicalAufmassPdfs = existingFileCount(
-    formIds.map(({ id }) => path.join(configuredPdfDir, `${id}.pdf`)),
-  );
+  const physicalAufmassPdfs = formIds.filter(({ id }) => (
+    pdfDirectories.some((directory) => (
+      fs.existsSync(path.join(directory, `${id}.pdf`))
+    ))
+  )).length;
 
   const imageRows = await rowsOrEmpty(
     `SELECT image_path
