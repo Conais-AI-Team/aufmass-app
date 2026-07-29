@@ -1182,11 +1182,11 @@ try {
         if (!clone.cloneSettings || settings.settings === 0) {
           await client.query(
             `INSERT INTO aufmass_branch_settings (branch_slug)
-             SELECT $1
+             SELECT $1::varchar
              WHERE NOT EXISTS (
                SELECT 1
                FROM aufmass_branch_settings
-               WHERE branch_slug = $1
+               WHERE branch_slug = $1::varchar
              )`,
             [clone.target],
           );
