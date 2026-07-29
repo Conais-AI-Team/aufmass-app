@@ -16,7 +16,12 @@ if (branches.length === 0) {
 }
 
 const databaseConfig = {
-  host: process.env.PG_HOST || process.env.DB_HOST || 'localhost',
+  host: (
+    process.env.PG_HOST
+    || process.env.DB_HOST
+    || process.env.DB_SERVER
+    || 'localhost'
+  ),
   port: Number(process.env.PG_PORT || process.env.DB_PORT || 5432),
   database: process.env.PG_DATABASE || process.env.DB_DATABASE,
   user: process.env.PG_USER || process.env.DB_USER,
