@@ -1,5 +1,6 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import pg from 'pg';
 
@@ -21,6 +22,10 @@ const pool = new pg.Pool({
 });
 
 const warnings = [];
+const serverDirectory = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+);
 
 async function rowsOrEmpty(sql, params, label) {
   try {
@@ -47,7 +52,7 @@ function existingFileCount(paths) {
 }
 
 const configuredPdfDir = process.env.PDF_DIR
-  ? path.resolve(process.env.PDF_DIR)
+  ? path.resolve(serverDirectory, process.env.PDF_DIR)
   : '/var/www/aufmass-pdfs';
 
 const database = await rowsOrEmpty(
@@ -340,7 +345,7 @@ for (const branch of branches) {
   );
   const physicalProductImages = existingFileCount(
     imageRows.map(({ image_path: imagePath }) => (
-      path.resolve('product-images', imagePath)
+      path.resolve(serverDirectory, 'product-images', imagePath)
     )),
   );
 
@@ -353,7 +358,13 @@ for (const branch of branches) {
   );
   const physicalCoverPdfs = existingFileCount(
     coverRows.map(({ file_path: filePath }) => (
-      path.resolve('aufmass-pdfs', 'branch-uploads', branch, filePath)
+      path.resolve(
+        serverDirectory,
+        'aufmass-pdfs',
+        'branch-uploads',
+        branch,
+        filePath,
+      )
     )),
   );
 
@@ -376,6 +387,7 @@ for (const branch of branches) {
   const physicalAgbPdf = branchTerms[0]?.agb_pdf_path
     ? fs.existsSync(
       path.resolve(
+        serverDirectory,
         'aufmass-pdfs',
         'branch-uploads',
         branch,
