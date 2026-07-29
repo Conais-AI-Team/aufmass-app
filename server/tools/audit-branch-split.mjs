@@ -4,19 +4,40 @@ import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import pg from 'pg';
 
-dotenv.config({ path: new URL('../.env', import.meta.url) });
+const envPath = fileURLToPath(new URL('../.env', import.meta.url));
+const envResult = dotenv.config({ path: envPath });
+if (envResult.error) {
+  throw new Error(`Could not load server/.env: ${envResult.error.message}`);
+}
 
 const branches = process.argv.slice(2).filter((arg) => !arg.startsWith('-'));
 if (branches.length === 0) {
   branches.push('ayluxmau', 'ayluxgkmu');
 }
 
+const databaseConfig = {
+  host: process.env.PG_HOST || process.env.DB_HOST || 'localhost',
+  port: Number(process.env.PG_PORT || process.env.DB_PORT || 5432),
+  database: process.env.PG_DATABASE || process.env.DB_DATABASE,
+  user: process.env.PG_USER || process.env.DB_USER,
+  password: (
+    process.env.PG_PASSWORD
+    || process.env.DB_PASSWORD
+    || process.env.POSTGRES_PASSWORD
+  ),
+};
+
+const missingDatabaseSettings = Object.entries(databaseConfig)
+  .filter(([, value]) => value === undefined || value === null || value === '')
+  .map(([key]) => key);
+if (missingDatabaseSettings.length > 0) {
+  throw new Error(
+    `Missing database settings in server/.env: ${missingDatabaseSettings.join(', ')}`,
+  );
+}
+
 const pool = new pg.Pool({
-  host: process.env.PG_HOST || 'localhost',
-  port: Number(process.env.PG_PORT || 5432),
-  database: process.env.PG_DATABASE || 'aylux_aufmass_db',
-  user: process.env.PG_USER || 'aylux_admin',
-  password: process.env.PG_PASSWORD || 'Aylux2026DB',
+  ...databaseConfig,
   connectionTimeoutMillis: 15000,
   idleTimeoutMillis: 30000,
 });
