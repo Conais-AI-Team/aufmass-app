@@ -634,7 +634,9 @@ async function cloneProductAssets(
         target,
         cover.target_id,
         newFilename,
-        cover.selected_pages,
+        cover.selected_pages == null
+          ? null
+          : JSON.stringify(cover.selected_pages),
         cover.page_count,
         cover.uploaded_at,
       ],
