@@ -21,6 +21,31 @@ const branchConfig: Record<string, BranchInfo> = {
     slug: 'berlin',
     name: 'Berlin',
     title: 'AYLUX Berlin - Aufmaß System'
+  },
+  ayluxd: {
+    slug: 'ayluxd',
+    name: 'Düsseldorf',
+    title: 'AYLUX Düsseldorf - Aufmaß System'
+  },
+  ayluxsi: {
+    slug: 'ayluxsi',
+    name: 'Siegen',
+    title: 'AYLUX Siegen - Aufmaß System'
+  },
+  ayluxmu: {
+    slug: 'ayluxmu',
+    name: 'München',
+    title: 'AYLUX München - Aufmaß System'
+  },
+  ayluxgk: {
+    slug: 'ayluxgk',
+    name: 'Gelsenkirchen',
+    title: 'AYLUX Gelsenkirchen - Aufmaß System'
+  },
+  ayluxms: {
+    slug: 'ayluxms',
+    name: 'Münster',
+    title: 'AYLUX Münster - Aufmaß System'
   }
 };
 
