@@ -320,10 +320,10 @@ section(2, copy.sections.structure);
 for (const text of copy.structureParagraphs) {
   ensureSpace(15);
   doc.setFillColor(...COLOR.greenSoft);
-  doc.circle(margin + 2.2, y - 1.2, 1.2, 'F');
+  doc.circle(margin + 4, y - 1.1, 1.15, 'F');
   paragraph(text, {
-    x: margin + 7,
-    width: contentWidth - 7,
+    x: margin + 11,
+    width: contentWidth - 11,
     size: 8.2,
     after: 2.5,
   });
@@ -432,8 +432,8 @@ const drawRosterCard = (branch, x, top, height) => {
   setFont('normal', 6.5, COLOR.green);
   doc.text(branch.url, x + 4, top + 9.5);
   setFont('bold', 6.6, COLOR.grey);
-  doc.text(`${copy.labels.users}:`, x + 4, top + 16);
-  let userY = top + 20;
+  doc.text(`${copy.labels.users}:`, x + 4, top + 15);
+  let userY = top + 19;
   const users = branch.users || [];
   if (users.length === 0) {
     setFont('normal', 6.6, COLOR.grey);
