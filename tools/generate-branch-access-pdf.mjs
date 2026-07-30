@@ -32,7 +32,7 @@ const COPY = {
     confidentialText:
       'Geçici parolalar ilk girişten sonra değiştirilmelidir. Belgeyi yalnızca yetkili kişilerle paylaşın.',
     stats: [
-      ['5', 'Yönetici erişimi'],
+      ['0', 'Ana yönetici hesabı'],
       ['18', 'Aktif şube'],
       ['4', 'Doğrulanmış HTTPS alanı'],
     ],
@@ -48,6 +48,8 @@ const COPY = {
       user: 'Kullanıcı',
       password: 'Geçici parola',
       users: 'Kullanıcılar',
+      mainUser: 'Ana hesap',
+      otherUsers: 'Diğer kullanıcılar',
       branch: 'Şube',
       data: 'Mevcut veri',
       status: 'Durum',
@@ -55,7 +57,7 @@ const COPY = {
       inactive: 'Pasif',
     },
     existingUser:
-      'Gelsenkirchen şubesindeki h.tunc@aylux.de hesabı mevcut parolasıyla kullanılmaya devam eder.',
+      'Ana hesap dışındaki kullanıcılar Bölüm 5’te parolasız listelenmiştir. Gelsenkirchen şubesindeki h.tunc@aylux.de hesabı mevcut parolasıyla kullanılmaya devam eder.',
     structureParagraphs: [
       'München, Gelsenkirchen, Münster ve Siegen artık kendi bağımsız domainleri üzerinden çalışır: ayluxmu.cnsform.com, ayluxgk.cnsform.com, ayluxms.cnsform.com ve ayluxsi.cnsform.com.',
       'Düsseldorf ayluxd.cnsform.com adresini kullanmaya devam eder. Veritabanındaki yanlış “Dortmund” adı “AYLUX Düsseldorf GmbH” olarak düzeltilmiştir.',
@@ -94,7 +96,7 @@ const COPY = {
     confidentialText:
       'Temporäre Passwörter sind nach der ersten Anmeldung zu ändern. Dieses Dokument darf nur an berechtigte Personen weitergegeben werden.',
     stats: [
-      ['5', 'Administrator-Zugänge'],
+      ['0', 'Hauptadministrator-Konten'],
       ['18', 'Aktive Filialen'],
       ['4', 'Geprüfte HTTPS-Domains'],
     ],
@@ -110,6 +112,8 @@ const COPY = {
       user: 'Benutzer',
       password: 'Temporäres Passwort',
       users: 'Benutzer',
+      mainUser: 'Hauptkonto',
+      otherUsers: 'Weitere Benutzer',
       branch: 'Filiale',
       data: 'Datenbestand',
       status: 'Status',
@@ -117,7 +121,7 @@ const COPY = {
       inactive: 'Inaktiv',
     },
     existingUser:
-      'Das Konto h.tunc@aylux.de in Gelsenkirchen wird weiterhin mit dem bestehenden Passwort verwendet.',
+      'Benutzer außerhalb der Hauptkonten werden in Abschnitt 5 ohne Passwort aufgeführt. Das Konto h.tunc@aylux.de in Gelsenkirchen verwendet weiterhin das bestehende Passwort.',
     structureParagraphs: [
       'München, Gelsenkirchen, Münster und Siegen arbeiten über eigene Domains: ayluxmu.cnsform.com, ayluxgk.cnsform.com, ayluxms.cnsform.com und ayluxsi.cnsform.com.',
       'Düsseldorf verwendet weiterhin ayluxd.cnsform.com. Die falsche Datenbankbezeichnung „Dortmund“ wurde in „AYLUX Düsseldorf GmbH“ korrigiert.',
@@ -151,6 +155,31 @@ const COPY = {
   },
 };
 const copy = COPY[language];
+const reportCredentials = migration.credentials || [];
+const activeRoster = (migration.roster || []).filter((branch) => (
+  branch.isActive
+));
+const credentialByBranch = new Map(reportCredentials.map((credential) => (
+  [credential.branchSlug, credential]
+)));
+const BRANCH_DISPLAY_NAMES = {
+  ayluxa: 'AYLUX Andernach GmbH',
+  ayluxb: 'AYLUX Berlin GmbH',
+  ayluxbr: 'AYLUX Bremen GmbH',
+  ayluxd: 'AYLUX Düsseldorf GmbH',
+  ayluxf: 'AYLUX Frankfurt GmbH',
+  ayluxgk: 'AYLUX Gelsenkirchen GmbH',
+  ayluxhh: 'AYLUX Hamburg GmbH',
+  ayluxha: 'AYLUX Hannover GmbH',
+  ayluxma: 'AYLUX Mannheim GmbH',
+  ayluxmu: 'AYLUX München GmbH',
+  ayluxms: 'AYLUX Münster GmbH',
+  ayluxsi: 'AYLUX Siegen GmbH',
+  ayluxs: 'AYLUX Stuttgart GmbH',
+  ayluxtr: 'AYLUX Trier',
+  ayluxus: 'AYLUX Ulm GmbH',
+  aylux: 'AYLUX Sonnenschutzsysteme GmbH',
+};
 
 const findFont = (candidates) => candidates.find((candidate) => (
   fs.existsSync(candidate)
@@ -271,7 +300,10 @@ y += 27;
 
 const tileGap = 4;
 const tileWidth = (contentWidth - (2 * tileGap)) / 3;
-copy.stats.forEach(([value, label], index) => {
+const reportStats = copy.stats.map(([value, label]) => [value, label]);
+reportStats[0][0] = String(reportCredentials.length);
+reportStats[1][0] = String(activeRoster.length);
+reportStats.forEach(([value, label], index) => {
   const x = margin + (index * (tileWidth + tileGap));
   doc.setFillColor(...COLOR.greenSoft);
   doc.setDrawColor(...COLOR.line);
@@ -285,34 +317,63 @@ copy.stats.forEach(([value, label], index) => {
 y += 27;
 
 section(1, copy.sections.access);
-for (const credential of migration.credentials || []) {
-  ensureSpace(30);
+const credentialGap = 5;
+const credentialCardWidth = (contentWidth - credentialGap) / 2;
+const credentialCardHeight = 27.5;
+const drawCredentialCard = (credential, x, top) => {
   doc.setFillColor(...COLOR.cream);
   doc.setDrawColor(...COLOR.line);
-  doc.roundedRect(margin, y, contentWidth, 25, 2, 2, 'FD');
-  doc.setFillColor(...COLOR.green);
-  doc.roundedRect(margin, y, 45, 25, 2, 2, 'F');
-  doc.rect(margin + 42, y, 3, 25, 'F');
-  setFont('bold', 9.2, COLOR.white);
-  const branchLines = doc.splitTextToSize(credential.branchName, 36);
-  doc.text(branchLines, margin + 4, y + 8);
-  setFont('normal', 6.7, [222, 239, 225]);
-  doc.text(credential.branchSlug, margin + 4, y + 20);
-
-  const detailsX = margin + 50;
-  labelValue(copy.labels.url, credential.url, detailsX, y + 6.5, 31);
-  labelValue(copy.labels.user, credential.email, detailsX, y + 13, 31);
-  setFont('bold', 7.4, COLOR.grey);
-  doc.text(copy.labels.password, detailsX, y + 20);
-  doc.setFillColor(...COLOR.amberSoft);
-  doc.roundedRect(detailsX + 31, y + 15.4, 53, 7.2, 1.2, 1.2, 'F');
-  setFont('bold', 8.6, COLOR.red);
-  doc.text(
-    credential.temporaryPassword,
-    detailsX + 34,
-    y + 20.4,
+  doc.roundedRect(
+    x,
+    top,
+    credentialCardWidth,
+    credentialCardHeight,
+    2,
+    2,
+    'FD',
   );
-  y += 29;
+  doc.setFillColor(...COLOR.green);
+  doc.roundedRect(x, top, credentialCardWidth, 8, 2, 2, 'F');
+  doc.rect(x, top + 5, credentialCardWidth, 3, 'F');
+  setFont('bold', 7.7, COLOR.white);
+  doc.text(credential.branchName, x + 4, top + 5.2);
+  setFont('normal', 6.2, [222, 239, 225]);
+  doc.text(credential.branchSlug, x + credentialCardWidth - 4, top + 5.2, {
+    align: 'right',
+  });
+
+  setFont('bold', 6.4, COLOR.grey);
+  doc.text(copy.labels.url, x + 4, top + 12.6);
+  doc.text(copy.labels.user, x + 4, top + 17.9);
+  doc.text(copy.labels.password, x + 4, top + 23.7);
+  setFont('normal', 6.8, COLOR.dark);
+  doc.text(credential.url, x + 19, top + 12.6);
+  doc.text(credential.email, x + 19, top + 17.9);
+  doc.setFillColor(...COLOR.amberSoft);
+  doc.roundedRect(
+    x + 34,
+    top + 19.7,
+    credentialCardWidth - 38,
+    6.2,
+    1.2,
+    1.2,
+    'F',
+  );
+  setFont('bold', 7.4, COLOR.red);
+  doc.text(credential.temporaryPassword, x + 37, top + 24.1);
+};
+
+for (let index = 0; index < reportCredentials.length; index += 2) {
+  ensureSpace(credentialCardHeight + 3);
+  drawCredentialCard(reportCredentials[index], margin, y);
+  if (reportCredentials[index + 1]) {
+    drawCredentialCard(
+      reportCredentials[index + 1],
+      margin + credentialCardWidth + credentialGap,
+      y,
+    );
+  }
+  y += credentialCardHeight + 3;
 }
 paragraph(copy.existingUser, { size: 7.8, color: COLOR.grey, after: 4 });
 
@@ -401,24 +462,59 @@ for (let index = 0; index < copy.changes.length; index += 1) {
 }
 y += 4;
 
-addPage();
 section(5, copy.sections.roster);
 
-const activeRoster = migration.roster.filter((branch) => branch.isActive);
 const cardWidth = (contentWidth - 5) / 2;
-const userLinesFor = (branch) => {
-  setFont('normal', 6.6, COLOR.dark);
+const userText = (user) => (
+  `${user.email} · ${user.name || ''} · ${user.role || ''}`
+);
+const rosterBlocksFor = (branch) => {
   const users = branch.users || [];
-  if (users.length === 0) return [['—']];
-  return users.map((user) => doc.splitTextToSize(
-    `${user.email} · ${user.name} · ${user.role}`,
-    cardWidth - 10,
+  const credential = credentialByBranch.get(branch.slug);
+  if (!credential) {
+    return [{
+      label: copy.labels.users,
+      users: users.length > 0 ? users : [{ email: '—', name: '', role: '' }],
+    }];
+  }
+  const mainUser = users.find((user) => (
+    user.email.toLowerCase() === credential.email.toLowerCase()
+  )) || {
+    email: credential.email,
+    name: '',
+    role: 'admin',
+  };
+  const otherUsers = users.filter((user) => (
+    user.email.toLowerCase() !== credential.email.toLowerCase()
   ));
+  const blocks = [{
+    label: copy.labels.mainUser,
+    users: [mainUser],
+  }];
+  if (otherUsers.length > 0) {
+    blocks.push({
+      label: copy.labels.otherUsers,
+      users: otherUsers,
+    });
+  }
+  return blocks;
+};
+const linesForUser = (user) => {
+  setFont('normal', 6.6, COLOR.dark);
+  return doc.splitTextToSize(
+    userText(user),
+    cardWidth - 10,
+  );
 };
 const cardHeightFor = (branch) => {
-  const userLines = userLinesFor(branch);
-  const lineCount = userLines.reduce((sum, lines) => sum + lines.length, 0);
-  return 17 + (lineCount * 3.6);
+  const blocks = rosterBlocksFor(branch);
+  const contentHeight = blocks.reduce((total, block) => {
+    const lineCount = block.users.reduce((sum, user) => (
+      sum + linesForUser(user).length
+    ), 0);
+    return total + 4 + (lineCount * 3.6) + 1;
+  }, 0);
+  return 15 + contentHeight + 2;
 };
 const drawRosterCard = (branch, x, top, height) => {
   doc.setFillColor(...COLOR.cream);
@@ -428,26 +524,26 @@ const drawRosterCard = (branch, x, top, height) => {
   doc.roundedRect(x, top, cardWidth, 12, 1.8, 1.8, 'F');
   doc.rect(x, top + 9, cardWidth, 3, 'F');
   setFont('bold', 8.2, COLOR.greenDark);
-  doc.text(branch.name, x + 4, top + 5.2);
+  doc.text(
+    BRANCH_DISPLAY_NAMES[branch.slug] || branch.name,
+    x + 4,
+    top + 5.2,
+  );
   setFont('normal', 6.5, COLOR.green);
   doc.text(branch.url, x + 4, top + 9.5);
-  setFont('bold', 6.6, COLOR.grey);
-  doc.text(`${copy.labels.users}:`, x + 4, top + 15);
-  let userY = top + 19;
-  const users = branch.users || [];
-  if (users.length === 0) {
-    setFont('normal', 6.6, COLOR.grey);
-    doc.text('—', x + 4, userY);
-  } else {
-    for (const user of users) {
+  let cursorY = top + 15;
+  const blocks = rosterBlocksFor(branch);
+  for (const block of blocks) {
+    setFont('bold', 6.6, COLOR.grey);
+    doc.text(`${block.label}:`, x + 4, cursorY);
+    cursorY += 4;
+    for (const user of block.users) {
       setFont('normal', 6.6, COLOR.dark);
-      const lines = doc.splitTextToSize(
-        `${user.email} · ${user.name} · ${user.role}`,
-        cardWidth - 8,
-      );
-      doc.text(lines, x + 4, userY);
-      userY += lines.length * 3.6;
+      const lines = linesForUser(user);
+      doc.text(lines, x + 4, cursorY);
+      cursorY += lines.length * 3.6;
     }
+    cursorY += 1;
   }
 };
 
