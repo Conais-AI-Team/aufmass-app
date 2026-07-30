@@ -179,6 +179,7 @@ const BRANCH_DISPLAY_NAMES = {
   ayluxtr: 'AYLUX Trier',
   ayluxus: 'AYLUX Ulm GmbH',
   aylux: 'AYLUX Sonnenschutzsysteme GmbH',
+  koblenz: 'AYLUX Koblenz',
 };
 
 const findFont = (candidates) => candidates.find((candidate) => (
